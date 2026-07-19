@@ -91,6 +91,51 @@ geometry mirrors the PostGIS functions for instant feedback
 (`web/src/lib/envelope.js`); PostGIS stays authoritative, and Turf.js is the
 chosen client library for real parcel polygons when those arrive.
 
+### Deploy the frontend to GitHub Pages
+
+The React app is static; GitHub Pages hosts it while Supabase remains the
+database and API. The workflow in `.github/workflows/pages.yml` deploys the
+`web/dist` build whenever `main` is updated.
+
+One-time repository setup:
+
+1. Open **Settings → Secrets and variables → Actions** and add repository
+   secrets named `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` using the
+   same public API values as `web/.env`.
+2. Open **Settings → Pages → Build and deployment** and select **GitHub
+   Actions** as the source.
+3. Push to `main`, or open **Actions → Deploy web app to GitHub Pages** and
+   choose **Run workflow**.
+
+Never add `DATABASE_URL`, `SUPABASE_DB_URL`, or a Supabase service-role key to
+the frontend build. Only the public project URL and anon key belong in Vite.
+The Pages deployment will fail early if either required value is missing.
+
+### Parcel zoning verification
+
+Found parcels do **not** use the zoning dropdown. Migration
+`0008_zoning_spatial_lookup.sql` stores municipal zoning polygons and exposes
+`resolve_parcel_zoning(parcel_id)`, which intersects the parcel with the base
+zoning layer, selects a district only when it covers at least 80% of the lot,
+and returns explicit `boundary_conflict`, `unmapped`, `no_layer`, or
+`rules_missing` statuses otherwise. The React app blocks the calculation for
+all non-matched statuses.
+
+Load a professionally georeferenced municipal GeoJSON layer with:
+
+```bash
+python scripts/import_zoning.py union-city-nj zoning.geojson \
+  --source-url https://www.ucnj.com/_Content/pdf/ordinances/ATTACHMENT-A-Zoning-Map-July-2019.pdf \
+  --source-date 2019-07-01
+```
+
+Union City's official July 2019 zoning map is currently published as a static
+PDF, not a public feature service. Do not infer zoning from MOD-IV property use
+or parcel class. Obtain GIS polygons from the municipality or professionally
+digitize and QA the official map before importing. District polygons may be
+loaded before all rule configs exist; those parcels safely return
+`rules_missing` until the corresponding district rules are configured.
+
 ## Adding a new municipality
 
 1. Copy an existing file in `config/towns/` to `config/towns/<slug>.json`.

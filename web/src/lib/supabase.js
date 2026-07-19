@@ -26,3 +26,42 @@ export async function fetchMunicipalities() {
   if (error) throw error;
   return data;
 }
+
+/** Address search against imported NJGIN parcels (RPC, read-only). */
+export async function searchParcels(muniSlug, query, limit = 15) {
+  const { data, error } = await supabase.rpc("search_parcels", {
+    p_muni_slug: muniSlug,
+    p_query: query,
+    p_limit: limit,
+  });
+  if (error) throw error;
+  return data;
+}
+
+/**
+ * Authoritative zoning check for a parcel polygon. The database intersects
+ * the parcel with the municipality's zoning layer and returns the dominant
+ * district or an explicit no-layer/conflict/unmapped status. The UI must not
+ * fall back to a manually selected district for a found parcel.
+ */
+export async function resolveParcelZoning(parcelId) {
+  const { data, error } = await supabase.rpc("resolve_parcel_zoning", {
+    p_parcel_id: parcelId,
+  });
+  if (error) throw error;
+  return data?.[0] ?? null;
+}
+
+/**
+ * One parcel + its buildable envelope, computed by PostGIS on the real
+ * polygon. insetFt should be the LARGEST applicable setback (conservative
+ * uniform inset — per-edge offsetting is the rules engine's job).
+ */
+export async function fetchParcelEnvelope(parcelId, insetFt) {
+  const { data, error } = await supabase.rpc("parcel_envelope", {
+    p_parcel_id: parcelId,
+    p_inset_ft: insetFt,
+  });
+  if (error) throw error;
+  return data?.[0] ?? null;
+}
