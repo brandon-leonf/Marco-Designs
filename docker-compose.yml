@@ -1,0 +1,26 @@
+# Local Postgres + PostGIS, same image family CI uses, so "works on my machine"
+# and "works in CI" mean the same thing.
+#
+#   docker compose up -d
+#   python scripts/migrate.py
+#   python scripts/load_town.py --all
+#
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: demarco
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

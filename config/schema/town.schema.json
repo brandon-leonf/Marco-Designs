@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://marcodesign/demarco/town.schema.json",
+  "title": "Town Zoning Config",
+  "description": "The common schema every municipality loads into. The rules engine reads only these fields and contains zero town-specific logic. Proprietary cost rates live in a SEPARATE rates file, not here.",
+  "type": "object",
+  "required": ["municipality", "zoning_districts"],
+  "additionalProperties": false,
+  "properties": {
+    "_comment": { "type": "string" },
+    "municipality": {
+      "type": "object",
+      "required": ["name", "state", "slug"],
+      "additionalProperties": false,
+      "properties": {
+        "name":         { "type": "string", "minLength": 1 },
+        "state":        { "type": "string", "minLength": 2, "maxLength": 2 },
+        "county":       { "type": "string" },
+        "slug":         { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+        "last_updated": { "type": "string", "format": "date" },
+        "source_url":   { "type": "string" },
+        "overlays":     { "type": "object" }
+      }
+    },
+    "zoning_districts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["code", "setbacks_ft", "max_coverage_pct", "max_height"],
+        "additionalProperties": false,
+        "properties": {
+          "code":           { "type": "string", "minLength": 1 },
+          "name":           { "type": "string" },
+          "permitted_uses": { "type": "array", "items": { "type": "string" } },
+          "notes":          { "type": "string" },
+          "lot_minimums": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "area_sqft": { "type": "number", "minimum": 0 },
+              "width_ft":  { "type": "number", "minimum": 0 },
+              "depth_ft":  { "type": "number", "minimum": 0 }
+            }
+          },
+          "setbacks_ft": {
+            "type": "object",
+            "required": ["front_yard_min", "side_yard_one_min", "rear_yard_min"],
+            "additionalProperties": false,
+            "properties": {
+              "front_yard_min":             { "type": "number", "minimum": 0 },
+              "front_yard_prevailing_rule": { "type": "boolean" },
+              "side_yard_one_min":          { "type": "number", "minimum": 0 },
+              "side_yard_total_min":        { "type": "number", "minimum": 0 },
+              "rear_yard_min":              { "type": "number", "minimum": 0 }
+            }
+          },
+          "max_height": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "stories": { "type": "integer", "minimum": 1 },
+              "feet":    { "type": "number", "minimum": 0 }
+            }
+          },
+          "max_coverage_pct": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "building":       { "type": "number", "minimum": 0, "maximum": 100 },
+              "lot_impervious": { "type": "number", "minimum": 0, "maximum": 100 }
+            }
+          },
+          "max_far":     { "type": ["number", "null"], "minimum": 0 },
+          "extra_rules": { "type": "object" }
+        }
+      }
+    }
+  }
+}

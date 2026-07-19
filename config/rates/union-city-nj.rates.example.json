@@ -1,0 +1,21 @@
+{
+  "_comment": "TEMPLATE ONLY. Copy to union-city-nj.rates.json and fill in Marco Design's real figures. The real .rates.json files are git-ignored and never committed (kickoff section 9: rate card is proprietary). For a 'verified' town, set baseline+factor to null and hard-code each tier's rate_per_sqft.",
+  "slug": "union-city-nj",
+  "provenance": "estimated",
+  "regional_baseline_per_sqft": 0.00,
+  "local_cost_factor": 1.00,
+  "tiers": {
+    "builder_grade": {
+      "rate_per_sqft": 0.00,
+      "formula_reference": "regional_baseline * local_factor * 0.75"
+    },
+    "mid_level": {
+      "rate_per_sqft": 0.00,
+      "formula_reference": "regional_baseline * local_factor"
+    },
+    "high_end": {
+      "rate_per_sqft": 0.00,
+      "formula_reference": "regional_baseline * local_factor * 1.40"
+    }
+  }
+}

@@ -1,0 +1,26 @@
+# Proprietary rate cards — only the .example templates are committed (README §rates)
+config/rates/*.rates.json
+!config/rates/*.rates.example.json
+
+# Environment / secrets
+.env
+.env.local
+web/.env
+web/.env.local
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / React app
+web/node_modules/
+web/dist/
+
+# OS / editor
+.DS_Store
+
+# Supabase CLI local state
+supabase/.temp/
+**/supabase/.temp/

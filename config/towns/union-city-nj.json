@@ -1,0 +1,41 @@
+{
+  "municipality": {
+    "name": "Union City",
+    "state": "NJ",
+    "county": "Hudson",
+    "slug": "union-city-nj",
+    "last_updated": "2026-07-16",
+    "source_url": "https://ecode360.com/UN0965",
+    "overlays": {}
+  },
+  "zoning_districts": [
+    {
+      "code": "R",
+      "name": "Residential District",
+      "permitted_uses": ["one_family", "two_family"],
+      "notes": "Three-family dwellings eliminated as a permitted use under Ord. No. 2021-8 to manage density.",
+      "lot_minimums": {
+        "area_sqft": 2500,
+        "width_ft": 25,
+        "depth_ft": 100
+      },
+      "setbacks_ft": {
+        "front_yard_min": 7.0,
+        "front_yard_prevailing_rule": true,
+        "side_yard_one_min": 2.0,
+        "side_yard_total_min": 5.0,
+        "rear_yard_min": 20.0
+      },
+      "max_height": {
+        "stories": 3,
+        "feet": 38.0
+      },
+      "max_coverage_pct": {
+        "building": 65.0,
+        "lot_impervious": 90.0
+      },
+      "max_far": null,
+      "extra_rules": {}
+    }
+  ]
+}

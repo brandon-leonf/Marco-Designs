@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://marcodesign/demarco/rates.schema.json",
+  "title": "Town Rate Card",
+  "description": "Proprietary Marco Design build-cost rates for one town. Kept in a separate, git-ignored file so zoning configs can be public while rate figures stay private (see kickoff section 9). Loader merges this with the matching town config by slug.",
+  "type": "object",
+  "required": ["slug", "provenance", "tiers"],
+  "additionalProperties": false,
+  "properties": {
+    "_comment":                   { "type": "string" },
+    "slug":                       { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+    "provenance":                 { "enum": ["verified", "estimated"] },
+    "regional_baseline_per_sqft": { "type": ["number", "null"], "minimum": 0 },
+    "local_cost_factor":          { "type": ["number", "null"], "minimum": 0 },
+    "tiers": {
+      "type": "object",
+      "required": ["builder_grade", "mid_level", "high_end"],
+      "additionalProperties": false,
+      "properties": {
+        "builder_grade": { "$ref": "#/$defs/tier" },
+        "mid_level":     { "$ref": "#/$defs/tier" },
+        "high_end":      { "$ref": "#/$defs/tier" }
+      }
+    }
+  },
+  "$defs": {
+    "tier": {
+      "type": "object",
+      "required": ["rate_per_sqft"],
+      "additionalProperties": false,
+      "properties": {
+        "rate_per_sqft":     { "type": "number", "minimum": 0 },
+        "formula_reference": { "type": "string" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "comment": "estimated models must carry their derivation; verified must not.",
+      "if":   { "properties": { "provenance": { "const": "estimated" } } },
+      "then": { "required": ["regional_baseline_per_sqft", "local_cost_factor"],
+                "properties": {
+                  "regional_baseline_per_sqft": { "type": "number" },
+                  "local_cost_factor":          { "type": "number" } } },
+      "else": { "properties": {
+                  "regional_baseline_per_sqft": { "const": null },
+                  "local_cost_factor":          { "const": null } } }
+    }
+  ]
+}

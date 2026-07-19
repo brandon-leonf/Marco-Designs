@@ -1,0 +1,103 @@
+:root {
+  --bg: #f6f5f2;
+  --card: #ffffff;
+  --ink: #1e222a;
+  --muted: #6b7280;
+  --line: #e3e1db;
+  --accent: #2f6f4f;
+  --accent-soft: #e3efe8;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1 { margin: 0; letter-spacing: -0.02em; }
+.sub { margin: 0.15rem 0 1.5rem; color: var(--muted); }
+h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+.card.error { border-color: #d9534f; color: #a94442; }
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+@media (max-width: 760px) {
+  .grid { grid-template-columns: 1fr; }
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+select, input {
+  font: inherit;
+  color: var(--ink);
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  min-width: 8.5rem;
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+th, td {
+  text-align: left;
+  padding: 0.45rem 0.35rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+td:last-child, th:last-child { text-align: right; white-space: nowrap; }
+tr.total td { font-weight: 650; border-bottom: none; }
+
+.fine { font-size: 0.78rem; color: var(--muted); margin: 0.6rem 0 0; }
+.fine a { color: inherit; }
+
+.badge {
+  font-size: 0.68rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 99px;
+  vertical-align: middle;
+  margin-left: 0.4rem;
+}
+.badge.verified { background: var(--accent-soft); color: var(--accent); }
+.badge.estimated { background: #fdf3e0; color: #9a6a1b; }
+
+.diagram {
+  display: block;
+  max-width: 280px;
+  margin: 0 auto 0.9rem;
+}
+.diagram .lot { fill: #f0ede6; stroke: #b9b4a8; stroke-width: 1.5; }
+.diagram .envelope { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.diagram .dim { font-size: 9px; fill: var(--muted); }
