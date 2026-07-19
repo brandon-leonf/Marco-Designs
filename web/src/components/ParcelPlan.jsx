@@ -30,7 +30,10 @@ export default function ParcelPlan({ parcelGeojson, envelopeGeojson }) {
   if (!parcel.length) return null;
   const envelope = polys(envelopeGeojson);
 
-  const pts = parcel.flat(2);
+  const pts = parcel
+    .flat(2)
+    .filter((point) => Array.isArray(point) && Number.isFinite(point[0]) && Number.isFinite(point[1]));
+  if (!pts.length) return null;
   const xs = pts.map((p) => p[0]);
   const ys = pts.map((p) => p[1]);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -38,7 +41,7 @@ export default function ParcelPlan({ parcelGeojson, envelopeGeojson }) {
   const wFt = maxX - minX, dFt = maxY - minY;
 
   const maxDim = 260, pad = 14;
-  const s = maxDim / Math.max(wFt, dFt);
+  const s = maxDim / Math.max(wFt, dFt, 1);
   const w = wFt * s, d = dFt * s;
 
   return (
@@ -47,6 +50,7 @@ export default function ParcelPlan({ parcelGeojson, envelopeGeojson }) {
       className="diagram"
       role="img"
       aria-label="Parcel with buildable envelope"
+      preserveAspectRatio="xMidYMid meet"
     >
       <path d={toPath(parcel, minX, maxY, s)} className="lot" fillRule="evenodd" />
       {envelope.length > 0 && (

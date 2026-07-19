@@ -84,8 +84,22 @@ export default function App() {
 
     async function verifyAndLoadParcel() {
       try {
-        const check = await resolveParcelZoning(parcelPick.parcel_id);
+        // The public parcel boundary is useful even when the municipal zoning
+        // layer is missing or inconclusive. Load it independently with a
+        // zero-foot inset, then replace it with the verified envelope only
+        // after a district match supplies authoritative setbacks.
+        const [check, boundary] = await Promise.all([
+          resolveParcelZoning(parcelPick.parcel_id),
+          fetchParcelEnvelope(parcelPick.parcel_id, 0),
+        ]);
         if (stale) return;
+
+        setParcel({
+          ...boundary,
+          envelope_geojson: null,
+          envelope_area_sqft: null,
+        });
+
         if (!check) {
           setZoningCheck({ status: "unmapped" });
           return;
@@ -586,13 +600,25 @@ function PropertyInput({
         <h2>{parcel?.address ?? parcelPick?.address ?? "Union City lot"}</h2>
         <p className="preview-note">Diagram is for reference only and is not a survey.</p>
         {parcel ? (
-          <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
+          <>
+            <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
+            {!parcel.envelope_geojson && (
+              <p className="parcel-preview-status">
+                Showing the actual NJGIN parcel boundary. The buildable envelope will appear after municipal zoning
+                geometry and setbacks are verified.
+              </p>
+            )}
+          </>
+        ) : parcelPick ? (
+          <div className="preview-placeholder parcel-loading">Loading the public parcel boundary…</div>
         ) : (
           <LotPreview lot={lot} district={district} active={entryMode === "manual"} />
         )}
         <div className="legend">
           <span><i className="legend-lot" /> Property boundary</span>
-          <span><i className="legend-envelope" /> Approx. buildable envelope</span>
+          {(entryMode === "manual" || parcel?.envelope_geojson || !parcelPick) && (
+            <span><i className="legend-envelope" /> Approx. buildable envelope</span>
+          )}
         </div>
         <div className="preview-facts">
           <div><span>Project</span><strong>{PROJECT_TYPES.find((item) => item.id === projectType)?.label ?? "Not selected"}</strong></div>
