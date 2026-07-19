@@ -41,7 +41,13 @@ export function rectEnvelope(lot, district) {
  *   buildable = footprint * stories, then capped by FAR if the town uses it.
  */
 export function computeBuildable(lot, district) {
-  const lotArea = lot.width_ft * lot.depth_ft;
+  // A deed/tax-record area may differ slightly from the simple bounding
+  // rectangle. Prefer the explicitly entered area for coverage and FAR caps,
+  // while width/depth continue to drive the preview envelope geometry.
+  const lotArea =
+    Number(lot.area_sqft) > 0
+      ? Number(lot.area_sqft)
+      : lot.width_ft * lot.depth_ft;
   const envelope = rectEnvelope(lot, district);
 
   const coveragePct = district.max_building_coverage_pct;
@@ -68,6 +74,41 @@ export function computeBuildable(lot, district) {
           : "setbacks",
     farLimited: buildable === farCap && farCap !== Infinity,
   };
+}
+
+/**
+ * Buildable numbers when the envelope area is already known (real parcels:
+ * PostGIS computed it via the parcel_envelope RPC). Same caps as
+ * computeBuildable, minus the rectangle-specific setback arithmetic.
+ */
+export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, district) {
+  const coveragePct = district.max_building_coverage_pct;
+  const coverageCap = coveragePct != null ? lotAreaSqft * (coveragePct / 100) : Infinity;
+  const footprint = Math.min(envelopeAreaSqft ?? 0, coverageCap);
+
+  const stories = district.max_stories ?? 1;
+  let buildable = footprint * stories;
+  const farCap = district.max_far != null ? lotAreaSqft * district.max_far : Infinity;
+  buildable = Math.min(buildable, farCap);
+
+  return {
+    lotArea: lotAreaSqft,
+    envelopeArea: envelopeAreaSqft ?? 0,
+    footprint,
+    stories,
+    buildable,
+    binding: footprint === 0 ? "setbacks" : coverageCap < (envelopeAreaSqft ?? 0) ? "coverage" : "setbacks",
+    farLimited: buildable === farCap && farCap !== Infinity,
+  };
+}
+
+/** Largest applicable setback → conservative uniform inset for previews. */
+export function conservativeInsetFt(district) {
+  return Math.max(
+    district.front_yard_min_ft ?? 0,
+    district.rear_yard_min_ft ?? 0,
+    district.side_yard_one_min_ft ?? 0
+  );
 }
 
 /**

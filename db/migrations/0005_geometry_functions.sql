@@ -6,9 +6,11 @@
 --
 -- SCOPE NOTE: buildable_envelope() below uses a single uniform inset. Real
 -- setbacks differ per edge (front vs side vs rear), which needs per-edge
--- offsetting and is the engine's job. Using the SMALLEST setback here is the
--- conservative choice -- it never overstates buildable area -- and it's enough
--- to validate that the geometry, projection, and units are all correct.
+-- offsetting and is the engine's job. Callers should pass the LARGEST
+-- applicable setback as the inset -- that is the conservative choice, since a
+-- larger inset can only shrink the envelope and thus never overstates
+-- buildable area -- and it's enough to validate that the geometry,
+-- projection, and units are all correct.
 
 -- Inset a parcel polygon uniformly by `inset_ft` feet.
 -- Because parcels are stored in EPSG:3424 (US survey feet), the negative
