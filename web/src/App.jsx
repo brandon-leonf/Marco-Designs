@@ -32,6 +32,61 @@ const fmt = (n, digits = 0) =>
     ? "—"
     : Number(n).toLocaleString("en-US", { maximumFractionDigits: digits });
 
+// Declarative bounds for the simple numeric inputs. Validation messages and the
+// browser min/max hints both read from here, so adding a new schema field is a
+// single entry — not per-field logic scattered through the form.
+const FIELD_RULES = {
+  width_ft: { label: "Lot width", min: 1, max: 5000 },
+  depth_ft: { label: "Lot depth", min: 1, max: 5000 },
+  area_sqft: { label: "Lot area", min: 1, max: 10000000 },
+  footprint_sqft: { label: "Existing footprint", min: 1, max: 1000000 },
+  stories: { label: "Number of stories", min: 0, max: 100 },
+  total_area_sqft: { label: "Existing total floor area", min: 0, max: 5000000 },
+};
+
+/** Returns an error string for a field value, or null when it is acceptable. */
+function validateField(key, value, { required = false } = {}) {
+  const rule = FIELD_RULES[key];
+  const name = rule?.label ?? "This value";
+  if (value === "" || value == null) {
+    return required ? `${name} is required.` : null;
+  }
+  const n = Number(value);
+  if (!isFinite(n)) return `${name} must be a number.`;
+  if (rule?.min != null && n < rule.min) {
+    return rule.min === 1 ? `${name} must be greater than zero.` : `${name} must be at least ${rule.min}.`;
+  }
+  if (rule?.max != null && n > rule.max) return `${name} looks too large — double-check the units.`;
+  return null;
+}
+
+// Manual lot area tracks width × depth until the user types an area directly.
+function deriveArea(width, depth, fallback) {
+  const w = Number(width);
+  const d = Number(depth);
+  return w > 0 && d > 0 ? Math.round(w * d) : fallback;
+}
+function withLotWidth(lot, value) {
+  return {
+    ...lot,
+    width_ft: value,
+    area_sqft: lot.area_manual ? lot.area_sqft : deriveArea(value, lot.depth_ft, lot.area_sqft),
+  };
+}
+function withLotDepth(lot, value) {
+  return {
+    ...lot,
+    depth_ft: value,
+    area_sqft: lot.area_manual ? lot.area_sqft : deriveArea(lot.width_ft, value, lot.area_sqft),
+  };
+}
+function withLotAreaManual(lot, value) {
+  return { ...lot, area_sqft: value, area_manual: true };
+}
+function withLotAreaRecalculated(lot) {
+  return { ...lot, area_sqft: deriveArea(lot.width_ft, lot.depth_ft, lot.area_sqft), area_manual: false };
+}
+
 export default function App() {
   const [munis, setMunis] = useState(null);
   const [error, setError] = useState(null);
@@ -41,7 +96,7 @@ export default function App() {
   const [entryMode, setEntryMode] = useState("search");
   const [muniId, setMuniId] = useState(null);
   const [districtId, setDistrictId] = useState(null);
-  const [lot, setLot] = useState({ width_ft: 25, depth_ft: 100, area_sqft: 2500 });
+  const [lot, setLot] = useState({ width_ft: 25, depth_ft: 100, area_sqft: 2500, area_manual: false });
   const [existingStructure, setExistingStructure] = useState({
     footprint_sqft: "",
     stories: "",
@@ -190,7 +245,22 @@ export default function App() {
   const structureReady =
     projectType === "new_house" ||
     Number(existingStructure.footprint_sqft) > 0;
-  const canContinue = Boolean(projectType && district && propertyReady && structureReady);
+  const manualInputsValid =
+    entryMode !== "manual" ||
+    (!validateField("width_ft", lot.width_ft, { required: true }) &&
+      !validateField("depth_ft", lot.depth_ft, { required: true }) &&
+      !validateField("area_sqft", lot.area_sqft, { required: true }));
+  const existingInputsValid =
+    projectType === "new_house" ||
+    !validateField("footprint_sqft", existingStructure.footprint_sqft, { required: true });
+  const canContinue = Boolean(
+    projectType &&
+      district &&
+      propertyReady &&
+      structureReady &&
+      manualInputsValid &&
+      existingInputsValid
+  );
 
   const goToStep = (next) => {
     if (next > maxStepReached) return;
@@ -453,6 +523,8 @@ function PropertyInput({
                   onExistingStructure({ ...existingStructure, footprint_sqft: value })
                 }
                 help="Required. Ground area occupied by the current structure."
+                fieldKey="footprint_sqft"
+                required
               />
               <NumberField
                 label="Number of stories"
@@ -462,6 +534,7 @@ function PropertyInput({
                 }
                 help="Optional. Used to approximate total floor area when it is unknown."
                 step="0.5"
+                fieldKey="stories"
               />
               <NumberField
                 label="Existing total square feet"
@@ -470,6 +543,7 @@ function PropertyInput({
                   onExistingStructure({ ...existingStructure, total_area_sqft: value })
                 }
                 help="Optional. Combined finished area across all stories."
+                fieldKey="total_area_sqft"
               />
               <label>
                 Current structure location
@@ -510,12 +584,20 @@ function PropertyInput({
           {entryMode === "manual" ? (
             <label>
               Zoning district <span className="manual-badge">Manual—unverified</span>
-              <select value={districtId ?? ""} onChange={(e) => onDistrict(Number(e.target.value))}>
-                {muni?.zoning_districts.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.code} {item.name ? `— ${item.name}` : ""}
-                  </option>
-                ))}
+              <select
+                value={districtId ?? ""}
+                onChange={(e) => onDistrict(Number(e.target.value))}
+                disabled={!muni?.zoning_districts?.length}
+              >
+                {muni?.zoning_districts?.length ? (
+                  muni.zoning_districts.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.code} {item.name ? `— ${item.name}` : ""}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">No districts loaded for this municipality</option>
+                )}
               </select>
               <small>Confirm this district with Union City before relying on the result.</small>
             </label>
@@ -581,19 +663,35 @@ function PropertyInput({
               <NumberField
                 label="Lot width (ft)"
                 value={lot.width_ft}
-                onChange={(value) => onLot({ ...lot, width_ft: value })}
+                onChange={(value) => onLot(withLotWidth(lot, value))}
+                fieldKey="width_ft"
+                required
               />
               <NumberField
                 label="Lot depth (ft)"
                 value={lot.depth_ft}
-                onChange={(value) => onLot({ ...lot, depth_ft: value })}
+                onChange={(value) => onLot(withLotDepth(lot, value))}
+                fieldKey="depth_ft"
+                required
               />
               <NumberField
                 label="Lot area (sq ft)"
                 value={lot.area_sqft}
-                onChange={(value) => onLot({ ...lot, area_sqft: value })}
+                onChange={(value) => onLot(withLotAreaManual(lot, value))}
+                help={lot.area_manual ? undefined : "Auto-calculated from width × depth."}
+                fieldKey="area_sqft"
+                required
               />
             </div>
+            {lot.area_manual && (
+              <button
+                type="button"
+                className="text-button compact"
+                onClick={() => onLot(withLotAreaRecalculated(lot))}
+              >
+                Reset area to width × depth
+              </button>
+            )}
           </div>
         )}
 
@@ -695,18 +793,30 @@ function ZoningCheckNotice({ check }) {
   );
 }
 
-function NumberField({ label, value, onChange, help, step = "1" }) {
+function NumberField({ label, value, onChange, help, step = "1", fieldKey, required = false }) {
+  // Only surface an error once the field has been touched, so a blank optional
+  // (or not-yet-filled required) input doesn't shout on first render.
+  const [touched, setTouched] = useState(false);
+  const rule = fieldKey ? FIELD_RULES[fieldKey] : null;
+  const error = fieldKey ? validateField(fieldKey, value, { required }) : null;
+  const showError = touched && Boolean(error);
   return (
-    <label>
+    <label className={showError ? "field invalid" : "field"}>
       {label}
       <input
         type="number"
-        min="0"
+        min={rule?.min ?? 0}
+        max={rule?.max}
         step={step}
         value={value}
-        onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
+        aria-invalid={showError || undefined}
+        onBlur={() => setTouched(true)}
+        onChange={(e) => {
+          setTouched(true);
+          onChange(e.target.value === "" ? "" : Number(e.target.value));
+        }}
       />
-      {help && <small>{help}</small>}
+      {showError ? <small className="field-error">{error}</small> : help && <small>{help}</small>}
     </label>
   );
 }
@@ -792,6 +902,12 @@ function PropertyTable({ parcel, result, district, projectType }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
   return (
     <table className="result-table">
+      <thead>
+        <tr>
+          <th>Detail</th>
+          <th>Value</th>
+        </tr>
+      </thead>
       <tbody>
         {parcel && (
           <>

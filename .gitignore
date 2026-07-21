@@ -18,6 +18,12 @@ venv/
 web/node_modules/
 web/dist/
 
+# Claude Code local settings
+.claude/settings.local.json
+
+# Personal/scratch files kept out of the repo
+/local/
+
 # OS / editor
 .DS_Store
 
