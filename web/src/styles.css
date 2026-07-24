@@ -439,3 +439,204 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   .top-nav, .stepper, .results-heading, .no-print { display: none !important; }
   .review-card { border: 0; box-shadow: none; padding: 0; }
 }
+
+/* ---------- Admin: nav ---------- */
+.nav-login {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.nav-login:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.admin-nav-title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.9);
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
+  padding-left: 1rem;
+}
+.nav-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+.nav-link:hover { color: #fff; text-decoration: underline; }
+.nav-signout { margin-left: 1.1rem; }
+
+/* ---------- Admin: login ---------- */
+.login-card { max-width: 430px; margin: 3rem auto 0; }
+.login-form { display: grid; gap: 0.9rem; margin-top: 1rem; }
+.login-form label { display: grid; gap: 0.3rem; font-weight: 700; font-size: 0.85rem; }
+.login-form input {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+}
+
+/* ---------- Admin: editor layout ---------- */
+.admin-grid {
+  display: grid;
+  grid-template-columns: 250px 290px 1fr;
+  gap: 1.1rem;
+  align-items: start;
+}
+@media (max-width: 1000px) { .admin-grid { grid-template-columns: 1fr; } }
+
+.admin-side, .admin-districts { display: grid; gap: 0.8rem; padding: 1.1rem; }
+.admin-side label, .admin-districts h3 { font-weight: 700; font-size: 0.9rem; }
+.admin-side label { display: grid; gap: 0.35rem; }
+.admin-side select, .admin-districts input {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  width: 100%;
+}
+.admin-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--green-soft);
+  color: var(--green);
+  font-size: 0.78rem;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  justify-self: start;
+}
+.admin-badge i { font-style: normal; }
+.admin-side-note { color: var(--muted); font-size: 0.8rem; margin: 0; }
+.admin-signed-in { border-top: 1px solid var(--line); padding-top: 0.7rem; overflow-wrap: anywhere; }
+.admin-about {
+  background: var(--info-bg);
+  border: 1px solid var(--info-line);
+  color: var(--info-ink);
+  border-radius: 10px;
+  padding: 0.8rem 0.9rem;
+  font-size: 0.8rem;
+  display: grid;
+  gap: 0.4rem;
+}
+.admin-about p { margin: 0; }
+
+.district-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.district-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  cursor: pointer;
+}
+.district-item:hover { background: var(--bg); }
+.district-item.selected {
+  background: var(--active);
+  border-color: var(--active-line);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+.district-code { font-weight: 800; min-width: 2.6rem; }
+.district-name { color: var(--muted); font-size: 0.82rem; flex: 1; }
+.district-check { color: var(--primary); font-weight: 800; }
+.district-count { color: var(--muted); font-size: 0.78rem; border-top: 1px solid var(--line); padding-top: 0.7rem; margin: 0; }
+
+/* ---------- Admin: editor form ---------- */
+.admin-editor { padding: 1.3rem 1.5rem; display: grid; gap: 1.1rem; }
+.admin-editor-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.admin-editor-head h2 { margin: 0 0 0.2rem; }
+.admin-editor-head p { margin: 0; color: var(--muted); }
+.admin-updated {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+.admin-section {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem 1.1rem 1.1rem;
+  margin: 0;
+  min-width: 0;
+}
+.admin-section legend {
+  font-weight: 800;
+  font-size: 0.92rem;
+  padding: 0 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.admin-section-icon { color: var(--primary); }
+.admin-fields { display: grid; gap: 0.9rem; }
+.admin-fields.four { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.admin-fields.five { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.admin-fields label { display: grid; gap: 0.3rem; font-weight: 700; font-size: 0.8rem; align-content: start; }
+.admin-fields input, .admin-fields select {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  width: 100%;
+}
+.admin-hint { color: var(--muted); font-size: 0.78rem; margin: 0.8rem 0 0; }
+
+.admin-toggle { font-weight: 700; }
+.toggle-row { display: flex; align-items: center; gap: 0.5rem; min-height: 2.35rem; }
+.toggle {
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  border: none;
+  background: var(--line-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  padding: 0;
+  flex-shrink: 0;
+}
+.toggle i {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.15s ease;
+}
+.toggle.on { background: var(--primary); }
+.toggle.on i { left: 23px; }
+.toggle-state { font-weight: 700; font-size: 0.8rem; color: var(--muted); }
+
+.json-summary { display: grid; gap: 0.6rem; justify-items: start; }
+.json-preview {
+  width: 100%;
+  max-height: 260px;
+  overflow: auto;
+  background: #0e2233;
+  color: #cde3f2;
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  margin: 0;
+}
+.save-ok { color: var(--green); font-weight: 700; }
+.admin-actions { justify-content: flex-end; }
+button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
