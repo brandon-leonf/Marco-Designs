@@ -13,6 +13,19 @@ import {
   createDistrict,
 } from "./lib/adminApi.js";
 import Logo from "./components/Logo.jsx";
+import { computeBuildable } from "./lib/envelope.js";
+
+// Drafts live in this browser only (localStorage, keyed by district). Nothing
+// touches the live database until Publish.
+const draftKey = (districtId) => `demarco-config-draft-${districtId}`;
+function loadLocalDraft(districtId) {
+  try {
+    const raw = localStorage.getItem(draftKey(districtId));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
 
 const TIER_ORDER = ["essential", "signature", "premium"];
 const TIER_LABELS = {
@@ -212,6 +225,10 @@ function ConfigEditor({ adminEmail, ready }) {
   const [copied, setCopied] = useState(false);
   const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, district}
   const [newDistrict, setNewDistrict] = useState(null); // null | {code, name}
+  const [draftInfo, setDraftInfo] = useState(null); // {savedAt} when an unpublished local draft is loaded
+  const [validation, setValidation] = useState(null); // {issues: [], ok: []}
+  const [testLot, setTestLot] = useState({ width: 25, depth: 102, area: 2548 });
+  const [testResult, setTestResult] = useState(null); // {lines: [], summary: {}}
 
   const reload = () =>
     fetchMunicipalities()
@@ -237,13 +254,34 @@ function ConfigEditor({ adminEmail, ready }) {
   const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
 
   // Re-seed the drafts whenever the selected district (or fresh data) changes.
+  // An unpublished local draft for the district wins over the published values.
   useEffect(() => {
-    setDraft(district ? draftFromDistrict(district) : null);
+    if (!district) {
+      setDraft(null);
+      setDraftInfo(null);
+      return;
+    }
+    const stored = loadLocalDraft(district.id);
+    if (stored?.draft) {
+      setDraft(stored.draft);
+      if (stored.costDraft) setCostDraft(stored.costDraft);
+      setDraftInfo({ savedAt: stored.savedAt });
+    } else {
+      setDraft(draftFromDistrict(district));
+      setDraftInfo(null);
+    }
     setSaveState(null);
+    setValidation(null);
+    setTestResult(null);
   }, [district]);
   useEffect(() => {
-    setCostDraft(muni ? draftFromCostModel(costModel) : null);
-  }, [muni, costModel]);
+    if (!muni) {
+      setCostDraft(null);
+      return;
+    }
+    const stored = district ? loadLocalDraft(district.id) : null;
+    if (!stored?.costDraft) setCostDraft(draftFromCostModel(costModel));
+  }, [muni, costModel, district]);
 
   const districts = useMemo(() => {
     const list = muni?.zoning_districts ?? [];
@@ -320,8 +358,134 @@ function ConfigEditor({ adminEmail, ready }) {
     (!estimated ||
       (costDraft.regional_baseline_per_sqft !== "" && costDraft.local_cost_factor !== ""));
 
+  const saveDraftLocal = () => {
+    if (!district) return;
+    const savedAt = new Date().toISOString();
+    localStorage.setItem(draftKey(district.id), JSON.stringify({ draft, costDraft, savedAt }));
+    setDraftInfo({ savedAt });
+    setSaveState({
+      kind: "ok",
+      text: "Draft saved in this browser only. The live site is untouched until you publish.",
+    });
+  };
+
+  /** Every check the loader/DB would enforce, run client-side on the draft. */
+  const collectValidation = () => {
+    const issues = [];
+    const ok = [];
+    const sideOne = numOrNull(draft.side_yard_one_min_ft);
+    const sideTotal = numOrNull(draft.side_yard_total_min_ft);
+    if (sideOne != null && sideTotal != null && sideTotal < 2 * sideOne) {
+      issues.push(
+        `Side yard total (${sideTotal} ft) is less than 2 × side yard one (${sideOne} ft) — both side yards cannot be met.`
+      );
+    } else if (sideOne != null || sideTotal != null) {
+      ok.push("Side yard minimums are consistent.");
+    }
+    const cov = numOrNull(draft.max_building_coverage_pct);
+    if (cov != null && (cov < 0 || cov > 100)) issues.push("Max building coverage must be between 0 and 100%.");
+    const imp = numOrNull(draft.max_impervious_coverage_pct);
+    if (imp != null && (imp < 0 || imp > 100)) issues.push("Max impervious coverage must be between 0 and 100%.");
+    const stories = numOrNull(draft.max_stories);
+    if (stories != null && stories < 1) issues.push("Max stories must be at least 1.");
+    ok.push(
+      draft.max_far === ""
+        ? "Max FAR is blank → stored as null (no FAR cap). Blank is never treated as 0."
+        : `Max FAR = ${draft.max_far} → buildable area capped at lot area × ${draft.max_far}.`
+    );
+    for (const name of TIER_ORDER) {
+      const t = costDraft.tiers[name];
+      if (estimated) {
+        if (t.min === "") issues.push(`${TIER_LABELS[name]}: estimated rate is missing.`);
+      } else {
+        if (t.min === "" || t.max === "") issues.push(`${TIER_LABELS[name]}: verified tiers need both min and max.`);
+        else if (Number(t.max) < Number(t.min)) issues.push(`${TIER_LABELS[name]}: max ($${t.max}) is below min ($${t.min}).`);
+      }
+    }
+    if (estimated && (costDraft.regional_baseline_per_sqft === "" || costDraft.local_cost_factor === "")) {
+      issues.push("Estimated cost models must carry the regional baseline and local cost factor they derive from.");
+    }
+    if (issues.length === 0) ok.unshift("All checks passed — safe to publish.");
+    return { issues, ok };
+  };
+
+  const runValidation = () => setValidation(collectValidation());
+
+  /** District-shaped object from the DRAFT values, exactly as publish would store them. */
+  const districtFromDraft = () => ({
+    front_yard_min_ft: numOrNull(draft.front_yard_min_ft),
+    rear_yard_min_ft: numOrNull(draft.rear_yard_min_ft),
+    side_yard_one_min_ft: numOrNull(draft.side_yard_one_min_ft),
+    side_yard_total_min_ft: numOrNull(draft.side_yard_total_min_ft),
+    max_building_coverage_pct: numOrNull(draft.max_building_coverage_pct),
+    max_stories: numOrNull(draft.max_stories),
+    max_far: numOrNull(draft.max_far),
+  });
+
+  const runTest = () => {
+    const d = districtFromDraft();
+    const lot = {
+      width_ft: Number(testLot.width) || 0,
+      depth_ft: Number(testLot.depth) || 0,
+      area_sqft: Number(testLot.area) || 0,
+    };
+    const res = computeBuildable(lot, d);
+    const num = (n) => Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
+
+    // The full calculation trace: every input and intermediate, in order.
+    const lines = [];
+    lines.push(`INPUT  lot: ${num(lot.width_ft)} ft × ${num(lot.depth_ft)} ft, recorded area ${num(res.lotArea)} sq ft`);
+    lines.push(
+      `INPUT  setbacks (ft): front ${d.front_yard_min_ft ?? 0}, rear ${d.rear_yard_min_ft ?? 0}, side one ${d.side_yard_one_min_ft ?? 0}, side total ${d.side_yard_total_min_ft ?? 0}`
+    );
+    const ins = res.envelope.insets;
+    lines.push(`STEP   effective side inset = max(side total, 2 × side one) = ${num(ins.sideTotal)} ft across both sides`);
+    lines.push(`STEP   envelope width = ${num(lot.width_ft)} − ${num(ins.sideTotal)} = ${num(res.envelope.widthFt)} ft`);
+    lines.push(`STEP   envelope depth = ${num(lot.depth_ft)} − ${num(ins.front)} − ${num(ins.rear)} = ${num(res.envelope.depthFt)} ft`);
+    lines.push(`STEP   envelope area = ${num(res.envelope.widthFt)} × ${num(res.envelope.depthFt)} = ${num(res.envelope.areaSqft)} sq ft`);
+    const covCap = d.max_building_coverage_pct != null ? res.lotArea * (d.max_building_coverage_pct / 100) : null;
+    lines.push(
+      covCap != null
+        ? `STEP   coverage cap = ${num(res.lotArea)} × ${d.max_building_coverage_pct}% = ${num(covCap)} sq ft`
+        : "INPUT  coverage: none set → no coverage cap"
+    );
+    lines.push(`STEP   max footprint = min(envelope, coverage cap) = ${num(res.footprint)} sq ft  [${res.binding} bind]`);
+    lines.push(`INPUT  stories = ${res.stories}`);
+    lines.push(
+      d.max_far == null
+        ? "INPUT  max FAR = null → no FAR cap (blank is stored as null, never 0)"
+        : `INPUT  max FAR = ${d.max_far} → cap = ${num(res.lotArea)} × ${d.max_far} = ${num(res.lotArea * d.max_far)} sq ft`
+    );
+    lines.push(
+      `STEP   total buildable = ${num(res.footprint)} × ${res.stories}${res.farLimited ? ", capped by FAR" : ""} = ${num(res.buildable)} sq ft`
+    );
+    for (const name of TIER_ORDER) {
+      const t = costDraft.tiers[name];
+      if (t.min === "") continue;
+      if (!estimated && t.max !== "") {
+        lines.push(
+          `COST   ${TIER_LABELS[name]}: ${num(res.buildable)} × $${num(t.min)}–$${num(t.max)} = $${num(res.buildable * Number(t.min))} – $${num(res.buildable * Number(t.max))}`
+        );
+      } else {
+        lines.push(`COST   ${TIER_LABELS[name]}: ${num(res.buildable)} × $${num(t.min)} = $${num(res.buildable * Number(t.min))}`);
+      }
+    }
+    setTestResult({ lines, summary: res });
+  };
+
+  const previewCalculation = () => {
+    runTest();
+    document.getElementById("test-config")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const save = async () => {
     if (!district || !draft) return;
+    const check = collectValidation();
+    setValidation(check);
+    if (check.issues.length > 0) {
+      setSaveState({ kind: "error", text: "Fix the validation issues below before publishing." });
+      return;
+    }
     setSaving(true);
     setSaveState(null);
     try {
@@ -374,12 +538,12 @@ function ConfigEditor({ adminEmail, ready }) {
       }
 
       await touchMunicipality(muni.id);
+      localStorage.removeItem(draftKey(district.id));
+      setDraftInfo(null);
       await reload();
       setSaveState({
         kind: "ok",
-        text: costModelComplete
-          ? "Saved. Changes are live for every visitor."
-          : "District saved. Cost model skipped — every tier needs a rate (min and max for verified; baseline + factor for estimated).",
+        text: "Published. Changes are live for every visitor.",
       });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
@@ -584,7 +748,10 @@ function ConfigEditor({ adminEmail, ready }) {
             Update zoning rules, dimensional standards, ADU policies, and cost model assumptions for
             the selected municipality.
           </p>
-          <p>Saving publishes directly to the live database used by the public calculator.</p>
+          <p>
+            <strong>Save draft</strong> keeps changes in this browser only. Nothing reaches the live
+            database used by the public calculator until you <strong>Publish configuration</strong>.
+          </p>
         </div>
         <p className="admin-side-note admin-signed-in">
           Signed in as <strong>{adminEmail}</strong>
@@ -671,6 +838,11 @@ function ConfigEditor({ adminEmail, ready }) {
           <span className="admin-updated">
             Last updated: {muni?.last_updated ?? "—"}
           </span>
+          {draftInfo && (
+            <span className="draft-badge" title={`Draft saved ${draftInfo.savedAt}`}>
+              ● Unpublished draft
+            </span>
+          )}
         </div>
 
         <fieldset className="admin-section" disabled={!ready || saving}>
@@ -835,6 +1007,55 @@ function ConfigEditor({ adminEmail, ready }) {
           </div>
         </fieldset>
 
+        <fieldset className="admin-section" id="test-config" disabled={!ready}>
+          <legend>
+            <span className="admin-section-icon" aria-hidden="true">▶</span> F. Test This Configuration
+          </legend>
+          <p className="admin-hint">
+            Runs the calculator against the current draft values — published data is not consulted.
+            Defaults match the 508 40th St case (25′ × 102′, 2,548 sq ft).
+          </p>
+          <div className="admin-fields four">
+            <Num label="Test lot width (ft)" value={testLot.width} onChange={(v) => setTestLot({ ...testLot, width: v })} />
+            <Num label="Test lot depth (ft)" value={testLot.depth} onChange={(v) => setTestLot({ ...testLot, depth: v })} />
+            <Num label="Test lot area (sq ft)" value={testLot.area} onChange={(v) => setTestLot({ ...testLot, area: v })} />
+          </div>
+          <button type="button" className="secondary compact" onClick={runTest}>
+            ▶ Run test calculation
+          </button>
+          {testResult && (
+            <>
+              <div className="test-summary">
+                <div><span>Envelope</span><strong>{Number(testResult.summary.envelope.areaSqft).toLocaleString()} sq ft</strong></div>
+                <div><span>Max footprint</span><strong>{Number(testResult.summary.footprint).toLocaleString()} sq ft</strong></div>
+                <div><span>Total buildable</span><strong>{Number(testResult.summary.buildable).toLocaleString()} sq ft</strong></div>
+              </div>
+              <pre className="json-preview test-log"><code>{testResult.lines.join("\n")}</code></pre>
+            </>
+          )}
+        </fieldset>
+
+        {validation && (
+          <div
+            className={validation.issues.length ? "validate-panel bad" : "validate-panel good"}
+            role={validation.issues.length ? "alert" : "status"}
+          >
+            <strong>
+              {validation.issues.length
+                ? `✕ ${validation.issues.length} issue${validation.issues.length > 1 ? "s" : ""} must be fixed before publishing`
+                : "✓ Configuration passes validation"}
+            </strong>
+            <ul>
+              {validation.issues.map((text) => (
+                <li className="validate-bad" key={text}>✕ {text}</li>
+              ))}
+              {validation.ok.map((text) => (
+                <li key={text}>✓ {text}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {saveState && (
           <p className={saveState.kind === "ok" ? "status-line save-ok" : "status-line error-text"} role="status">
             {saveState.text}
@@ -846,15 +1067,28 @@ function ConfigEditor({ adminEmail, ready }) {
             className="secondary"
             disabled={saving}
             onClick={() => {
+              localStorage.removeItem(draftKey(district.id));
+              setDraftInfo(null);
               setDraft(draftFromDistrict(district));
               setCostDraft(draftFromCostModel(costModel));
               setSaveState(null);
+              setValidation(null);
+              setTestResult(null);
             }}
           >
-            ⟲ Reset
+            ⟲ Discard draft
+          </button>
+          <button type="button" className="secondary" disabled={saving || !ready} onClick={saveDraftLocal}>
+            Save draft
+          </button>
+          <button type="button" className="secondary" disabled={saving || !ready} onClick={runValidation}>
+            Validate
+          </button>
+          <button type="button" className="secondary" disabled={saving || !ready} onClick={previewCalculation}>
+            Preview calculation
           </button>
           <button type="button" className="primary" disabled={saving || !ready} onClick={save}>
-            {saving ? "Saving…" : "Save Changes"}
+            {saving ? "Publishing…" : "Publish configuration"}
           </button>
         </div>
       </div>
