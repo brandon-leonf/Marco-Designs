@@ -36,10 +36,10 @@ AS $$
     LIMIT LEAST(p_limit, 50);
 $$;
 
--- One parcel with its lot info and the buildable envelope at a uniform
--- inset. The inset the app passes is the LARGEST applicable setback, so the
--- preview never overstates buildable area; per-edge offsetting is the rules
--- engine's job (see the scope note in 0005).
+-- One parcel with its lot info and an optional uniformly inset geometry.
+-- The public app currently requests a zero-foot inset and uses the recorded
+-- frontage/depth rectangular fallback. A non-zero inset is only appropriate
+-- once a caller has a use case where a uniform setback is actually valid.
 CREATE OR REPLACE FUNCTION parcel_envelope(p_parcel_id bigint, p_inset_ft double precision)
 RETURNS TABLE (
     parcel_id          bigint,

@@ -53,9 +53,8 @@ export async function resolveParcelZoning(parcelId) {
 }
 
 /**
- * One parcel + its buildable envelope, computed by PostGIS on the real
- * polygon. insetFt should be the LARGEST applicable setback (conservative
- * uniform inset — per-edge offsetting is the rules engine's job).
+ * One parcel + its boundary and recorded rectangular dimensions. Callers use
+ * a zero inset until parcel edges can be classified as front/rear/side.
  */
 export async function fetchParcelEnvelope(parcelId, insetFt) {
   const { data, error } = await supabase.rpc("parcel_envelope", {
