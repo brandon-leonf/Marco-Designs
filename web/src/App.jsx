@@ -42,7 +42,7 @@ const PROJECT_TYPES = [
   { id: "addition", label: "Addition", description: "Expand an existing house" },
   { id: "adu", label: "ADU", description: "Add a smaller separate living space" },
 ];
-const STEPS = ["Project & Property", "Results", "Review & Export"];
+const STEPS = ["Project & Property", "What You Can Build", "Results", "Review & Export"];
 
 const fmt = (n, digits = 0) =>
   n == null || !isFinite(n)
@@ -56,6 +56,23 @@ const tierRate = (costModel, tierId) =>
 // reports a full `envelope` object. Callers should not have to know which.
 const envelopeAreaOf = (result) => result.envelopeArea ?? result.envelope?.areaSqft ?? 0;
 
+/**
+ * Reduce the per-floor plan to the three figures the zoning maximums are
+ * checked against: total floor area (sum), footprint (the largest floor), and
+ * floor count. Returns nulls when no floor size has been entered.
+ */
+function derivePlan(plannedFloors) {
+  const sizes = plannedFloors.map((v) => Number(v)).filter((v) => v > 0);
+  if (sizes.length === 0) {
+    return { plannedArea: null, plannedFootprint: null, plannedFloorCount: plannedFloors.length };
+  }
+  return {
+    plannedArea: sizes.reduce((sum, v) => sum + v, 0),
+    plannedFootprint: Math.max(...sizes),
+    plannedFloorCount: plannedFloors.length,
+  };
+}
+
 // Declarative bounds for the simple numeric inputs. Validation messages and the
 // browser min/max hints both read from here, so adding a new schema field is a
 // single entry — not per-field logic scattered through the form.
@@ -66,6 +83,7 @@ const FIELD_RULES = {
   footprint_sqft: { label: "Existing footprint", min: 1, max: 1000000 },
   stories: { label: "Number of stories", min: 0, max: 100 },
   total_area_sqft: { label: "Existing total floor area", min: 0, max: 5000000 },
+  planned_floor_sqft: { label: "Floor size", min: 1, max: 1000000 },
 };
 
 /** Returns an error string for a field value, or null when it is acceptable. */
@@ -127,6 +145,11 @@ export default function App() {
     total_area_sqft: "",
     location: "unsure",
   });
+  // Optional: the building the client intends to build, floor by floor. Each
+  // entry is one floor's size (sq ft). An empty array means "no plan — estimate
+  // the maximum." When present it drives cost and a fits/exceeds check against
+  // the zoning maximums (kickoff section 6 — compare the program to the envelope).
+  const [plannedFloors, setPlannedFloors] = useState([]);
   const [parcelPick, setParcelPick] = useState(null);
   const [parcel, setParcel] = useState(null);
   const [parcelError, setParcelError] = useState(null);
@@ -278,6 +301,24 @@ export default function App() {
     const availableFootprint = Math.max(0, zoningResult.footprint - existingFootprint);
     const availableBuildingArea = existingArea == null ? null : Math.max(0, zoningResult.buildable - existingArea);
 
+    // The zoning ceilings this project is measured against. maxArea is null for
+    // an addition/ADU whose existing floor area is not yet known.
+    const maxArea = hasExistingHouse ? availableBuildingArea : zoningResult.buildable;
+    const maxFootprint = hasExistingHouse ? availableFootprint : zoningResult.footprint;
+    const maxFloors = district.max_stories ?? null;
+
+    // The client's planned building, floor by floor, reduced to comparable
+    // figures. When present, the total drives cost; otherwise the ceiling does.
+    const { plannedArea: planned, plannedFootprint, plannedFloorCount } = derivePlan(plannedFloors);
+    const fitsArea = planned == null || maxArea == null ? null : planned <= maxArea;
+    const fitsFootprint =
+      plannedFootprint == null || maxFootprint == null ? null : plannedFootprint <= maxFootprint;
+    const fitsFloors = planned == null || maxFloors == null ? null : plannedFloorCount <= maxFloors;
+    // Overall fit is a pass unless any applicable check explicitly fails.
+    const fitsPlan =
+      planned == null ? null : ![fitsArea, fitsFootprint, fitsFloors].includes(false);
+    const planDelta = planned == null || maxArea == null ? null : maxArea - planned;
+
     return {
       ...zoningResult,
       existingFootprint,
@@ -287,9 +328,20 @@ export default function App() {
       existingLocation: existingStructure.location,
       availableFootprint,
       availableBuildingArea,
-      estimateArea: hasExistingHouse ? availableBuildingArea : zoningResult.buildable,
+      maxArea,
+      maxFootprint,
+      maxFloors,
+      plannedArea: planned,
+      plannedFootprint,
+      plannedFloorCount,
+      fitsArea,
+      fitsFootprint,
+      fitsFloors,
+      fitsPlan,
+      planDelta,
+      estimateArea: planned ?? maxArea,
     };
-  }, [district, entryMode, existingStructure, lot, parcel, projectType]);
+  }, [district, entryMode, existingStructure, lot, parcel, plannedFloors, projectType]);
 
   const project = PROJECT_TYPES.find((item) => item.id === projectType);
   const manualInputsValid =
@@ -442,6 +494,21 @@ export default function App() {
       )}
 
       {munis && step === 2 && result && (
+        <CapacityStep
+          project={project}
+          district={district}
+          lot={lot}
+          entryMode={entryMode}
+          parcel={entryMode === "search" ? parcel : null}
+          result={result}
+          plannedFloors={plannedFloors}
+          onPlannedFloors={setPlannedFloors}
+          onBack={() => goToStep(1)}
+          onContinue={() => advance(3)}
+        />
+      )}
+
+      {munis && step === 3 && result && (
         <Results
           project={project}
           muni={muni}
@@ -451,12 +518,12 @@ export default function App() {
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
-          onBack={() => goToStep(1)}
-          onContinue={() => advance(3)}
+          onBack={() => goToStep(2)}
+          onContinue={() => advance(4)}
         />
       )}
 
-      {munis && step === 3 && result && (
+      {munis && step === 4 && result && (
         <Review
           project={project}
           muni={muni}
@@ -465,7 +532,7 @@ export default function App() {
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
-          onBack={() => goToStep(2)}
+          onBack={() => goToStep(3)}
         />
       )}
       </main>
@@ -838,14 +905,13 @@ function ProjectSetup({
                 )}
               </div>
             )}
-
           </div>
         )}
 
         <SurveyNotice />
 
         <button type="button" className="primary full" disabled={!canContinue} onClick={onContinue}>
-          Calculate buildable potential <span aria-hidden="true">→</span>
+          See what you can build <span aria-hidden="true">→</span>
         </button>
         {propertyReady && !structureReadyFromInputs(projectType, existingStructure) && (
           <p className="form-hint">Enter the existing building footprint to continue.</p>
@@ -999,6 +1065,160 @@ function SurveyNotice() {
   );
 }
 
+/**
+ * Between the property form and the full results: show what the lot can hold —
+ * footprint, floors, total buildable — and only then ask what the client wants
+ * to build, checking it against those maximums as they type.
+ */
+function CapacityStep({ project, district, lot, entryMode, parcel, result, plannedFloors, onPlannedFloors, onBack, onContinue }) {
+  const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
+  const footprintValue = hasExistingHouse ? result.availableFootprint : result.footprint;
+  const footprintLabel = hasExistingHouse ? "Additional footprint available" : "Maximum building footprint";
+
+  // Resize the per-floor array while preserving values already typed.
+  const setFloorCount = (value) => {
+    const count = Math.max(0, Math.min(20, Math.floor(Number(value) || 0)));
+    const next = plannedFloors.slice(0, count);
+    while (next.length < count) next.push("");
+    onPlannedFloors(next);
+  };
+  const setFloorSize = (index, value) => {
+    const next = plannedFloors.slice();
+    next[index] = value;
+    onPlannedFloors(next);
+  };
+  const plannedTotal = result.plannedArea;
+  // Flag an over-limit floor count as soon as it is entered — before any floor
+  // sizes exist — so the user gets the error at the point of the mistake.
+  const maxFloors = district.max_stories ?? null;
+  const floorsExceeded = maxFloors != null && plannedFloors.length > maxFloors;
+
+  return (
+    <>
+      <section className="results-heading">
+        <div>
+          <p className="eyebrow">Step 2</p>
+          <h2>What you can build</h2>
+          <p>Here is the most this lot can hold under {district.code}. Enter the size you have in mind to check it.</p>
+        </div>
+        <span className="preliminary-badge">Preliminary</span>
+      </section>
+
+      <section className="workspace-grid">
+        <div className="card form-card">
+          <div className="capacity-figures">
+            <div>
+              <span>{footprintLabel}</span>
+              <strong>{fmt(footprintValue)} <em>sq ft</em></strong>
+              <small>The ground area you can build on.</small>
+            </div>
+            {district.max_stories != null && (
+              <div>
+                <span>Maximum floors</span>
+                <strong>{district.max_stories}</strong>
+                <small>Stories permitted in {district.code}.</small>
+              </div>
+            )}
+            <div>
+              <span>{projectResultTitle(project?.id)}</span>
+              {result.maxArea == null ? (
+                <strong className="answer-pending">Enter existing floor area</strong>
+              ) : (
+                <strong>{fmt(result.maxArea)} <em>sq ft</em></strong>
+              )}
+              <small>Footprint across all floors.</small>
+            </div>
+          </div>
+
+          <div className="planned-size">
+            <div className="method-title">
+              <div>
+                <h3>{plannedSizeLabel(project?.id)}</h3>
+                <p>
+                  Optional. Say how many floors you plan and the size of each — we’ll check it against the maximums
+                  above and base the cost estimate on it. Leave the floor count at zero to estimate the full maximum.
+                </p>
+              </div>
+              <span className="data-tag">Optional</span>
+            </div>
+            <div className="form-grid">
+              <label className={floorsExceeded ? "field invalid" : "field"}>
+                Number of floors you plan
+                <input
+                  type="number"
+                  min="0"
+                  max="20"
+                  step="1"
+                  value={plannedFloors.length || ""}
+                  onChange={(e) => setFloorCount(e.target.value)}
+                  aria-invalid={floorsExceeded || undefined}
+                />
+                {floorsExceeded ? (
+                  <small className="field-error">
+                    {district.code} allows a maximum of {maxFloors} {maxFloors === 1 ? "floor" : "floors"}. Reduce the
+                    count — building higher would require a variance.
+                  </small>
+                ) : (
+                  <small>
+                    Sets one size field per floor.{maxFloors != null ? ` Up to ${maxFloors} allowed here.` : ""}
+                  </small>
+                )}
+              </label>
+            </div>
+            {plannedFloors.length > 0 && (
+              <>
+                <div className="form-grid floor-fields">
+                  {plannedFloors.map((size, index) => (
+                    <NumberField
+                      key={index}
+                      label={`Floor ${index + 1} size (sq ft)`}
+                      value={size}
+                      onChange={(value) => setFloorSize(index, value)}
+                      fieldKey="planned_floor_sqft"
+                    />
+                  ))}
+                </div>
+                <p className="planned-total">
+                  Planned total: <strong>{plannedTotal == null ? "—" : `${fmt(plannedTotal)} sq ft`}</strong>
+                  {result.plannedFootprint != null && (
+                    <> · largest floor {fmt(result.plannedFootprint)} sq ft</>
+                  )}
+                </p>
+              </>
+            )}
+          </div>
+
+          <PlanFeasibility result={result} projectType={project?.id} />
+
+          <div className="actions">
+            <button type="button" className="secondary" onClick={onBack}>← Back</button>
+            <button type="button" className="primary" onClick={onContinue}>
+              See cost &amp; zoning check <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </div>
+
+        <aside className="card preview-card">
+          <p className="eyebrow">Property preview</p>
+          <h2>{parcel?.address ?? "Lot diagram"}</h2>
+          <p className="preview-note">Diagram is for reference only and is not a survey.</p>
+          {parcel ? (
+            <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
+          ) : (
+            <LotDiagram lot={lot} result={result} />
+          )}
+          <div className="legend">
+            <span><i className="legend-lot" /> Property boundary</span>
+            {(entryMode === "manual" || parcel?.envelope_geojson) && (
+              <span><i className="legend-envelope" /> Approx. buildable envelope</span>
+            )}
+          </div>
+        </aside>
+      </section>
+    </>
+  );
+}
+
 function Results({ project, muni, district, lot, entryMode, parcel, result, costModel, onBack, onContinue }) {
   return (
     <>
@@ -1025,6 +1245,7 @@ function Results({ project, muni, district, lot, entryMode, parcel, result, cost
             <LotDiagram lot={lot} result={result} />
           )}
           <EngineSteps result={result} district={district} projectType={project?.id} />
+          <PlanFeasibility result={result} projectType={project?.id} />
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
         </div>
 
@@ -1065,7 +1286,8 @@ function Results({ project, muni, district, lot, entryMode, parcel, result, cost
  */
 function AnswerSummary({ project, muni, parcel, entryMode, result, costModel }) {
   const rates = TIER_ORDER.map((tier) => tierRate(costModel, tier)).filter((value) => value != null);
-  const area = result.estimateArea;
+  const { maxArea, plannedArea, fitsPlan } = result;
+  const costArea = result.estimateArea; // planned size when given, else the max
   const low = rates.length ? Math.min(...rates) : null;
   const high = rates.length ? Math.max(...rates) : null;
 
@@ -1079,21 +1301,29 @@ function AnswerSummary({ project, muni, parcel, entryMode, result, costModel }) 
       <div className="answer-figures">
         <div>
           <span>{projectResultTitle(project?.id)}</span>
-          {area == null ? (
+          {maxArea == null ? (
             <strong className="answer-pending">Needs one more input</strong>
           ) : (
             <strong>
-              {fmt(area)} <em>sq ft</em>
+              {fmt(maxArea)} <em>sq ft</em>
             </strong>
           )}
         </div>
+        {plannedArea != null && (
+          <div>
+            <span>Your planned size{fitsPlan == null ? "" : fitsPlan ? " · fits" : " · exceeds max"}</span>
+            <strong>
+              {fmt(plannedArea)} <em>sq ft</em>
+            </strong>
+          </div>
+        )}
         <div>
-          <span>Preliminary cost, Essential to Premium</span>
-          {area == null || low == null ? (
+          <span>Preliminary cost{plannedArea != null ? " for your plan" : ""}, Essential to Premium</span>
+          {costArea == null || low == null ? (
             <strong className="answer-pending">—</strong>
           ) : (
             <strong>
-              ${fmt(area * low)} – ${fmt(area * high)}
+              ${fmt(costArea * low)} – ${fmt(costArea * high)}
             </strong>
           )}
         </div>
@@ -1357,6 +1587,95 @@ function projectResultTitle(projectType) {
 }
 
 /**
+ * Compares the client's planned size against the zoning maximum — the "compare
+ * the program to the envelope" step from kickoff section 6. Renders nothing
+ * until a planned size is entered.
+ */
+function PlanFeasibility({ result, projectType }) {
+  const {
+    plannedArea,
+    plannedFootprint,
+    plannedFloorCount,
+    maxArea,
+    maxFootprint,
+    maxFloors,
+    fitsArea,
+    fitsFootprint,
+    fitsFloors,
+    fitsPlan,
+  } = result;
+  if (plannedArea == null) return null;
+
+  if (maxArea == null) {
+    return (
+      <div className="plan-feasibility unknown">
+        <strong>Planned total: {fmt(plannedArea)} sq ft across {plannedFloorCount} floors</strong>
+        <span>
+          Enter the existing floor area on the previous step to check this against the remaining{" "}
+          {projectType === "adu" ? "ADU" : "addition"} capacity.
+        </span>
+      </div>
+    );
+  }
+
+  // One row per applicable check. A null "fits" means the rule isn't set, so
+  // the dimension is reported without a verdict rather than silently passed.
+  const rows = [
+    {
+      key: "floors",
+      label: "Floors",
+      planned: `${plannedFloorCount}`,
+      max: maxFloors == null ? "no limit" : `${maxFloors}`,
+      fits: fitsFloors,
+    },
+    {
+      key: "footprint",
+      label: "Largest floor",
+      planned: `${fmt(plannedFootprint)} sq ft`,
+      max: maxFootprint == null ? "—" : `${fmt(maxFootprint)} sq ft`,
+      fits: fitsFootprint,
+    },
+    {
+      key: "area",
+      label: "Total floor area",
+      planned: `${fmt(plannedArea)} sq ft`,
+      max: `${fmt(maxArea)} sq ft`,
+      fits: fitsArea,
+    },
+  ];
+
+  return (
+    <div className={`plan-feasibility ${fitsPlan ? "fits" : "exceeds"}`}>
+      <strong>{fitsPlan ? "Your plan fits what the zoning allows" : "Your plan exceeds what the zoning allows"}</strong>
+      <ul className="plan-checks">
+        {rows.map((row) => (
+          <li className={row.fits == null ? "check-na" : row.fits ? "check-ok" : "check-bad"} key={row.key}>
+            <span className="plan-check-label">{row.label}</span>
+            <span className="plan-check-values">
+              {row.planned} <em>/ {row.max}</em>
+            </span>
+            <span className="plan-check-mark" aria-hidden="true">
+              {row.fits == null ? "–" : row.fits ? "✓" : "✕"}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <span>
+        {fitsPlan
+          ? "Everything checked is within the limits. The cost estimate is based on your planned total."
+          : "At least one dimension is over the limit — the plan would need to shrink or seek zoning relief. The cost estimate is still based on your planned total."}
+      </span>
+    </div>
+  );
+}
+
+function plannedSizeLabel(projectType) {
+  if (projectType === "addition") return "Planned addition size";
+  if (projectType === "adu") return "Planned ADU size";
+  return "Planned house size";
+}
+
+/**
  * Reference context for the calculation above: what this property is, and the
  * district limits the four steps were driven by. Deliberately does not repeat
  * the derived figures — those belong to the step chain.
@@ -1417,7 +1736,9 @@ function structureLocationLabel(location) {
 
 function CostCard({ result, costModel, projectType }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
-  const estimateLabel = projectType === "adu" ? "potential ADU capacity" : hasExistingHouse ? "remaining addition capacity" : "total allowable area";
+  const usingPlanned = result.plannedArea != null;
+  const maxLabel = projectType === "adu" ? "potential ADU capacity" : hasExistingHouse ? "remaining addition capacity" : "total allowable area";
+  const basisLabel = usingPlanned ? "your planned size" : `the ${maxLabel}`;
   return (
     <div className="card result-card">
       <h3>
@@ -1425,8 +1746,9 @@ function CostCard({ result, costModel, projectType }) {
         {costModel && <span className={`badge ${costModel.provenance}`}>{costModel.provenance}</span>}
       </h3>
       <p className="card-intro">
-        Planning ranges based on the {estimateLabel}, not a contractor quote. All three levels are shown so the
-        spread is visible — the finishes, not the buildable area, are what move the number.
+        Planning ranges based on {basisLabel}
+        {result.estimateArea != null ? ` (${fmt(result.estimateArea)} sq ft)` : ""}, not a contractor quote. All
+        three levels are shown so the spread is visible — the finishes, not the floor area, are what move the number.
       </p>
       {!costModel && <p className="fine">No rate card is loaded for this municipality yet.</p>}
       {costModel && hasExistingHouse && result.estimateArea == null && (
@@ -1507,6 +1829,18 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
               <div><span>Maximum house footprint</span><strong>{fmt(result.footprint)} sq ft</strong></div>
               <div><span>Total allowable building area</span><strong>{fmt(result.buildable)} sq ft</strong></div>
             </>
+          )}
+          {result.plannedArea != null && (
+            <div>
+              <span>Planned size{result.fitsPlan == null ? "" : result.fitsPlan ? " (fits)" : " (exceeds max)"}</span>
+              <strong>
+                {fmt(result.plannedArea)} sq ft
+                {result.planDelta != null &&
+                  (result.fitsPlan
+                    ? ` — ${fmt(result.planDelta)} to spare`
+                    : ` — ${fmt(Math.abs(result.planDelta))} over`)}
+              </strong>
+            </div>
           )}
           {TIER_ORDER.map((tierName) => {
             const rate = tierRate(costModel, tierName);
