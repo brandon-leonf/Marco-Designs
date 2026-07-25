@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://marcodesign/demarco/rates.schema.json",
   "title": "Town Rate Card",
-  "description": "Proprietary Marco Design build-cost rates for one town. Kept in a separate, git-ignored file so zoning configs can be public while rate figures stay private (see kickoff section 9). Loader merges this with the matching town config by slug.",
+  "description": "Proprietary Marco Design build-cost rates for one town. Kept in a separate, git-ignored file so zoning configs can be public while rate figures stay private (see kickoff section 9). Loader merges this with the matching town config by slug. Tier names are Marco's client-facing levels: essential / signature / premium.",
   "type": "object",
   "required": ["slug", "provenance", "tiers"],
   "additionalProperties": false,
@@ -14,12 +14,12 @@
     "local_cost_factor":          { "type": ["number", "null"], "minimum": 0 },
     "tiers": {
       "type": "object",
-      "required": ["builder_grade", "mid_level", "high_end"],
+      "required": ["essential", "signature", "premium"],
       "additionalProperties": false,
       "properties": {
-        "builder_grade": { "$ref": "#/$defs/tier" },
-        "mid_level":     { "$ref": "#/$defs/tier" },
-        "high_end":      { "$ref": "#/$defs/tier" }
+        "essential": { "$ref": "#/$defs/tier" },
+        "signature": { "$ref": "#/$defs/tier" },
+        "premium":   { "$ref": "#/$defs/tier" }
       }
     }
   },
@@ -29,8 +29,23 @@
       "required": ["rate_per_sqft"],
       "additionalProperties": false,
       "properties": {
-        "rate_per_sqft":     { "type": "number", "minimum": 0 },
-        "formula_reference": { "type": "string" }
+        "rate_per_sqft": {
+          "description": "Single number for estimated tiers; {min, max} range for verified tiers.",
+          "oneOf": [
+            { "type": "number", "minimum": 0 },
+            {
+              "type": "object",
+              "required": ["min", "max"],
+              "additionalProperties": false,
+              "properties": {
+                "min": { "type": "number", "minimum": 0 },
+                "max": { "type": "number", "minimum": 0 }
+              }
+            }
+          ]
+        },
+        "formula_reference": { "type": "string" },
+        "notes":             { "type": "string" }
       }
     }
   },
