@@ -9,6 +9,14 @@
 
 import * as turf from "@turf/turf";
 
+function logCalculation(kind, inputs, intermediate, result) {
+  console.info(`[buildable-envelope:${kind}]`, {
+    inputs,
+    intermediate,
+    result,
+  });
+}
+
 /**
  * Per-edge inset of a rectangular lot. Exact arithmetic — better than a
  * uniform buffer for rectangles, and matches how the rules engine will treat
@@ -57,10 +65,11 @@ export function computeBuildable(lot, district) {
   const stories = district.max_stories ?? 1;
   let buildable = footprint * stories;
 
-  const farCap = district.max_far != null ? lotArea * district.max_far : Infinity;
+  const far = Number(district.max_far);
+  const farCap = Number.isFinite(far) && far > 0 ? lotArea * far : Infinity;
   buildable = Math.min(buildable, farCap);
 
-  return {
+  const result = {
     lotArea,
     envelope,
     footprint,
@@ -74,6 +83,13 @@ export function computeBuildable(lot, district) {
           : "setbacks",
     farLimited: buildable === farCap && farCap !== Infinity,
   };
+  logCalculation(
+    "rectangle",
+    { lot, district },
+    { lotArea, coveragePct, coverageCap, stories, farCap },
+    result
+  );
+  return result;
 }
 
 /**
@@ -88,10 +104,11 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
 
   const stories = district.max_stories ?? 1;
   let buildable = footprint * stories;
-  const farCap = district.max_far != null ? lotAreaSqft * district.max_far : Infinity;
+  const far = Number(district.max_far);
+  const farCap = Number.isFinite(far) && far > 0 ? lotAreaSqft * far : Infinity;
   buildable = Math.min(buildable, farCap);
 
-  return {
+  const result = {
     lotArea: lotAreaSqft,
     envelopeArea: envelopeAreaSqft ?? 0,
     footprint,
@@ -100,6 +117,13 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
     binding: footprint === 0 ? "setbacks" : coverageCap < (envelopeAreaSqft ?? 0) ? "coverage" : "setbacks",
     farLimited: buildable === farCap && farCap !== Infinity,
   };
+  logCalculation(
+    "polygon-area",
+    { lotAreaSqft, envelopeAreaSqft, district },
+    { coveragePct, coverageCap, stories, farCap },
+    result
+  );
+  return result;
 }
 
 /** Largest applicable setback → conservative uniform inset for previews. */

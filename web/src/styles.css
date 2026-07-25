@@ -640,6 +640,32 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .save-ok { color: var(--green); font-weight: 700; }
 .admin-actions { justify-content: flex-end; }
 button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
+.test-config { display: grid; gap: 0.8rem; }
+.test-config .admin-hint { margin: 0; }
+.test-inputs { margin-top: 0.2rem; }
+.test-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.7rem;
+  margin: 0;
+}
+.test-results div {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.65rem 0.75rem;
+}
+.test-results dt { color: var(--muted); font-size: 0.74rem; }
+.test-results dd { margin: 0.2rem 0 0; font-weight: 800; color: var(--primary); }
+.validation-panel {
+  background: #fdecec;
+  border: 1px solid #f2b8b5;
+  color: #8c1d18;
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  font-size: 0.82rem;
+}
+.validation-panel ul { margin: 0.45rem 0 0; padding-left: 1.2rem; }
 
 /* ---------- Cost provenance (verified vs estimated) ---------- */
 .provenance-flag {

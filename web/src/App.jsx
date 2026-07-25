@@ -7,8 +7,6 @@ import {
 } from "./lib/supabase.js";
 import {
   computeBuildable,
-  computeBuildableFromAreas,
-  conservativeInsetFt,
 } from "./lib/envelope.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import ParcelPlan from "./components/ParcelPlan.jsx";
@@ -117,11 +115,13 @@ export default function App() {
         }
 
         setDistrictId(matchedDistrict.id);
-        const loadedParcel = await fetchParcelEnvelope(
-          parcelPick.parcel_id,
-          conservativeInsetFt(matchedDistrict)
-        );
-        if (!stale) setParcel(loadedParcel);
+        // Until front/rear/side edges can be identified reliably, do not
+        // apply the largest setback uniformly to the polygon. The recorded
+        // frontage/depth rectangular fallback applies each setback to its
+        // correct edge and avoids erasing narrow urban parcels.
+        // `boundary` was already stored above with no envelope overlay. Keep
+        // displaying the surveyed parcel outline while the numeric result uses
+        // the recorded rectangle.
       } catch (e) {
         if (stale) return;
         setParcelError(e.message ?? String(e));
@@ -139,11 +139,15 @@ export default function App() {
     if (!district) return null;
     let zoningResult = null;
     if (entryMode === "search" && parcel) {
-      zoningResult = computeBuildableFromAreas(
-        Number(parcel.lot_area_sqft),
-        Number(parcel.envelope_area_sqft ?? 0),
-        district
-      );
+      const width = Number(parcel.lot_frontage_ft);
+      const depth = Number(parcel.lot_depth_ft);
+      const area = Number(parcel.lot_area_sqft);
+      if (width > 0 && depth > 0 && area > 0) {
+        zoningResult = computeBuildable(
+          { width_ft: width, depth_ft: depth, area_sqft: area },
+          district
+        );
+      }
     } else if (entryMode === "manual" && lot.width_ft > 0 && lot.depth_ft > 0 && lot.area_sqft > 0) {
       zoningResult = computeBuildable(lot, district);
     }
@@ -818,7 +822,7 @@ function PropertyTable({ parcel, result, district, projectType }) {
         <tr><td>Lot area</td><td>{fmt(result.lotArea)} sq ft</td></tr>
         <tr>
           <td>Approx. envelope</td>
-          <td>{fmt(parcel ? result.envelopeArea : result.envelope.areaSqft)} sq ft</td>
+          <td>{fmt(result.envelope?.areaSqft ?? result.envelopeArea)} sq ft</td>
         </tr>
         <tr><td>{hasExistingHouse ? "Zoning maximum footprint" : "Maximum house footprint"}</td><td>{fmt(result.footprint)} sq ft</td></tr>
         {hasExistingHouse && (
