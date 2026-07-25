@@ -15,11 +15,11 @@ import ParcelPlan from "./components/ParcelPlan.jsx";
 import Logo from "./components/Logo.jsx";
 
 const TIER_LABELS = {
-  builder_grade: "Builder grade",
-  mid_level: "Mid level",
-  high_end: "High end",
+  essential: "Essential",
+  signature: "Signature",
+  premium: "Premium",
 };
-const TIER_ORDER = ["builder_grade", "mid_level", "high_end"];
+const TIER_ORDER = ["essential", "signature", "premium"];
 const PROJECT_TYPES = [
   { id: "new_house", label: "New house", description: "Vacant lot or full replacement" },
   { id: "addition", label: "Addition", description: "Expand an existing house" },
@@ -873,14 +873,34 @@ function structureLocationLabel(location) {
 function CostCard({ result, costModel, projectType }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
   const estimateLabel = projectType === "adu" ? "potential ADU capacity" : hasExistingHouse ? "remaining addition capacity" : "total allowable area";
+  const verified = costModel?.provenance === "verified";
   return (
     <div className="card result-card">
       <h3>
         Preliminary build cost
-        {costModel && <span className={`badge ${costModel.provenance}`}>{costModel.provenance}</span>}
+        {costModel && (
+          <span className={`provenance-flag ${costModel.provenance}`}>
+            {verified ? "✓ Verified Price" : "✕ Estimated"}
+          </span>
+        )}
       </h3>
       <p className="card-intro">Planning ranges based on the {estimateLabel}, not a contractor quote.</p>
       {!costModel && <p className="fine">No rate card is loaded for this municipality yet.</p>}
+      {costModel &&
+        (verified ? (
+          <div className="provenance-note verified" role="note">
+            <strong>✓ Verified Price</strong>
+            <span>Based on Marco Designs’ real figures from homes built in this area.</span>
+          </div>
+        ) : (
+          <div className="provenance-note estimated" role="alert">
+            <strong>✕ Rough estimate</strong>
+            <span>
+              This is a projection based on regional cost variables — not local build history. Actual
+              costs may include expenses not accounted for here.
+            </span>
+          </div>
+        ))}
       {costModel && hasExistingHouse && result.estimateArea == null && (
         <div className="cost-unavailable">
           Enter the existing number of stories or total square feet to estimate remaining floor area and construction cost.
@@ -891,10 +911,23 @@ function CostCard({ result, costModel, projectType }) {
           {TIER_ORDER.map((tierName) => {
             const tier = costModel.build_cost_tiers.find((item) => item.tier === tierName);
             if (!tier) return null;
+            const hasRange = tier.rate_per_sqft_max != null;
             return (
               <div className="cost-tier" key={tierName}>
-                <div><strong>{TIER_LABELS[tierName]}</strong><span>${fmt(tier.rate_per_sqft, 2)} / sq ft</span></div>
-                <b>${fmt(result.estimateArea * tier.rate_per_sqft)}</b>
+                <div>
+                  <strong>{TIER_LABELS[tierName]}</strong>
+                  <span>
+                    {hasRange
+                      ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
+                      : `$${fmt(tier.rate_per_sqft, 2)} / sq ft`}
+                  </span>
+                  {tier.notes && <small className="tier-notes">{tier.notes}</small>}
+                </div>
+                <b>
+                  {hasRange
+                    ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
+                    : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`}
+                </b>
               </div>
             );
           })}
@@ -910,7 +943,7 @@ function CostCard({ result, costModel, projectType }) {
 }
 
 function Review({ project, muni, district, lot, parcel, result, costModel, onBack }) {
-  const midTier = costModel?.build_cost_tiers.find((item) => item.tier === "mid_level");
+  const midTier = costModel?.build_cost_tiers.find((item) => item.tier === "signature");
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
   return (
     <>
@@ -958,8 +991,21 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
             </>
           )}
           <div>
-            <span>Mid-level cost estimate</span>
-            <strong>{midTier && result.estimateArea != null ? `$${fmt(result.estimateArea * midTier.rate_per_sqft)}` : "Needs floor-area input"}</strong>
+            <span>
+              Signature cost estimate
+              {costModel && (
+                <span className={`provenance-flag inline ${costModel.provenance}`}>
+                  {costModel.provenance === "verified" ? "✓ Verified" : "✕ Estimated"}
+                </span>
+              )}
+            </span>
+            <strong>
+              {midTier && result.estimateArea != null
+                ? midTier.rate_per_sqft_max != null
+                  ? `$${fmt(result.estimateArea * midTier.rate_per_sqft)} – $${fmt(result.estimateArea * midTier.rate_per_sqft_max)}`
+                  : `$${fmt(result.estimateArea * midTier.rate_per_sqft)}`
+                : "Needs floor-area input"}
+            </strong>
           </div>
           {parcel ? (
             <div><span>Block / Lot</span><strong>{parcel.block ?? "—"} / {parcel.lot ?? "—"}</strong></div>

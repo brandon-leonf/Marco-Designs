@@ -9,15 +9,19 @@ import {
   saveDistrict,
   touchMunicipality,
   saveCostModel,
+  createMunicipality,
+  createDistrict,
 } from "./lib/adminApi.js";
 import Logo from "./components/Logo.jsx";
 
-const TIER_ORDER = ["builder_grade", "mid_level", "high_end"];
+const TIER_ORDER = ["essential", "signature", "premium"];
 const TIER_LABELS = {
-  builder_grade: "Builder Grade ($/sq ft)",
-  mid_level: "Mid Level ($/sq ft)",
-  high_end: "High End ($/sq ft)",
+  essential: "Essential",
+  signature: "Signature",
+  premium: "Premium",
 };
+// Fixed multipliers behind Marco's estimated model: baseline x factor x multiplier.
+const TIER_MULTIPLIERS = { essential: 0.75, signature: 1.0, premium: 1.4 };
 
 /** "" in a form field means "not set" and is stored as NULL. */
 const numOrNull = (value) => (value === "" || value == null ? null : Number(value));
@@ -181,7 +185,11 @@ function draftFromCostModel(costModel) {
   const tiers = {};
   for (const name of TIER_ORDER) {
     const tier = costModel?.build_cost_tiers?.find((item) => item.tier === name);
-    tiers[name] = numOrEmpty(tier?.rate_per_sqft);
+    tiers[name] = {
+      min: numOrEmpty(tier?.rate_per_sqft),
+      max: numOrEmpty(tier?.rate_per_sqft_max),
+      notes: tier?.notes ?? "",
+    };
   }
   return {
     provenance: costModel?.provenance ?? "estimated",
@@ -202,6 +210,8 @@ function ConfigEditor({ adminEmail, ready }) {
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState(null); // {kind: "ok"|"error", text}
   const [copied, setCopied] = useState(false);
+  const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, district}
+  const [newDistrict, setNewDistrict] = useState(null); // null | {code, name}
 
   const reload = () =>
     fetchMunicipalities()
@@ -280,7 +290,18 @@ function ConfigEditor({ adminEmail, ready }) {
           regional_baseline_per_sqft: numOrNull(costDraft.regional_baseline_per_sqft),
           local_cost_factor: numOrNull(costDraft.local_cost_factor),
           tiers: Object.fromEntries(
-            TIER_ORDER.map((name) => [name, numOrNull(costDraft.tiers[name])])
+            TIER_ORDER.map((name) => [
+              name,
+              costDraft.provenance === "verified"
+                ? {
+                    rate_per_sqft: {
+                      min: numOrNull(costDraft.tiers[name].min),
+                      max: numOrNull(costDraft.tiers[name].max),
+                    },
+                    notes: costDraft.tiers[name].notes || null,
+                  }
+                : { rate_per_sqft: numOrNull(costDraft.tiers[name].min) },
+            ])
           ),
         },
       },
@@ -292,7 +313,10 @@ function ConfigEditor({ adminEmail, ready }) {
   const estimated = costDraft?.provenance === "estimated";
   const costModelComplete =
     costDraft &&
-    TIER_ORDER.every((name) => costDraft.tiers[name] !== "") &&
+    TIER_ORDER.every(
+      (name) =>
+        costDraft.tiers[name].min !== "" && (estimated || costDraft.tiers[name].max !== "")
+    ) &&
     (!estimated ||
       (costDraft.regional_baseline_per_sqft !== "" && costDraft.local_cost_factor !== ""));
 
@@ -337,7 +361,15 @@ function ConfigEditor({ adminEmail, ready }) {
               : null,
             local_cost_factor: estimated ? numOrNull(costDraft.local_cost_factor) : null,
           },
-          Object.fromEntries(TIER_ORDER.map((name) => [name, Number(costDraft.tiers[name])]))
+          TIER_ORDER.map((name) => ({
+            tier: name,
+            rate_per_sqft: Number(costDraft.tiers[name].min),
+            rate_per_sqft_max: estimated ? null : Number(costDraft.tiers[name].max),
+            notes: estimated ? null : costDraft.tiers[name].notes || null,
+            formula_reference: estimated
+              ? `regional_baseline * local_factor * ${TIER_MULTIPLIERS[name]}`
+              : "authoritative_historical_rate",
+          }))
         );
       }
 
@@ -347,8 +379,67 @@ function ConfigEditor({ adminEmail, ready }) {
         kind: "ok",
         text: costModelComplete
           ? "Saved. Changes are live for every visitor."
-          : "District saved. Cost model skipped — fill in every tier rate (and baseline + factor for estimated) to save it.",
+          : "District saved. Cost model skipped — every tier needs a rate (min and max for verified; baseline + factor for estimated).",
       });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const slugFor = (name, state) =>
+    `${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${state
+      .trim()
+      .toLowerCase()}`;
+
+  const submitNewMuni = async () => {
+    if (!newMuni?.name.trim() || newMuni.state.trim().length !== 2 || !newMuni.district.trim()) {
+      setSaveState({ kind: "error", text: "A new municipality needs a name, a 2-letter state, and a starting district code." });
+      return;
+    }
+    setSaving(true);
+    setSaveState(null);
+    try {
+      const id = await createMunicipality({
+        name: newMuni.name.trim(),
+        stateCode: newMuni.state.trim(),
+        county: newMuni.county.trim(),
+        slug: slugFor(newMuni.name, newMuni.state),
+        districtCode: newMuni.district.trim().toUpperCase(),
+      });
+      const data = await reload();
+      setMuniId(id);
+      setDistrictId(data?.find((m) => m.id === id)?.zoning_districts[0]?.id ?? null);
+      setNewMuni(null);
+      setSaveState({
+        kind: "ok",
+        text: "Municipality created. Fill in the district rules and cost model, then Save Changes.",
+      });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submitNewDistrict = async () => {
+    if (!newDistrict?.code.trim()) {
+      setSaveState({ kind: "error", text: "A new district needs a code (e.g. R-2)." });
+      return;
+    }
+    setSaving(true);
+    setSaveState(null);
+    try {
+      const id = await createDistrict(
+        muni.id,
+        newDistrict.code.trim().toUpperCase(),
+        newDistrict.name.trim()
+      );
+      await reload();
+      setDistrictId(id);
+      setNewDistrict(null);
+      setSaveState({ kind: "ok", text: "District added. Fill in its rules, then Save Changes." });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
     } finally {
@@ -372,6 +463,34 @@ function ConfigEditor({ adminEmail, ready }) {
 
   const setField = (key) => (value) => setDraft((d) => ({ ...d, [key]: value }));
   const setCostField = (key) => (value) => setCostDraft((d) => ({ ...d, [key]: value }));
+  const setTierField = (name, key) => (value) =>
+    setCostDraft((d) => ({
+      ...d,
+      tiers: { ...d.tiers, [name]: { ...d.tiers[name], [key]: value } },
+    }));
+
+  const deriveEstimatedRates = () => {
+    const base = Number(costDraft.regional_baseline_per_sqft);
+    const factor = Number(costDraft.local_cost_factor);
+    if (!base || !factor) {
+      setSaveState({ kind: "error", text: "Enter the regional baseline and local cost factor first." });
+      return;
+    }
+    setCostDraft((d) => ({
+      ...d,
+      tiers: Object.fromEntries(
+        TIER_ORDER.map((name) => [
+          name,
+          {
+            ...d.tiers[name],
+            min: Math.round(base * factor * TIER_MULTIPLIERS[name] * 100) / 100,
+            max: "",
+          },
+        ])
+      ),
+    }));
+    setSaveState(null);
+  };
 
   return (
     <section className="admin-grid">
@@ -395,6 +514,70 @@ function ConfigEditor({ adminEmail, ready }) {
           <i aria-hidden="true">✓</i> Active municipality
         </span>
         <p className="admin-side-note">This editor loads municipal zoning and pricing configuration.</p>
+        {newMuni ? (
+          <div className="inline-create" role="group" aria-label="New municipality">
+            <label>
+              Town name
+              <input
+                type="text"
+                value={newMuni.name}
+                placeholder="e.g. Hoboken"
+                onChange={(e) => setNewMuni({ ...newMuni, name: e.target.value })}
+              />
+            </label>
+            <div className="inline-create-row">
+              <label>
+                State
+                <input
+                  type="text"
+                  maxLength={2}
+                  value={newMuni.state}
+                  onChange={(e) => setNewMuni({ ...newMuni, state: e.target.value.toUpperCase() })}
+                />
+              </label>
+              <label>
+                County
+                <input
+                  type="text"
+                  value={newMuni.county}
+                  placeholder="optional"
+                  onChange={(e) => setNewMuni({ ...newMuni, county: e.target.value })}
+                />
+              </label>
+            </div>
+            <label>
+              First district code
+              <input
+                type="text"
+                value={newMuni.district}
+                placeholder="e.g. R"
+                onChange={(e) => setNewMuni({ ...newMuni, district: e.target.value })}
+              />
+            </label>
+            {newMuni.name.trim() && newMuni.state.trim().length === 2 && (
+              <p className="admin-side-note">
+                Config id: <code>{slugFor(newMuni.name, newMuni.state)}</code>
+              </p>
+            )}
+            <div className="inline-create-actions">
+              <button type="button" className="secondary compact" onClick={() => setNewMuni(null)}>
+                Cancel
+              </button>
+              <button type="button" className="primary compact" disabled={saving} onClick={submitNewMuni}>
+                Create
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={!ready}
+            onClick={() => setNewMuni({ name: "", state: "NJ", county: "", district: "R" })}
+          >
+            ＋ New municipality
+          </button>
+        )}
         <div className="admin-about">
           <strong>About this editor</strong>
           <p>
@@ -434,6 +617,47 @@ function ConfigEditor({ adminEmail, ready }) {
           {districts.length === 0 && <li className="admin-side-note">No districts match.</li>}
         </ul>
         <p className="district-count">{muni?.zoning_districts.length ?? 0} districts total</p>
+        {newDistrict ? (
+          <div className="inline-create" role="group" aria-label="New district">
+            <div className="inline-create-row">
+              <label>
+                Code
+                <input
+                  type="text"
+                  value={newDistrict.code}
+                  placeholder="e.g. R-2"
+                  onChange={(e) => setNewDistrict({ ...newDistrict, code: e.target.value })}
+                />
+              </label>
+              <label>
+                Name
+                <input
+                  type="text"
+                  value={newDistrict.name}
+                  placeholder="optional"
+                  onChange={(e) => setNewDistrict({ ...newDistrict, name: e.target.value })}
+                />
+              </label>
+            </div>
+            <div className="inline-create-actions">
+              <button type="button" className="secondary compact" onClick={() => setNewDistrict(null)}>
+                Cancel
+              </button>
+              <button type="button" className="primary compact" disabled={saving} onClick={submitNewDistrict}>
+                Add
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={!ready}
+            onClick={() => setNewDistrict({ code: "", name: "" })}
+          >
+            ＋ Add district
+          </button>
+        )}
       </aside>
 
       <div className="card admin-editor">
@@ -503,20 +727,11 @@ function ConfigEditor({ adminEmail, ready }) {
             <span className="admin-section-icon" aria-hidden="true">$</span> D. Cost Model
           </legend>
           <div className="admin-fields four">
-            {TIER_ORDER.map((name) => (
-              <Num
-                key={name}
-                label={TIER_LABELS[name]}
-                value={costDraft.tiers[name]}
-                onChange={(value) => setCostDraft((d) => ({ ...d, tiers: { ...d.tiers, [name]: value } }))}
-                step="0.01"
-              />
-            ))}
             <label>
               Provenance
               <select value={costDraft.provenance} onChange={(e) => setCostField("provenance")(e.target.value)}>
-                <option value="verified">Verified</option>
-                <option value="estimated">Estimated</option>
+                <option value="verified">Verified — Marco’s real figures</option>
+                <option value="estimated">Estimated — regional projection</option>
               </select>
             </label>
             {estimated && (
@@ -536,9 +751,74 @@ function ConfigEditor({ adminEmail, ready }) {
               </>
             )}
           </div>
+          {estimated ? (
+            <div className="provenance-note estimated" role="note">
+              <strong>✕ Clients will see a red warning</strong>
+              <span>
+                “Rough estimate based on regional variables — actual costs may include expenses not
+                accounted for.” Each tier is one derived rate: baseline × factor × multiplier
+                (0.75 / 1.0 / 1.4).
+              </span>
+            </div>
+          ) : (
+            <div className="provenance-note verified" role="note">
+              <strong>✓ Clients will see “Verified Price”</strong>
+              <span>
+                Verified pricing shows a min–max range per tier, with your client-facing notes under
+                each level.
+              </span>
+            </div>
+          )}
+          {TIER_ORDER.map((name) => (
+            <div className="tier-editor" key={name}>
+              <span className="tier-editor-name">{TIER_LABELS[name]}</span>
+              <div className="admin-fields four">
+                {estimated ? (
+                  <Num
+                    label="Rate ($/sq ft)"
+                    value={costDraft.tiers[name].min}
+                    onChange={(value) => setTierField(name, "min")(value)}
+                    step="0.01"
+                  />
+                ) : (
+                  <>
+                    <Num
+                      label="Min ($/sq ft)"
+                      value={costDraft.tiers[name].min}
+                      onChange={(value) => setTierField(name, "min")(value)}
+                      step="0.01"
+                    />
+                    <Num
+                      label="Max ($/sq ft)"
+                      value={costDraft.tiers[name].max}
+                      onChange={(value) => setTierField(name, "max")(value)}
+                      step="0.01"
+                    />
+                  </>
+                )}
+              </div>
+              {!estimated && (
+                <label className="tier-notes-field">
+                  Client-facing notes
+                  <input
+                    type="text"
+                    value={costDraft.tiers[name].notes}
+                    placeholder="e.g. Our most popular level — semi-custom homes with real character."
+                    onChange={(e) => setTierField(name, "notes")(e.target.value)}
+                  />
+                </label>
+              )}
+            </div>
+          ))}
+          {estimated && (
+            <button type="button" className="secondary compact" onClick={deriveEstimatedRates}>
+              ⟳ Derive rates from baseline × factor
+            </button>
+          )}
           <p className="admin-hint">
-            Verified rates are Marco’s real figures. Estimated models must carry the regional baseline
-            and local factor they were derived from, and every visitor sees the provenance label.
+            Every visitor sees the provenance label — verified prices with a green checkmark, estimates
+            with a red warning. Switching to estimated requires the baseline and factor the derivation
+            uses.
           </p>
         </fieldset>
 

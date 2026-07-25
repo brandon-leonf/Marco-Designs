@@ -75,11 +75,12 @@ export async function touchMunicipality(municipalityId) {
 }
 
 /**
- * Save the cost model + its three tier rates. The DB provenance_fields CHECK
+ * Save the cost model + its three tiers. The DB provenance_fields CHECK
  * requires baseline/factor to be set for estimated models and NULL for
- * verified ones, so the caller must pass them accordingly.
+ * verified ones. Each tier row carries {rate_per_sqft, rate_per_sqft_max,
+ * notes, formula_reference}; max/notes are NULL for estimated tiers.
  */
-export async function saveCostModel(municipalityId, existingModelId, model, tierRates) {
+export async function saveCostModel(municipalityId, existingModelId, model, tierRows) {
   let modelId = existingModelId;
 
   if (modelId) {
@@ -100,12 +101,10 @@ export async function saveCostModel(municipalityId, existingModelId, model, tier
     modelId = data[0].id;
   }
 
-  const rows = Object.entries(tierRates).map(([tier, rate]) => ({
+  const rows = tierRows.map((row) => ({
+    ...row,
     cost_model_id: modelId,
-    tier,
-    rate_per_sqft: rate,
     provenance: model.provenance,
-    formula_reference: "config_editor",
   }));
   const { data: tierData, error: tierError } = await supabase
     .from("build_cost_tiers")
@@ -113,4 +112,50 @@ export async function saveCostModel(municipalityId, existingModelId, model, tier
     .select("id");
   if (tierError) throw tierError;
   assertWritten(tierData, "cost tier");
+}
+
+/**
+ * Create a municipality with one starter district so it shows up everywhere.
+ * The state row must exist first (FK); ON CONFLICT DO NOTHING keeps this safe
+ * when it already does.
+ */
+export async function createMunicipality({ name, stateCode, county, slug, districtCode, districtName }) {
+  const code = stateCode.toUpperCase();
+  const { error: stateError } = await supabase
+    .from("states")
+    .upsert({ code, name: code }, { onConflict: "code", ignoreDuplicates: true });
+  if (stateError) throw stateError;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const { data: muniData, error: muniError } = await supabase
+    .from("municipalities")
+    .insert({ state_code: code, name, slug, county: county || null, last_updated: today })
+    .select("id");
+  if (muniError) throw muniError;
+  assertWritten(muniData, "municipality");
+  const municipalityId = muniData[0].id;
+
+  const { data: districtData, error: districtError } = await supabase
+    .from("zoning_districts")
+    .insert({
+      municipality_id: municipalityId,
+      code: districtCode,
+      name: districtName || null,
+      extra_rules: {},
+    })
+    .select("id");
+  if (districtError) throw districtError;
+  assertWritten(districtData, "district");
+  return municipalityId;
+}
+
+/** Add one district to an existing municipality. */
+export async function createDistrict(municipalityId, code, name) {
+  const { data, error } = await supabase
+    .from("zoning_districts")
+    .insert({ municipality_id: municipalityId, code, name: name || null, extra_rules: {} })
+    .select("id");
+  if (error) throw error;
+  assertWritten(data, "district");
+  return data[0].id;
 }
