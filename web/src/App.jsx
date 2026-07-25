@@ -3,6 +3,7 @@ import {
   supabase,
   fetchMunicipalities,
   fetchParcelEnvelope,
+  hasParcels,
   resolveParcelZoning,
 } from "./lib/supabase.js";
 import {
@@ -14,23 +15,46 @@ import ParcelSearch from "./components/ParcelSearch.jsx";
 import ParcelPlan from "./components/ParcelPlan.jsx";
 import Logo from "./components/Logo.jsx";
 
-const TIER_LABELS = {
-  builder_grade: "Builder grade",
-  mid_level: "Mid level",
-  high_end: "High end",
-};
-const TIER_ORDER = ["builder_grade", "mid_level", "high_end"];
+// Marketing names for the build-quality levels. The `id` stays on the database
+// tier keys so the loaded rate card keeps resolving without a migration.
+const PACKAGES = [
+  {
+    id: "builder_grade",
+    label: "Essential",
+    description: "Efficient, code-compliant construction with standard finishes.",
+  },
+  {
+    id: "mid_level",
+    label: "Signature",
+    description: "Upgraded finishes, detailing, and systems for most custom homes.",
+  },
+  {
+    id: "high_end",
+    label: "Premium",
+    description: "High-end materials, custom millwork, and premium mechanicals.",
+  },
+];
+const TIER_LABELS = Object.fromEntries(PACKAGES.map((item) => [item.id, item.label]));
+const TIER_DESCRIPTIONS = Object.fromEntries(PACKAGES.map((item) => [item.id, item.description]));
+const TIER_ORDER = PACKAGES.map((item) => item.id);
 const PROJECT_TYPES = [
   { id: "new_house", label: "New house", description: "Vacant lot or full replacement" },
   { id: "addition", label: "Addition", description: "Expand an existing house" },
   { id: "adu", label: "ADU", description: "Add a smaller separate living space" },
 ];
-const STEPS = ["Property Input", "Results", "Review & Export"];
+const STEPS = ["Project & Property", "Results", "Review & Export"];
 
 const fmt = (n, digits = 0) =>
   n == null || !isFinite(n)
     ? "—"
     : Number(n).toLocaleString("en-US", { maximumFractionDigits: digits });
+
+const tierRate = (costModel, tierId) =>
+  costModel?.build_cost_tiers?.find((item) => item.tier === tierId)?.rate_per_sqft ?? null;
+
+// The parcel path (PostGIS) reports `envelopeArea`; the rectangular manual path
+// reports a full `envelope` object. Callers should not have to know which.
+const envelopeAreaOf = (result) => result.envelopeArea ?? result.envelope?.areaSqft ?? 0;
 
 // Declarative bounds for the simple numeric inputs. Validation messages and the
 // browser min/max hints both read from here, so adding a new schema field is a
@@ -107,6 +131,8 @@ export default function App() {
   const [parcel, setParcel] = useState(null);
   const [parcelError, setParcelError] = useState(null);
   const [zoningCheck, setZoningCheck] = useState(null);
+  // "unknown" until the parcels table has been checked for this municipality.
+  const [parcelData, setParcelData] = useState("unknown");
 
   useEffect(() => {
     if (!supabase) return;
@@ -120,6 +146,34 @@ export default function App() {
       })
       .catch((e) => setError(e.message ?? String(e)));
   }, []);
+
+  // Address search is only worth offering when parcels exist for this town.
+  // Where the NJGIN import has not been run, fall back to manual entry rather
+  // than leaving the user on a search that can never return a result.
+  useEffect(() => {
+    if (!muniId) return;
+    let stale = false;
+    setParcelData("unknown");
+    hasParcels(muniId)
+      .then((available) => {
+        if (stale) return;
+        setParcelData(available ? "available" : "missing");
+        if (!available) {
+          setEntryMode("manual");
+          setParcelPick(null);
+          setParcel(null);
+          setZoningCheck(null);
+        }
+      })
+      .catch(() => {
+        // A failed probe must not strand the user: leave search available and
+        // let the search itself surface the error.
+        if (!stale) setParcelData("unknown");
+      });
+    return () => {
+      stale = true;
+    };
+  }, [muniId]);
 
   const muni = munis?.find((m) => m.id === muniId) ?? null;
   const district = muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
@@ -238,28 +292,35 @@ export default function App() {
   }, [district, entryMode, existingStructure, lot, parcel, projectType]);
 
   const project = PROJECT_TYPES.find((item) => item.id === projectType);
-  const propertyReady =
-    entryMode === "search"
-      ? Boolean(parcel && zoningCheck?.status === "matched")
-      : Boolean(result);
-  const structureReady =
-    projectType === "new_house" ||
-    Number(existingStructure.footprint_sqft) > 0;
   const manualInputsValid =
     entryMode !== "manual" ||
     (!validateField("width_ft", lot.width_ft, { required: true }) &&
       !validateField("depth_ft", lot.depth_ft, { required: true }) &&
       !validateField("area_sqft", lot.area_sqft, { required: true }));
+  const locationReady =
+    entryMode === "search"
+      ? Boolean(parcel && zoningCheck?.status === "matched")
+      : Boolean(
+          district &&
+            manualInputsValid &&
+            Number(lot.width_ft) > 0 &&
+            Number(lot.depth_ft) > 0 &&
+            Number(lot.area_sqft) > 0
+        );
+  const structureReady =
+    projectType === "new_house" ||
+    Number(existingStructure.footprint_sqft) > 0;
   const existingInputsValid =
     projectType === "new_house" ||
     !validateField("footprint_sqft", existingStructure.footprint_sqft, { required: true });
-  const canContinue = Boolean(
-    projectType &&
-      district &&
-      propertyReady &&
-      structureReady &&
-      manualInputsValid &&
-      existingInputsValid
+
+  // The single input step reveals itself in order: project type, then the
+  // property, then the questions that depend on a resolved property. Each gate
+  // below is also what unlocks the next section, so a user is never blocked by
+  // a question they have not been shown yet.
+  const propertyReady = Boolean(projectType && district && locationReady);
+  const canCalculate = Boolean(
+    propertyReady && structureReady && existingInputsValid && result
   );
 
   const goToStep = (next) => {
@@ -307,6 +368,28 @@ export default function App() {
     );
   }
 
+  // The preview panel has nothing real to draw until a parcel is picked (search)
+  // or dimensions exist (manual), so it stays hidden rather than showing a
+  // placeholder lot the user might mistake for their property. It also waits on
+  // the project type, so the opening question is never crowded by a diagram of
+  // the default lot.
+  const previewProps = {
+    visible:
+      !projectType
+        ? false
+        : entryMode === "search"
+          ? Boolean(parcelPick)
+          : Number(lot.width_ft) > 0 && Number(lot.depth_ft) > 0 && Number(lot.area_sqft) > 0,
+    muni,
+    district,
+    lot,
+    entryMode,
+    parcel,
+    parcelPick,
+    zoningCheck,
+    project,
+  };
+
   return (
     <>
       <TopNav />
@@ -317,22 +400,26 @@ export default function App() {
       {!error && !munis && <div className="card loading-card">Loading Union City property data…</div>}
 
       {munis && step === 1 && (
-        <PropertyInput
+        <ProjectSetup
           munis={munis}
           muni={muni}
-          district={district}
           muniId={muniId}
           districtId={districtId}
-          projectType={projectType}
           entryMode={entryMode}
+          parcelData={parcelData}
           lot={lot}
-          existingStructure={existingStructure}
           parcelPick={parcelPick}
           parcel={parcel}
           parcelError={parcelError}
           zoningCheck={zoningCheck}
-          canContinue={canContinue}
+          projectType={projectType}
+          existingStructure={existingStructure}
+          locationReady={locationReady}
+          propertyReady={propertyReady}
+          canContinue={canCalculate}
+          previewProps={previewProps}
           onProjectType={setProjectType}
+          onExistingStructure={setExistingStructure}
           onMuni={(id) => {
             setMuniId(id);
             const nextMuni = munis.find((item) => item.id === id);
@@ -343,7 +430,6 @@ export default function App() {
           }}
           onDistrict={setDistrictId}
           onLot={setLot}
-          onExistingStructure={setExistingStructure}
           onParcel={(picked) => {
             setParcelPick(picked);
             setParcel(null);
@@ -361,7 +447,7 @@ export default function App() {
           muni={muni}
           district={district}
           lot={lot}
-          existingStructure={existingStructure}
+          entryMode={entryMode}
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
@@ -376,7 +462,6 @@ export default function App() {
           muni={muni}
           district={district}
           lot={lot}
-          existingStructure={existingStructure}
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
@@ -434,45 +519,57 @@ function Stepper({ step, maxStepReached, onStep }) {
   );
 }
 
-function PropertyInput({
+/**
+ * The single input step, revealed in the order the calculation needs it:
+ * project type first, then the property, then the questions that only make
+ * sense once a real lot has been resolved. Nothing is asked before the answer
+ * can be used, and no section appears until the one above it is settled.
+ */
+function ProjectSetup({
   munis,
   muni,
-  district,
   muniId,
   districtId,
-  projectType,
   entryMode,
+  parcelData,
   lot,
-  existingStructure,
   parcelPick,
   parcel,
   parcelError,
   zoningCheck,
+  projectType,
+  existingStructure,
+  locationReady,
+  propertyReady,
   canContinue,
+  previewProps,
   onProjectType,
+  onExistingStructure,
   onMuni,
   onDistrict,
   onLot,
-  onExistingStructure,
   onParcel,
   onManual,
   onSearch,
   onContinue,
 }) {
+  const hasExistingHouse = projectType === "addition" || projectType === "adu";
+  const searchUnavailable = parcelData === "missing";
+
   return (
-    <section className="workspace-grid">
+    <section className={previewProps.visible ? "workspace-grid" : "workspace-grid solo"}>
       <div className="card form-card">
         <div className="section-heading">
           <span className="section-icon">⌂</span>
           <div>
             <p className="eyebrow">Step 1</p>
-            <h2>Tell us about your project</h2>
-            <p>Choose what you want to build, then identify the property.</p>
+            <h2>What are you building, and where?</h2>
+            <p>Start with the type of project. The rest of the form opens up as you go.</p>
           </div>
         </div>
 
         <fieldset className="field-group">
-          <legend>What are you planning?</legend>
+          <legend>What type of project is this?</legend>
           <div className="project-types">
             {PROJECT_TYPES.map((item) => (
               <button
@@ -489,209 +586,243 @@ function PropertyInput({
           </div>
         </fieldset>
 
-        {projectType === "new_house" && (
-          <div className="project-assumption">
-            <span aria-hidden="true">⌂</span>
-            <div>
-              <strong>New house calculation</strong>
-              <p>
-                This assumes the property is vacant or the existing structure will be completely replaced. The result
-                will show the maximum house footprint and total allowable building area.
-              </p>
-            </div>
-          </div>
+        {!projectType && (
+          <p className="reveal-hint">Choose a project type to continue.</p>
         )}
 
-        {(projectType === "addition" || projectType === "adu") && (
-          <div className="existing-structure">
-            <div className="method-title">
-              <div>
-                <h3>Existing house</h3>
-                <p>
-                  {projectType === "addition"
-                    ? "The footprint is the key MVP input. We’ll subtract it from the footprint zoning permits."
-                    : "The footprint is the key MVP input for estimating the space that may remain for an ADU."}
-                </p>
-              </div>
-              <span className="data-tag">Footprint required</span>
-            </div>
-            <div className="form-grid existing-fields">
-              <NumberField
-                label="Existing building footprint (sq ft) *"
-                value={existingStructure.footprint_sqft}
-                onChange={(value) =>
-                  onExistingStructure({ ...existingStructure, footprint_sqft: value })
-                }
-                help="Required. Ground area occupied by the current structure."
-                fieldKey="footprint_sqft"
-                required
-              />
-              <NumberField
-                label="Number of stories"
-                value={existingStructure.stories}
-                onChange={(value) =>
-                  onExistingStructure({ ...existingStructure, stories: value })
-                }
-                help="Optional. Used to approximate total floor area when it is unknown."
-                step="0.5"
-                fieldKey="stories"
-              />
-              <NumberField
-                label="Existing total square feet"
-                value={existingStructure.total_area_sqft}
-                onChange={(value) =>
-                  onExistingStructure({ ...existingStructure, total_area_sqft: value })
-                }
-                help="Optional. Combined finished area across all stories."
-                fieldKey="total_area_sqft"
-              />
+        {projectType && (
+          <div className="reveal">
+            <div className="form-grid">
               <label>
-                Current structure location
-                <select
-                  value={existingStructure.location}
-                  onChange={(e) =>
-                    onExistingStructure({ ...existingStructure, location: e.target.value })
-                  }
-                >
-                  <option value="unsure">Not sure</option>
-                  <option value="front">Toward the front of the lot</option>
-                  <option value="center">Near the center of the lot</option>
-                  <option value="rear">Toward the rear of the lot</option>
+                Municipality
+                <select value={muniId ?? ""} onChange={(e) => onMuni(Number(e.target.value))}>
+                  {munis.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}, {item.state_code}
+                    </option>
+                  ))}
                 </select>
-                <small>Optional. Helps future site-layout analysis; it does not change the MVP calculation.</small>
               </label>
+              {entryMode === "manual" ? (
+                <label>
+                  Zoning district <span className="manual-badge">Manual—unverified</span>
+                  <select
+                    value={districtId ?? ""}
+                    onChange={(e) => onDistrict(Number(e.target.value))}
+                    disabled={!muni?.zoning_districts?.length}
+                  >
+                    {muni?.zoning_districts?.length ? (
+                      muni.zoning_districts.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.code} {item.name ? `— ${item.name}` : ""}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">No districts loaded for this municipality</option>
+                    )}
+                  </select>
+                  <small>Confirm this district with {muni?.name} before relying on the result.</small>
+                </label>
+              ) : (
+                <div className="auto-zoning-field">
+                  <span>Municipal zoning district</span>
+                  <strong>{zoningStatusLabel(zoningCheck)}</strong>
+                  <small>Automatically identified by intersecting the parcel polygon with the municipal zoning layer.</small>
+                </div>
+              )}
             </div>
-            {projectType === "adu" && (
-              <p className="adu-note">
-                ADU eligibility, size, setbacks, parking, utilities, and whether it may be detached must still be
-                confirmed with Union City.
-              </p>
+
+            {searchUnavailable && (
+              <div className="data-missing-notice" role="status">
+                <strong>Address search is unavailable for {muni?.name}.</strong>
+                <span>
+                  The public NJGIN parcel data has not been imported into this environment, so there are no
+                  addresses to search. Enter the lot dimensions from a deed, tax record, or survey to continue —
+                  the result will be labelled manual and unverified.
+                </span>
+              </div>
+            )}
+
+            {entryMode === "search" ? (
+              <div className="property-method">
+                <div className="method-title">
+                  <div>
+                    <h3>Find the property</h3>
+                    <p>Search {muni?.name} public parcel records by street address.</p>
+                  </div>
+                  <span className="data-tag">NJGIN public data</span>
+                </div>
+                <ParcelSearch
+                  muniSlug={muni.slug}
+                  selected={parcelPick}
+                  onSelect={onParcel}
+                  onClear={() => onParcel(null)}
+                />
+                {zoningCheck?.status === "checking" && (
+                  <p className="status-line">Checking the parcel against the municipal zoning layer…</p>
+                )}
+                {parcelError && <p className="status-line error-text">Parcel lookup failed: {parcelError}</p>}
+                {parcelPick && (
+                  <div className="selected-property">
+                    <span className={zoningCheck?.status === "matched" ? "check" : "check pending"}>
+                      {zoningCheck?.status === "matched" ? "✓" : "!"}
+                    </span>
+                    <div>
+                      <strong>{parcel?.address ?? parcelPick.address ?? parcelPick.pams_pin}</strong>
+                      <span>
+                        Block {parcel?.block ?? parcelPick.block ?? "—"} / Lot {parcel?.lot ?? parcelPick.lot ?? "—"} ·{" "}
+                        {fmt(parcel?.lot_area_sqft ?? parcelPick.lot_area_sqft)} sq ft
+                      </span>
+                    </div>
+                  </div>
+                )}
+                <ZoningCheckNotice check={zoningCheck} />
+                <button type="button" className="text-button" onClick={onManual}>
+                  Can’t find the address? Enter lot details manually →
+                </button>
+              </div>
+            ) : (
+              <div className="property-method manual-entry">
+                <div className="method-title">
+                  <div>
+                    <h3>Enter lot details manually</h3>
+                    <p>Use dimensions from a deed, tax record, or recent survey.</p>
+                  </div>
+                  {!searchUnavailable && (
+                    <button type="button" className="text-button compact" onClick={onSearch}>
+                      Search by address
+                    </button>
+                  )}
+                </div>
+                <div className="form-grid three">
+                  <NumberField
+                    label="Lot width (ft)"
+                    value={lot.width_ft}
+                    onChange={(value) => onLot(withLotWidth(lot, value))}
+                    fieldKey="width_ft"
+                    required
+                  />
+                  <NumberField
+                    label="Lot depth (ft)"
+                    value={lot.depth_ft}
+                    onChange={(value) => onLot(withLotDepth(lot, value))}
+                    fieldKey="depth_ft"
+                    required
+                  />
+                  <NumberField
+                    label="Lot area (sq ft)"
+                    value={lot.area_sqft}
+                    onChange={(value) => onLot(withLotAreaManual(lot, value))}
+                    help={lot.area_manual ? undefined : "Auto-calculated from width × depth."}
+                    fieldKey="area_sqft"
+                    required
+                  />
+                </div>
+                {lot.area_manual && (
+                  <button
+                    type="button"
+                    className="text-button compact"
+                    onClick={() => onLot(withLotAreaRecalculated(lot))}
+                  >
+                    Reset area to width × depth
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}
 
-        <div className="form-grid">
-          <label>
-            Municipality
-            <select value={muniId ?? ""} onChange={(e) => onMuni(Number(e.target.value))}>
-              {munis.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}, {item.state_code}
-                </option>
-              ))}
-            </select>
-          </label>
-          {entryMode === "manual" ? (
-            <label>
-              Zoning district <span className="manual-badge">Manual—unverified</span>
-              <select
-                value={districtId ?? ""}
-                onChange={(e) => onDistrict(Number(e.target.value))}
-                disabled={!muni?.zoning_districts?.length}
-              >
-                {muni?.zoning_districts?.length ? (
-                  muni.zoning_districts.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.code} {item.name ? `— ${item.name}` : ""}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">No districts loaded for this municipality</option>
-                )}
-              </select>
-              <small>Confirm this district with Union City before relying on the result.</small>
-            </label>
-          ) : (
-            <div className="auto-zoning-field">
-              <span>Municipal zoning district</span>
-              <strong>{zoningStatusLabel(zoningCheck)}</strong>
-              <small>Automatically identified by intersecting the parcel polygon with the municipal zoning layer.</small>
-            </div>
-          )}
-        </div>
+        {projectType && !locationReady && (
+          <p className="reveal-hint">
+            {entryMode === "search"
+              ? "Select a property whose zoning is verified to see the remaining questions."
+              : "Enter the lot dimensions to see the remaining questions."}
+          </p>
+        )}
 
-        {entryMode === "search" ? (
-          <div className="property-method">
-            <div className="method-title">
-              <div>
-                <h3>Find the property</h3>
-                <p>Search Union City public parcel records by street address.</p>
-              </div>
-              <span className="data-tag">NJGIN public data</span>
-            </div>
-            <ParcelSearch
-              muniSlug={muni.slug}
-              selected={parcelPick}
-              onSelect={onParcel}
-              onClear={() => onParcel(null)}
-            />
-            {zoningCheck?.status === "checking" && (
-              <p className="status-line">Checking the parcel against the municipal zoning layer…</p>
-            )}
-            {parcelError && <p className="status-line error-text">Parcel lookup failed: {parcelError}</p>}
-            {parcelPick && (
-              <div className="selected-property">
-                <span className={zoningCheck?.status === "matched" ? "check" : "check pending"}>
-                  {zoningCheck?.status === "matched" ? "✓" : "!"}
-                </span>
+        {propertyReady && (
+          <div className="reveal">
+            {projectType === "new_house" && (
+              <div className="project-assumption">
+                <span aria-hidden="true">⌂</span>
                 <div>
-                  <strong>{parcel?.address ?? parcelPick.address ?? parcelPick.pams_pin}</strong>
-                  <span>
-                    Block {parcel?.block ?? parcelPick.block ?? "—"} / Lot {parcel?.lot ?? parcelPick.lot ?? "—"} ·{" "}
-                    {fmt(parcel?.lot_area_sqft ?? parcelPick.lot_area_sqft)} sq ft
-                  </span>
+                  <strong>New house calculation</strong>
+                  <p>
+                    This assumes the property is vacant or the existing structure will be completely replaced. The
+                    result will show the maximum house footprint and total allowable building area.
+                  </p>
                 </div>
               </div>
             )}
-            <ZoningCheckNotice check={zoningCheck} />
-            <button type="button" className="text-button" onClick={onManual}>
-              Can’t find the address? Enter lot details manually →
-            </button>
-          </div>
-        ) : (
-          <div className="property-method manual-entry">
-            <div className="method-title">
-              <div>
-                <h3>Enter lot details manually</h3>
-                <p>Use dimensions from a deed, tax record, or recent survey.</p>
+
+            {hasExistingHouse && (
+              <div className="existing-structure">
+                <div className="method-title">
+                  <div>
+                    <h3>Existing house</h3>
+                    <p>
+                      {projectType === "addition"
+                        ? "The footprint is the key MVP input. We’ll subtract it from the footprint zoning permits."
+                        : "The footprint is the key MVP input for estimating the space that may remain for an ADU."}
+                    </p>
+                  </div>
+                  <span className="data-tag">Footprint required</span>
+                </div>
+                <div className="form-grid existing-fields">
+                  <NumberField
+                    label="Existing building footprint (sq ft) *"
+                    value={existingStructure.footprint_sqft}
+                    onChange={(value) =>
+                      onExistingStructure({ ...existingStructure, footprint_sqft: value })
+                    }
+                    help="Required. Ground area occupied by the current structure."
+                    fieldKey="footprint_sqft"
+                    required
+                  />
+                  <NumberField
+                    label="Number of stories"
+                    value={existingStructure.stories}
+                    onChange={(value) =>
+                      onExistingStructure({ ...existingStructure, stories: value })
+                    }
+                    help="Optional. Used to approximate total floor area when it is unknown."
+                    step="0.5"
+                    fieldKey="stories"
+                  />
+                  <NumberField
+                    label="Existing total square feet"
+                    value={existingStructure.total_area_sqft}
+                    onChange={(value) =>
+                      onExistingStructure({ ...existingStructure, total_area_sqft: value })
+                    }
+                    help="Optional. Combined finished area across all stories."
+                    fieldKey="total_area_sqft"
+                  />
+                  <label>
+                    Current structure location
+                    <select
+                      value={existingStructure.location}
+                      onChange={(e) =>
+                        onExistingStructure({ ...existingStructure, location: e.target.value })
+                      }
+                    >
+                      <option value="unsure">Not sure</option>
+                      <option value="front">Toward the front of the lot</option>
+                      <option value="center">Near the center of the lot</option>
+                      <option value="rear">Toward the rear of the lot</option>
+                    </select>
+                    <small>Optional. Helps future site-layout analysis; it does not change the MVP calculation.</small>
+                  </label>
+                </div>
+                {projectType === "adu" && (
+                  <p className="adu-note">
+                    ADU eligibility, size, setbacks, parking, utilities, and whether it may be detached must still be
+                    confirmed with {muni?.name}.
+                  </p>
+                )}
               </div>
-              <button type="button" className="text-button compact" onClick={onSearch}>
-                Search by address
-              </button>
-            </div>
-            <div className="form-grid three">
-              <NumberField
-                label="Lot width (ft)"
-                value={lot.width_ft}
-                onChange={(value) => onLot(withLotWidth(lot, value))}
-                fieldKey="width_ft"
-                required
-              />
-              <NumberField
-                label="Lot depth (ft)"
-                value={lot.depth_ft}
-                onChange={(value) => onLot(withLotDepth(lot, value))}
-                fieldKey="depth_ft"
-                required
-              />
-              <NumberField
-                label="Lot area (sq ft)"
-                value={lot.area_sqft}
-                onChange={(value) => onLot(withLotAreaManual(lot, value))}
-                help={lot.area_manual ? undefined : "Auto-calculated from width × depth."}
-                fieldKey="area_sqft"
-                required
-              />
-            </div>
-            {lot.area_manual && (
-              <button
-                type="button"
-                className="text-button compact"
-                onClick={() => onLot(withLotAreaRecalculated(lot))}
-              >
-                Reset area to width × depth
-              </button>
             )}
+
           </div>
         )}
 
@@ -700,54 +831,63 @@ function PropertyInput({
         <button type="button" className="primary full" disabled={!canContinue} onClick={onContinue}>
           Calculate buildable potential <span aria-hidden="true">→</span>
         </button>
-        {!projectType && <p className="form-hint">Choose a project type to continue.</p>}
-        {projectType && !structureReadyFromInputs(projectType, existingStructure) && (
+        {propertyReady && !structureReadyFromInputs(projectType, existingStructure) && (
           <p className="form-hint">Enter the existing building footprint to continue.</p>
         )}
       </div>
 
-      <aside className="card preview-card">
-        <p className="eyebrow">Property preview</p>
-        <h2>{parcel?.address ?? parcelPick?.address ?? "Union City lot"}</h2>
-        <p className="preview-note">Diagram is for reference only and is not a survey.</p>
-        {parcel ? (
-          <>
-            <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
-            {!parcel.envelope_geojson && (
-              <p className="parcel-preview-status">
-                Showing the actual NJGIN parcel boundary. The buildable envelope will appear after municipal zoning
-                geometry and setbacks are verified.
-              </p>
-            )}
-          </>
-        ) : parcelPick ? (
-          <div className="preview-placeholder parcel-loading">Loading the public parcel boundary…</div>
-        ) : (
-          <LotPreview lot={lot} district={district} active={entryMode === "manual"} />
-        )}
-        <div className="legend">
-          <span><i className="legend-lot" /> Property boundary</span>
-          {(entryMode === "manual" || parcel?.envelope_geojson || !parcelPick) && (
-            <span><i className="legend-envelope" /> Approx. buildable envelope</span>
-          )}
-        </div>
-        <div className="preview-facts">
-          <div><span>Project</span><strong>{PROJECT_TYPES.find((item) => item.id === projectType)?.label ?? "Not selected"}</strong></div>
-          <div><span>Municipality</span><strong>{muni?.name}, {muni?.state_code}</strong></div>
-          <div>
-            <span>Zoning</span>
-            <strong>
-              {entryMode === "manual"
-                ? `${district?.code ?? "—"} (manual)`
-                : zoningCheck?.status === "matched"
-                  ? `${zoningCheck.district_code} (automatic)`
-                  : zoningStatusLabel(zoningCheck)}
-            </strong>
-          </div>
-          <div><span>Data source</span><strong>{parcelPick ? "NJGIN parcel" : entryMode === "manual" ? "Manual entry" : "Awaiting address"}</strong></div>
-        </div>
-      </aside>
+      {previewProps.visible && <PropertyPreview {...previewProps} />}
     </section>
+  );
+}
+
+/**
+ * Right-hand panel for the input step. Only rendered once a property exists to
+ * draw — see `previewProps.visible`.
+ */
+function PropertyPreview({ muni, district, lot, entryMode, parcel, parcelPick, zoningCheck, project }) {
+  return (
+    <aside className="card preview-card">
+      <p className="eyebrow">Property preview</p>
+      <h2>{parcel?.address ?? parcelPick?.address ?? "Union City lot"}</h2>
+      <p className="preview-note">Diagram is for reference only and is not a survey.</p>
+      {parcel ? (
+        <>
+          <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
+          {!parcel.envelope_geojson && (
+            <p className="parcel-preview-status">
+              Showing the actual NJGIN parcel boundary. The buildable envelope will appear after municipal zoning
+              geometry and setbacks are verified.
+            </p>
+          )}
+        </>
+      ) : parcelPick ? (
+        <div className="preview-placeholder parcel-loading">Loading the public parcel boundary…</div>
+      ) : (
+        <LotPreview lot={lot} district={district} />
+      )}
+      <div className="legend">
+        <span><i className="legend-lot" /> Property boundary</span>
+        {(entryMode === "manual" || parcel?.envelope_geojson) && (
+          <span><i className="legend-envelope" /> Approx. buildable envelope</span>
+        )}
+      </div>
+      <div className="preview-facts">
+        <div><span>Project type</span><strong>{project?.label ?? "Not selected"}</strong></div>
+        <div><span>Municipality</span><strong>{muni?.name}, {muni?.state_code}</strong></div>
+        <div>
+          <span>Zoning</span>
+          <strong>
+            {entryMode === "manual"
+              ? `${district?.code ?? "—"} (manual)`
+              : zoningCheck?.status === "matched"
+                ? `${zoningCheck.district_code} (automatic)`
+                : zoningStatusLabel(zoningCheck)}
+          </strong>
+        </div>
+        <div><span>Data source</span><strong>{parcelPick ? "NJGIN parcel" : entryMode === "manual" ? "Manual entry" : "Awaiting address"}</strong></div>
+      </div>
+    </aside>
   );
 }
 
@@ -843,19 +983,24 @@ function SurveyNotice() {
   );
 }
 
-function Results({ project, muni, district, lot, parcel, result, costModel, onBack, onContinue }) {
+function Results({ project, muni, district, lot, entryMode, parcel, result, costModel, onBack, onContinue }) {
   return (
     <>
       <section className="results-heading">
         <div>
-          <p className="eyebrow">Step 2</p>
+          <p className="eyebrow">Step 3</p>
           <h2>Preliminary property results</h2>
-          <p>{project?.label} · {parcel?.address ?? `${muni.name}, ${muni.state_code}`} · Zoning {district.code}</p>
+          <p>
+            {project?.label} · {parcel?.address ?? `${muni.name}, ${muni.state_code}`} · Zoning{" "}
+            {district.code}
+          </p>
         </div>
         <span className="preliminary-badge">Preliminary</span>
       </section>
 
-      <section className="results-grid">
+      {/* Order matches the flow diagram: the engine's four steps, then cost
+          across the three tiers, then the zoning check, then the answer. */}
+      <div className="results-flow">
         <div className="card result-card">
           <h3>{projectResultTitle(project?.id)}</h3>
           {parcel ? (
@@ -863,32 +1008,329 @@ function Results({ project, muni, district, lot, parcel, result, costModel, onBa
           ) : (
             <LotDiagram lot={lot} result={result} />
           )}
+          <EngineSteps result={result} district={district} projectType={project?.id} />
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
-          {(project?.id === "addition" || project?.id === "adu") &&
-            result.availableFootprint === 0 && (
-              <div className="capacity-warning">
-                The entered existing footprint uses or exceeds the footprint calculated from the zoning rules. Review
-                the dimensions and consult Union City before planning additional construction.
-              </div>
-            )}
-          {project?.id === "adu" && (
-            <div className="adu-result-note">
-              This is the property’s remaining zoning capacity—not confirmation that an ADU of this size is permitted.
-            </div>
-          )}
-          {district.front_yard_prevailing_rule && (
-            <p className="fine">Front setback may depend on the prevailing block average; the minimum shown is a planning floor.</p>
-          )}
         </div>
+
         <CostCard result={result} costModel={costModel} projectType={project?.id} />
-      </section>
+
+        <ZoningCheck
+          result={result}
+          district={district}
+          lot={lot}
+          entryMode={entryMode}
+          projectType={project?.id}
+          muni={muni}
+        />
+
+        <AnswerSummary
+          project={project}
+          muni={muni}
+          parcel={parcel}
+          entryMode={entryMode}
+          result={result}
+          costModel={costModel}
+        />
+      </div>
 
       <SurveyNotice />
       <div className="actions">
-        <button type="button" className="secondary" onClick={onBack}>← Edit property</button>
+        <button type="button" className="secondary" onClick={onBack}>← Edit project details</button>
         <button type="button" className="primary" onClick={onContinue}>Review &amp; export →</button>
       </div>
     </>
+  );
+}
+
+/**
+ * The flow diagram's last box: buildable SF, cost, and caveats in one place.
+ * A synthesis of what the three stages above produced — deliberately not a
+ * repeat of the tier table or the findings list.
+ */
+function AnswerSummary({ project, muni, parcel, entryMode, result, costModel }) {
+  const rates = TIER_ORDER.map((tier) => tierRate(costModel, tier)).filter((value) => value != null);
+  const area = result.estimateArea;
+  const low = rates.length ? Math.min(...rates) : null;
+  const high = rates.length ? Math.max(...rates) : null;
+
+  return (
+    <section className="card answer-card">
+      <p className="eyebrow">The answer</p>
+      <h3>
+        {project?.label ?? "This project"} · {parcel?.address ?? `${muni.name}, ${muni.state_code}`}
+      </h3>
+
+      <div className="answer-figures">
+        <div>
+          <span>{projectResultTitle(project?.id)}</span>
+          {area == null ? (
+            <strong className="answer-pending">Needs one more input</strong>
+          ) : (
+            <strong>
+              {fmt(area)} <em>sq ft</em>
+            </strong>
+          )}
+        </div>
+        <div>
+          <span>Preliminary cost, Essential to Premium</span>
+          {area == null || low == null ? (
+            <strong className="answer-pending">—</strong>
+          ) : (
+            <strong>
+              ${fmt(area * low)} – ${fmt(area * high)}
+            </strong>
+          )}
+        </div>
+      </div>
+
+      <ul className="answer-caveats">
+        <li>
+          {entryMode === "manual"
+            ? "Lot dimensions were entered by hand and have not been verified against parcel records."
+            : "Based on public NJGIN parcel data, which the State states is not survey data and does not represent legal boundaries."}{" "}
+          A survey is required to confirm.
+        </li>
+        <li>
+          Cost figures are planning averages
+          {costModel?.provenance ? ` (${costModel.provenance})` : ""}, not a quote. An accurate price is not possible
+          without a full plan set.
+        </li>
+        <li>
+          This is a preliminary zoning estimate, not a zoning determination. Confirm with {muni.name} before design or
+          construction.
+        </li>
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * The four-step derivation from the kickoff algorithm, shown as a chain rather
+ * than as isolated totals: inset by setbacks → apply the coverage cap →
+ * multiply by stories → subtract what already exists. `binding` and
+ * `farLimited` come straight from the engine, so the UI never re-derives which
+ * rule actually governed the answer.
+ */
+function EngineSteps({ result, district, projectType }) {
+  const hasExistingHouse = projectType === "addition" || projectType === "adu";
+  const envelopeArea = envelopeAreaOf(result);
+  const coveragePct = district.max_building_coverage_pct;
+  const coverageCap = coveragePct != null ? result.lotArea * (coveragePct / 100) : null;
+
+  const steps = [
+    {
+      label: "Inset by setbacks",
+      value: `${fmt(envelopeArea)} sq ft`,
+      note: `The ${fmt(result.lotArea)} sq ft lot, less the front, side, and rear yards ${district.code} requires. What remains is the buildable envelope.`,
+    },
+    {
+      label: "Apply coverage cap",
+      value: `${fmt(result.footprint)} sq ft`,
+      note:
+        coverageCap == null
+          ? `${district.code} sets no building-coverage limit, so the setback envelope alone governs the footprint.`
+          : `The smaller of the ${fmt(envelopeArea)} sq ft envelope and ${fmt(coverageCap)} sq ft — ${coveragePct}% of the lot.`,
+      flag:
+        coverageCap == null
+          ? null
+          : result.binding === "coverage"
+            ? "Coverage limit binds first"
+            : "Setbacks bind first",
+    },
+    {
+      label: "Multiply by stories",
+      value: `${fmt(result.buildable)} sq ft`,
+      note: `${fmt(result.footprint)} sq ft footprint × ${result.stories} ${
+        Number(result.stories) === 1 ? "story" : "stories"
+      } permitted in ${district.code}${
+        district.max_far != null ? `, then capped by the ${district.max_far} floor-area ratio` : ""
+      }.`,
+      flag: result.farLimited ? `Floor-area ratio binds` : null,
+      // The diagram caps this step by height as well as FAR. The engine does
+      // not yet: converting a height limit into a story count needs a
+      // floor-to-floor assumption we have not been given, and inventing one
+      // would be exactly the false precision the brief warns against.
+      caution:
+        district.max_height_ft != null
+          ? `${district.code} also limits height to ${fmt(
+              district.max_height_ft
+            )} ft. That limit is not applied here — the story count alone governs this figure. A tall-ceiling design could hit the height limit before the third story.`
+          : null,
+    },
+  ];
+
+  if (hasExistingHouse) {
+    const pending = result.availableBuildingArea == null;
+    steps.push({
+      label: "Subtract existing",
+      value: pending ? "—" : `${fmt(result.availableBuildingArea)} sq ft`,
+      pending,
+      note: pending
+        ? "Enter the existing number of stories or total floor area on the previous step to complete this calculation."
+        : `${fmt(result.buildable)} sq ft permitted, less ${fmt(result.existingArea)} sq ft of existing floor area${
+            result.existingAreaSource === "footprint_times_stories" ? " (estimated from footprint × stories)" : ""
+          }.`,
+      footprintNote: `Ground floor: ${fmt(result.footprint)} sq ft permitted − ${fmt(
+        result.existingFootprint
+      )} sq ft existing = ${fmt(result.availableFootprint)} sq ft of additional footprint.`,
+    });
+  }
+
+  return (
+    <>
+      <h4 className="engine-heading">How this number is calculated</h4>
+      <ol className="engine-steps">
+        {steps.map((item, index) => (
+          <li className={item.pending ? "engine-step pending" : "engine-step"} key={item.label}>
+            <span className="engine-step-num" aria-hidden="true">{index + 1}</span>
+            <div className="engine-step-body">
+              <div className="engine-step-head">
+                <strong>{item.label}</strong>
+                <b>{item.value}</b>
+              </div>
+              <span>{item.note}</span>
+              {item.footprintNote && <span>{item.footprintNote}</span>}
+              {item.caution && <span className="engine-caution">{item.caution}</span>}
+              {item.flag && <em className="engine-flag">{item.flag}</em>}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </>
+  );
+}
+
+/**
+ * Plain-language review of the lot against the district's loaded rules. Only
+ * checks backed by fields that actually exist in the district record are
+ * reported — an absent limit is silence, never a pass.
+ */
+function zoningFindings({ result, district, lot, entryMode, projectType, muni }) {
+  const findings = [];
+  const hasExistingHouse = projectType === "addition" || projectType === "adu";
+  const town = muni?.name ?? "the municipality";
+
+  if (envelopeAreaOf(result) <= 0) {
+    findings.push({
+      level: "blocking",
+      title: "The required setbacks leave no buildable area",
+      detail: `The front, side, and rear yards ${district.code} requires consume this entire lot, so no conforming building area remains. Any construction would need relief from ${town}'s zoning board.`,
+    });
+  }
+
+  if (district.min_lot_area_sqft != null && result.lotArea < Number(district.min_lot_area_sqft)) {
+    findings.push({
+      level: "warning",
+      title: "The lot is smaller than the district minimum",
+      detail: `This lot is ${fmt(result.lotArea)} sq ft, below the ${fmt(
+        district.min_lot_area_sqft
+      )} sq ft ${district.code} requires. It is most likely a pre-existing non-conforming lot, which can limit what may be built without a variance.`,
+    });
+  }
+
+  // Width and depth are only known when the dimensions were typed in. The
+  // parcel path works from a polygon, which has no single meaningful frontage.
+  if (entryMode === "manual") {
+    if (district.min_lot_width_ft != null && Number(lot.width_ft) < Number(district.min_lot_width_ft)) {
+      findings.push({
+        level: "warning",
+        title: "The lot is narrower than the district minimum",
+        detail: `The entered width of ${fmt(lot.width_ft)} ft is below the ${fmt(
+          district.min_lot_width_ft
+        )} ft minimum for ${district.code}. Narrow lots frequently need side-yard relief.`,
+      });
+    }
+    if (district.min_lot_depth_ft != null && Number(lot.depth_ft) < Number(district.min_lot_depth_ft)) {
+      findings.push({
+        level: "warning",
+        title: "The lot is shallower than the district minimum",
+        detail: `The entered depth of ${fmt(lot.depth_ft)} ft is below the ${fmt(
+          district.min_lot_depth_ft
+        )} ft minimum for ${district.code}.`,
+      });
+    }
+  }
+
+  if (hasExistingHouse && result.existingFootprint > 0 && result.availableFootprint === 0) {
+    findings.push({
+      level: "blocking",
+      title: "The existing building already uses the permitted footprint",
+      detail: `The existing structure covers ${fmt(result.existingFootprint)} sq ft, at or above the ${fmt(
+        result.footprint
+      )} sq ft these rules permit. No additional ground-floor footprint is available — confirm the structure's status with ${town} before planning work.`,
+    });
+  }
+
+  if (hasExistingHouse && result.availableBuildingArea === 0 && result.existingArea > 0) {
+    findings.push({
+      level: "blocking",
+      title: "The existing floor area already uses the permitted building area",
+      detail: `The existing ${fmt(result.existingArea)} sq ft meets or exceeds the ${fmt(
+        result.buildable
+      )} sq ft ${district.code} allows on this lot, so no additional floor area is available under the current rules.`,
+    });
+  }
+
+  return findings;
+}
+
+/** Caveats that qualify the answer without being conflicts in their own right. */
+function zoningCaveats({ result, district, projectType }) {
+  const caveats = [];
+  if (district.front_yard_prevailing_rule) {
+    caveats.push(
+      `${district.code} sets the front setback by the prevailing average of the block, not a fixed number. The figure used here is the minimum floor, so the real buildable depth may be smaller.`
+    );
+  }
+  if (result.farLimited) {
+    caveats.push(
+      `The floor-area ratio, not the footprint or story count, is what limits this result. Adding stories would not increase the buildable area.`
+    );
+  }
+  if (projectType === "adu") {
+    caveats.push(
+      `This is the property's remaining zoning capacity — not confirmation that an ADU is permitted. Eligibility, size, setbacks, parking, and utility requirements must still be confirmed.`
+    );
+  }
+  return caveats;
+}
+
+function ZoningCheck({ result, district, lot, entryMode, projectType, muni }) {
+  const findings = zoningFindings({ result, district, lot, entryMode, projectType, muni });
+  const caveats = zoningCaveats({ result, district, projectType });
+  return (
+    <section className="card zoning-check-card">
+      <h3>Zoning check</h3>
+      <p className="card-intro">
+        This lot reviewed against the {district.code} rules loaded for {muni.name}, in plain language.
+      </p>
+      {findings.length === 0 ? (
+        <div className="finding clear">
+          <strong>No conflicts found in the rules we check.</strong>
+          <span>
+            Lot minimums, setbacks, coverage, story count, and floor-area ratio are all satisfied by the figures
+            above. This covers the loaded zoning rules only — not permitted uses, overlay or historic districts,
+            flood zones, easements, or deed restrictions.
+          </span>
+        </div>
+      ) : (
+        <ul className="finding-list">
+          {findings.map((item) => (
+            <li className={`finding ${item.level}`} key={item.title}>
+              <strong>{item.title}</strong>
+              <span>{item.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {caveats.length > 0 && (
+        <ul className="caveat-list">
+          {caveats.map((text) => (
+            <li key={text}>{text}</li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -898,13 +1340,18 @@ function projectResultTitle(projectType) {
   return "Maximum new house capacity";
 }
 
+/**
+ * Reference context for the calculation above: what this property is, and the
+ * district limits the four steps were driven by. Deliberately does not repeat
+ * the derived figures — those belong to the step chain.
+ */
 function PropertyTable({ parcel, result, district, projectType }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
   return (
     <table className="result-table">
       <thead>
         <tr>
-          <th>Detail</th>
+          <th>Property &amp; district limits</th>
           <th>Value</th>
         </tr>
       </thead>
@@ -916,46 +1363,28 @@ function PropertyTable({ parcel, result, district, projectType }) {
           </>
         )}
         <tr><td>Lot area</td><td>{fmt(result.lotArea)} sq ft</td></tr>
+        <tr><td>Zoning district</td><td>{district.code}{district.name ? ` — ${district.name}` : ""}</td></tr>
+        {district.min_lot_area_sqft != null && (
+          <tr><td>Minimum lot area</td><td>{fmt(district.min_lot_area_sqft)} sq ft</td></tr>
+        )}
         <tr>
-          <td>Approx. envelope</td>
-          <td>{fmt(parcel ? result.envelopeArea : result.envelope.areaSqft)} sq ft</td>
+          <td>Maximum building coverage</td>
+          <td>{district.max_building_coverage_pct != null ? `${district.max_building_coverage_pct}%` : "Not limited"}</td>
         </tr>
-        <tr><td>{hasExistingHouse ? "Zoning maximum footprint" : "Maximum house footprint"}</td><td>{fmt(result.footprint)} sq ft</td></tr>
+        <tr>
+          <td>Maximum stories</td>
+          <td>{district.max_stories ?? "Not specified"}</td>
+        </tr>
+        {district.max_height_ft != null && (
+          <tr><td>Maximum height</td><td>{fmt(district.max_height_ft)} ft</td></tr>
+        )}
+        <tr>
+          <td>Floor-area ratio</td>
+          <td>{district.max_far != null ? district.max_far : "Not used here"}</td>
+        </tr>
         {hasExistingHouse && (
-          <>
-            <tr><td>Existing building footprint</td><td>− {fmt(result.existingFootprint)} sq ft</td></tr>
-            <tr className="total"><td>Approximate additional footprint</td><td>{fmt(result.availableFootprint)} sq ft</td></tr>
-            <tr><td>Current structure location</td><td>{structureLocationLabel(result.existingLocation)}</td></tr>
-            {result.existingArea != null && (
-              <>
-                <tr><td>Zoning maximum building area</td><td>{fmt(result.buildable)} sq ft</td></tr>
-                <tr>
-                  <td>
-                    Existing total floor area
-                    {result.existingAreaSource === "footprint_times_stories" && (
-                      <span className="table-note"> (estimated from footprint × stories)</span>
-                    )}
-                  </td>
-                  <td>− {fmt(result.existingArea)} sq ft</td>
-                </tr>
-              </>
-            )}
-          </>
+          <tr><td>Current structure location</td><td>{structureLocationLabel(result.existingLocation)}</td></tr>
         )}
-        {(!hasExistingHouse || result.availableBuildingArea != null) && (
-          <tr className="total">
-            <td>{hasExistingHouse ? "Additional total floor area potentially available" : "Total allowable building area"}</td>
-            <td>{fmt(hasExistingHouse ? result.availableBuildingArea : result.buildable)} sq ft</td>
-          </tr>
-        )}
-        {hasExistingHouse && result.availableBuildingArea == null && (
-          <tr className="optional-result">
-            <td>Total floor-area capacity</td>
-            <td>Enter stories or total square feet</td>
-          </tr>
-        )}
-        <tr><td>Planning stories</td><td>{result.stories}</td></tr>
-        <tr><td>Coverage limit</td><td>{district.max_building_coverage_pct ?? "—"}%</td></tr>
       </tbody>
     </table>
   );
@@ -979,7 +1408,10 @@ function CostCard({ result, costModel, projectType }) {
         Preliminary build cost
         {costModel && <span className={`badge ${costModel.provenance}`}>{costModel.provenance}</span>}
       </h3>
-      <p className="card-intro">Planning ranges based on the {estimateLabel}, not a contractor quote.</p>
+      <p className="card-intro">
+        Planning ranges based on the {estimateLabel}, not a contractor quote. All three levels are shown so the
+        spread is visible — the finishes, not the buildable area, are what move the number.
+      </p>
       {!costModel && <p className="fine">No rate card is loaded for this municipality yet.</p>}
       {costModel && hasExistingHouse && result.estimateArea == null && (
         <div className="cost-unavailable">
@@ -993,7 +1425,11 @@ function CostCard({ result, costModel, projectType }) {
             if (!tier) return null;
             return (
               <div className="cost-tier" key={tierName}>
-                <div><strong>{TIER_LABELS[tierName]}</strong><span>${fmt(tier.rate_per_sqft, 2)} / sq ft</span></div>
+                <div>
+                  <strong>{TIER_LABELS[tierName]}</strong>
+                  <span className="tier-desc">{TIER_DESCRIPTIONS[tierName]}</span>
+                  <span className="tier-rate">${fmt(tier.rate_per_sqft, 2)} / sq ft</span>
+                </div>
                 <b>${fmt(result.estimateArea * tier.rate_per_sqft)}</b>
               </div>
             );
@@ -1010,13 +1446,12 @@ function CostCard({ result, costModel, projectType }) {
 }
 
 function Review({ project, muni, district, lot, parcel, result, costModel, onBack }) {
-  const midTier = costModel?.build_cost_tiers.find((item) => item.tier === "mid_level");
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
   return (
     <>
       <section className="results-heading">
         <div>
-          <p className="eyebrow">Step 3</p>
+          <p className="eyebrow">Step 4</p>
           <h2>Review your preliminary report</h2>
           <p>Confirm the inputs below, then print or save the report as a PDF.</p>
         </div>
@@ -1027,8 +1462,8 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
           <span>Preliminary feasibility summary</span>
         </div>
         <div className="review-summary">
-          <div><span>Project type</span><strong>{project?.label}</strong></div>
           <div><span>Property</span><strong>{parcel?.address ?? "Manual lot entry"}</strong></div>
+          <div><span>Project type</span><strong>{project?.label ?? "Not selected"}</strong></div>
           <div><span>Municipality</span><strong>{muni.name}, {muni.state_code}</strong></div>
           <div><span>Zoning district</span><strong>{district.code} — {district.name}</strong></div>
           <div><span>Lot area</span><strong>{fmt(result.lotArea)} sq ft</strong></div>
@@ -1057,10 +1492,19 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
               <div><span>Total allowable building area</span><strong>{fmt(result.buildable)} sq ft</strong></div>
             </>
           )}
-          <div>
-            <span>Mid-level cost estimate</span>
-            <strong>{midTier && result.estimateArea != null ? `$${fmt(result.estimateArea * midTier.rate_per_sqft)}` : "Needs floor-area input"}</strong>
-          </div>
+          {TIER_ORDER.map((tierName) => {
+            const rate = tierRate(costModel, tierName);
+            return (
+              <div key={tierName}>
+                <span>{TIER_LABELS[tierName]} estimate</span>
+                <strong>
+                  {rate != null && result.estimateArea != null
+                    ? `$${fmt(result.estimateArea * rate)}`
+                    : "Needs floor-area input"}
+                </strong>
+              </div>
+            );
+          })}
           {parcel ? (
             <div><span>Block / Lot</span><strong>{parcel.block ?? "—"} / {parcel.lot ?? "—"}</strong></div>
           ) : (
@@ -1087,18 +1531,16 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
   );
 }
 
-function LotPreview({ lot, district, active }) {
+function LotPreview({ lot, district }) {
   if (!district) return <div className="preview-placeholder">Loading zoning data…</div>;
   const safeLot = {
     width_ft: lot.width_ft > 0 ? lot.width_ft : 25,
     depth_ft: lot.depth_ft > 0 ? lot.depth_ft : 100,
     area_sqft: lot.area_sqft > 0 ? lot.area_sqft : 2500,
   };
-  const previewResult = computeBuildable(safeLot, district);
   return (
-    <div className={!active ? "lot-preview muted-preview" : "lot-preview"}>
-      <LotDiagram lot={safeLot} result={previewResult} />
-      {!active && <p>Search for an address to load the actual parcel polygon.</p>}
+    <div className="lot-preview">
+      <LotDiagram lot={safeLot} result={computeBuildable(safeLot, district)} />
     </div>
   );
 }

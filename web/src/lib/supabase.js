@@ -27,6 +27,21 @@ export async function fetchMunicipalities() {
   return data;
 }
 
+/**
+ * Whether any NJGIN parcels have actually been imported for a municipality.
+ * Address search is only offered when they have — an empty parcels table is a
+ * load-state fact the UI should state plainly, not a search that finds nothing.
+ */
+export async function hasParcels(municipalityId) {
+  const { data, error } = await supabase
+    .from("parcels")
+    .select("id")
+    .eq("municipality_id", municipalityId)
+    .limit(1);
+  if (error) throw error;
+  return data.length > 0;
+}
+
 /** Address search against imported NJGIN parcels (RPC, read-only). */
 export async function searchParcels(muniSlug, query, limit = 15) {
   const { data, error } = await supabase.rpc("search_parcels", {
