@@ -723,3 +723,42 @@ button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
 .inline-create-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
 .inline-create-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
 .inline-create code { font-size: 0.74rem; }
+
+/* ---------- Admin: draft state, validation, test panel ---------- */
+.draft-badge {
+  background: #fff7e6;
+  border: 1px solid #f0d9a8;
+  color: #8a6116;
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+.validate-panel {
+  border-radius: 10px;
+  border: 1px solid;
+  padding: 0.85rem 1rem;
+  display: grid;
+  gap: 0.5rem;
+  font-size: 0.84rem;
+}
+.validate-panel.good { background: var(--green-soft); border-color: #bcd9c6; color: var(--green); }
+.validate-panel.bad { background: #fdecec; border-color: #f2b8b5; color: #8c1d18; }
+.validate-panel ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 0.25rem; }
+.validate-panel li { list-style: none; }
+.validate-panel.bad li { color: var(--green); }
+.validate-panel.bad li.validate-bad { color: #8c1d18; font-weight: 700; }
+.test-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.4rem;
+  margin-top: 0.9rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.test-summary div { display: grid; gap: 0.1rem; }
+.test-summary span { color: var(--muted); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.test-summary strong { font-size: 1.05rem; }
+.test-log { margin-top: 0.7rem; max-height: 320px; }

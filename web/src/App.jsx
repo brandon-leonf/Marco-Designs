@@ -9,6 +9,7 @@ import {
   computeBuildable,
   computeBuildableFromAreas,
   conservativeInsetFt,
+  recordedRectDims,
 } from "./lib/envelope.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import ParcelPlan from "./components/ParcelPlan.jsx";
@@ -139,11 +140,31 @@ export default function App() {
     if (!district) return null;
     let zoningResult = null;
     if (entryMode === "search" && parcel) {
-      zoningResult = computeBuildableFromAreas(
-        Number(parcel.lot_area_sqft),
-        Number(parcel.envelope_area_sqft ?? 0),
-        district
-      );
+      const envelopeArea =
+        parcel.envelope_area_sqft == null ? null : Number(parcel.envelope_area_sqft);
+      // The uniform polygon inset (largest setback on every edge) collapses
+      // narrow lots to nothing. When that happens and MOD-IV recorded the
+      // rectangular dimensions, fall back to per-edge arithmetic on that
+      // rectangle — the approximation the project doc calls for — instead of
+      // reporting 0 sq ft.
+      const rectDims = envelopeArea > 0 ? null : recordedRectDims(parcel);
+      if (rectDims) {
+        const rect = computeBuildable(
+          { ...rectDims, area_sqft: Number(parcel.lot_area_sqft) },
+          district
+        );
+        zoningResult = {
+          ...rect,
+          envelopeArea: rect.envelope.areaSqft,
+          approximation: { widthFt: rectDims.width_ft, depthFt: rectDims.depth_ft },
+        };
+      } else {
+        zoningResult = computeBuildableFromAreas(
+          Number(parcel.lot_area_sqft),
+          envelopeArea ?? 0,
+          district
+        );
+      }
     } else if (entryMode === "manual" && lot.width_ft > 0 && lot.depth_ft > 0 && lot.area_sqft > 0) {
       zoningResult = computeBuildable(lot, district);
     }
@@ -782,6 +803,13 @@ function Results({ project, muni, district, lot, parcel, result, costModel, onBa
               This is the property’s remaining zoning capacity—not confirmation that an ADU of this size is permitted.
             </div>
           )}
+          {result.approximation && (
+            <p className="fine">
+              The uniform polygon inset collapses on this narrow lot, so figures use the recorded{" "}
+              {fmt(result.approximation.widthFt)}′ × {fmt(result.approximation.depthFt)}′ lot
+              rectangle with per-edge setbacks. A survey must confirm the true envelope.
+            </p>
+          )}
           {district.front_yard_prevailing_rule && (
             <p className="fine">Front setback may depend on the prevailing block average; the minimum shown is a planning floor.</p>
           )}
@@ -817,7 +845,10 @@ function PropertyTable({ parcel, result, district, projectType }) {
         )}
         <tr><td>Lot area</td><td>{fmt(result.lotArea)} sq ft</td></tr>
         <tr>
-          <td>Approx. envelope</td>
+          <td>
+            Approx. envelope
+            {result.approximation && <span className="table-note"> (recorded lot rectangle)</span>}
+          </td>
           <td>{fmt(parcel ? result.envelopeArea : result.envelope.areaSqft)} sq ft</td>
         </tr>
         <tr><td>{hasExistingHouse ? "Zoning maximum footprint" : "Maximum house footprint"}</td><td>{fmt(result.footprint)} sq ft</td></tr>
