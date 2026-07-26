@@ -1,23 +1,26 @@
 :root {
-  /* Marco Designs palette */
-  --primary: #1e5d8c;        /* buttons */
-  --primary-dark: #17496e;   /* button hover */
-  --nav: #0b3d62;            /* navigation background */
-  --active: #e0f7fa;         /* selection / active-state surface */
-  --active-line: #a6d9e4;    /* border for active surfaces */
+  /* Marco Designs palette — soft gold, charcoal, brass */
+  --primary: #a78529;        /* brass: accent text, icons, active borders */
+  /* Solid fills use the deeper brass so white label text clears AA (4.9:1);
+     #a78529 on white is only 3.5:1, fine for bold/large text but not buttons. */
+  --primary-fill: #8a6d1f;
+  --primary-dark: #6f571a;   /* button hover */
+  --nav: #2b2b2b;            /* navigation background */
+  --active: #f4eedd;         /* selection / active-state surface */
+  --active-line: #dcc98d;    /* border for active surfaces */
 
-  --bg: #f5f7f9;
+  --bg: #ffffff;
   --card: #ffffff;
-  --ink: #16212b;
-  --muted: #64707a;
-  --line: #dbe1e5;
-  --line-strong: #c3ccd3;
-  --info-bg: #f2fafc;
-  --info-line: #bfdfe9;
-  --info-ink: #2a5872;
+  --ink: #2b2b2b;
+  --muted: #6f6754;
+  --line: #e3dac4;
+  --line-strong: #cfc3a3;
+  --info-bg: #faf6ea;
+  --info-line: #e4d7b0;
+  --info-ink: #7a6524;
   --green: #3c7454;
   --green-soft: #eaf3ed;
-  --shadow: 0 12px 35px rgba(23, 42, 58, 0.07);
+  --shadow: 0 12px 35px rgba(43, 43, 43, 0.09);
   font-family: "Lato", ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -25,9 +28,7 @@
 
 body {
   margin: 0;
-  background:
-    radial-gradient(circle at 50% -12rem, #fff 0, transparent 35rem),
-    var(--bg);
+  background: var(--bg);
   color: var(--ink);
   font-family: "Lato", ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
 }
@@ -39,7 +40,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .top-nav {
   background: var(--nav);
   color: #fff;
-  box-shadow: 0 4px 18px rgba(11, 61, 98, 0.25);
+  box-shadow: 0 4px 18px rgba(43, 43, 43, 0.28);
 }
 .top-nav-inner {
   display: flex;
@@ -78,7 +79,7 @@ button { -webkit-tap-highlight-color: transparent; }
   background: rgba(255, 255, 255, 0.85);
   border: 1px solid var(--line);
   border-radius: 15px;
-  box-shadow: 0 5px 25px rgba(23, 42, 58, 0.035);
+  box-shadow: 0 5px 25px rgba(43, 43, 43, 0.05);
 }
 .step-wrap { display: flex; align-items: center; flex: 1; min-width: 0; }
 .step-line { height: 1px; flex: 0 1 54px; background: var(--line-strong); margin: 0 0.45rem; }
@@ -102,16 +103,18 @@ button { -webkit-tap-highlight-color: transparent; }
   width: 25px;
   height: 25px;
   border-radius: 50%;
-  background: #e6eaed;
-  color: #71797f;
+  background: #e8dfc9;
+  color: #7c745f;
   font-size: 0.75rem;
 }
 .step.active { color: var(--nav); background: var(--active); box-shadow: inset 0 0 0 1px var(--active-line); }
-.step.active > span { color: #fff; background: var(--primary); }
+.step.active > span { color: #fff; background: var(--primary-fill); }
 .step.done > span { color: #fff; background: var(--green); }
 
 .card {
-  background: rgba(255, 255, 255, 0.96);
+  /* Same white as the page now, so the warm border and shadow are what
+     separate a card from the background. */
+  background: var(--card);
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: 1.5rem;
@@ -142,10 +145,10 @@ button { -webkit-tap-highlight-color: transparent; }
   background: var(--active);
   font-size: 1.15rem;
 }
-.eyebrow { margin: 0 !important; color: var(--primary) !important; font-size: 0.7rem !important; font-weight: 800; text-transform: uppercase; letter-spacing: 0.11em; }
+.eyebrow { margin: 0 !important; color: var(--primary-fill) !important; font-size: 0.7rem !important; font-weight: 800; text-transform: uppercase; letter-spacing: 0.11em; }
 
 .field-group { margin: 0 0 1.5rem; padding: 0; border: 0; }
-.field-group legend, label { color: #38434c; font-size: 0.8rem; font-weight: 700; }
+.field-group legend, label { color: #4a4436; font-size: 0.8rem; font-weight: 700; }
 .field-group legend { margin-bottom: 0.65rem; }
 .project-types { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.55rem; }
 .project-option {
@@ -185,7 +188,7 @@ button { -webkit-tap-highlight-color: transparent; }
   border: 1px dashed var(--line-strong);
   border-radius: 10px;
   color: var(--muted);
-  background: #fafbfc;
+  background: #fbf8f0;
   font-size: 0.72rem;
   line-height: 1.5;
   text-align: center;
@@ -204,6 +207,31 @@ button { -webkit-tap-highlight-color: transparent; }
   line-height: 1.5;
 }
 .data-missing-notice strong { font-size: 0.79rem; }
+
+/* Live NJGIN parcel service is in use for this municipality. Informational,
+   not a warning — the boundary is real; only the district is hand-picked. */
+.live-source-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 1.45rem;
+  padding: 0.85rem;
+  border: 1px solid var(--info-line);
+  border-radius: 10px;
+  color: var(--info-ink);
+  background: var(--info-bg);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+.live-source-notice strong { color: var(--nav); font-size: 0.79rem; }
+.live-source-notice a {
+  margin-top: 0.15rem;
+  /* 0.72rem link text, so the deeper brass — --primary is only 3.4:1 here. */
+  color: var(--primary-fill);
+  font-weight: 700;
+  text-decoration: none;
+}
+.live-source-notice a:hover { text-decoration: underline; }
 
 .project-assumption,
 .existing-structure {
@@ -242,24 +270,24 @@ button { -webkit-tap-highlight-color: transparent; }
   padding: 0.95rem;
   border: 1px solid var(--line);
   border-radius: 11px;
-  background: #fafbfc;
+  background: #fbf8f0;
 }
 .planned-size .method-title { margin-bottom: 0.35rem; }
-.planned-size .data-tag { color: var(--muted); background: #eef1f3; }
+.planned-size .data-tag { color: var(--muted); background: #efe8d7; }
 .planned-size .form-grid { grid-template-columns: 1fr; max-width: 22rem; }
 
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; }
 .form-grid.three { grid-template-columns: repeat(3, 1fr); }
 label { display: flex; flex-direction: column; gap: 0.38rem; }
 label small { color: var(--muted); font-size: 0.63rem; font-weight: 500; line-height: 1.4; }
-.manual-badge { color: var(--primary); font-size: 0.62rem; font-weight: 800; }
+.manual-badge { color: var(--primary-fill); font-size: 0.62rem; font-weight: 800; }
 .auto-zoning-field {
   display: flex;
   flex-direction: column;
   gap: 0.38rem;
   min-width: 0;
 }
-.auto-zoning-field > span { color: #38434c; font-size: 0.8rem; font-weight: 700; }
+.auto-zoning-field > span { color: #4a4436; font-size: 0.8rem; font-weight: 700; }
 .auto-zoning-field > strong {
   min-height: 42px;
   padding: 0.72rem 0.75rem;
@@ -282,7 +310,7 @@ select, input {
   font-size: 0.87rem;
   font-weight: 500;
 }
-select:focus, input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(30, 93, 140, 0.14); }
+select:focus, input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(167, 133, 41, 0.18); }
 select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed; }
 
 .field.invalid input { border-color: #c0392b; background: #fdf4f2; }
@@ -299,12 +327,19 @@ select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed;
   align-items: center;
   padding: 0.3rem 0.55rem;
   border-radius: 99px;
-  color: var(--green);
-  background: var(--green-soft);
+  /* Informational, not a success state — green stays reserved for
+     verified zoning and verified pricing. */
+  color: var(--info-ink);
+  background: var(--info-bg);
   font-size: 0.65rem;
   font-weight: 750;
   white-space: nowrap;
 }
+/* Live State service, as opposed to the imported snapshot. Solid brass rather
+   than the base tag's cream, which no longer separates from the page. White on
+   --primary-fill is 4.9:1, so this clears AA at the tag's 0.65rem bold. */
+.data-tag.live { color: #fff; background: var(--primary-fill); }
+
 .parcel-search { margin-top: 0.8rem; }
 .parcel-search .row { display: flex; gap: 0.65rem; align-items: flex-end; }
 .parcel-search .row label { flex: 1; }
@@ -324,8 +359,12 @@ button.ghost {
   font-size: 0.72rem;
 }
 button.ghost:hover { color: var(--primary); border-color: var(--primary); }
-.text-button { display: block; margin-top: 0.8rem; padding: 0; border: 0; color: var(--primary); background: transparent; font-size: 0.76rem; text-align: left; }
+.text-button { display: block; margin-top: 0.8rem; padding: 0; border: 0; color: var(--primary-fill); background: transparent; font-size: 0.76rem; text-align: left; }
 .text-button.compact { margin: 0; white-space: nowrap; }
+/* Stacked links under the address search: manual entry, and swapping between
+   the imported parcels and the live State service. */
+.source-switch { display: flex; flex-direction: column; align-items: flex-start; gap: 0.35rem; }
+.source-switch .text-button + .text-button { margin-top: 0; }
 
 ul.results {
   list-style: none;
@@ -355,7 +394,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 
 .selected-property { display: flex; gap: 0.65rem; align-items: center; margin-top: 0.7rem; padding: 0.72rem; border: 1px solid var(--active-line); border-radius: 10px; background: var(--active); }
 .selected-property .check { display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; background: var(--green); color: #fff; font-size: 0.72rem; }
-.selected-property .check.pending { background: var(--primary); }
+.selected-property .check.pending { background: var(--primary-fill); }
 .selected-property div { display: flex; flex-direction: column; gap: 0.15rem; }
 .selected-property strong { color: var(--nav); font-size: 0.83rem; }
 .selected-property div span { color: var(--info-ink); font-size: 0.7rem; }
@@ -371,19 +410,21 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 }
 .zoning-check.matched { color: #315f44; border: 1px solid #b9d4c2; background: var(--green-soft); }
 .zoning-check.blocked { color: #7b5412; border: 1px solid #e3ca91; background: #fff8e9; }
+.zoning-check.live { color: var(--info-ink); border: 1px solid var(--info-line); background: var(--info-bg); }
+.zoning-check.live strong { color: var(--nav); }
 .zoning-check span { opacity: 0.9; }
 
 .survey-notice { display: flex; gap: 0.75rem; margin: 1.35rem 0; padding: 0.85rem; border: 1px solid var(--info-line); border-radius: 11px; background: var(--info-bg); }
-.survey-notice > span { display: grid; place-items: center; flex: 0 0 25px; height: 25px; border-radius: 50%; background: var(--primary); color: #fff; font-weight: 850; font-size: 0.75rem; }
+.survey-notice > span { display: grid; place-items: center; flex: 0 0 25px; height: 25px; border-radius: 50%; background: var(--primary-fill); color: #fff; font-weight: 850; font-size: 0.75rem; }
 .survey-notice strong { display: block; color: var(--nav); font-size: 0.79rem; }
 .survey-notice p { margin: 0.2rem 0 0; color: var(--info-ink); font-size: 0.7rem; line-height: 1.45; }
 
 .primary, .secondary { padding: 0.78rem 1.1rem; border: 1px solid transparent; }
-.primary { color: #fff; background: var(--primary); box-shadow: 0 7px 15px rgba(30, 93, 140, 0.22); }
+.primary { color: #fff; background: var(--primary-fill); box-shadow: 0 7px 15px rgba(138, 109, 31, 0.25); }
 .primary:hover:not(:disabled) { background: var(--primary-dark); }
 .primary:disabled { cursor: not-allowed; opacity: 0.45; box-shadow: none; }
 .primary.full { display: flex; justify-content: center; align-items: center; gap: 0.7rem; width: 100%; }
-.secondary { color: var(--primary); background: #fff; border-color: var(--line-strong); }
+.secondary { color: var(--primary-fill); background: #fff; border-color: var(--line-strong); }
 .secondary:hover { border-color: var(--primary); }
 .form-hint { margin: 0.5rem 0 0; color: var(--muted); font-size: 0.7rem; text-align: center; }
 
@@ -391,15 +432,15 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .preview-card h2 { margin: 0.2rem 0; font-size: 1.2rem; font-weight: 800; }
 .preview-note { margin: 0 0 1rem; color: var(--muted); font-size: 0.73rem; }
 .diagram { display: block; width: 100%; max-width: 100%; height: 300px; margin: 1.1rem auto; }
-.diagram .lot { fill: #f2f4f5; stroke: #4c565e; stroke-width: 1.5; stroke-dasharray: 5 3; }
-.diagram .envelope { fill: rgba(30, 93, 140, 0.1); stroke: var(--primary); stroke-width: 1.5; stroke-dasharray: 5 3; }
+.diagram .lot { fill: #faf6ec; stroke: #6b6350; stroke-width: 1.5; stroke-dasharray: 5 3; }
+.diagram .envelope { fill: rgba(167, 133, 41, 0.13); stroke: var(--primary); stroke-width: 1.5; stroke-dasharray: 5 3; }
 .diagram .dim { font-size: 9px; fill: var(--muted); }
 .lot-preview { text-align: center; }
 .parcel-preview-status { max-width: 31rem; margin: -0.35rem auto 0.85rem; color: var(--muted); font-size: 0.7rem; line-height: 1.45; text-align: center; }
 .parcel-loading { display: grid; place-items: center; min-height: 300px; color: var(--muted); font-size: 0.75rem; }
 .legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.9rem; margin: 0.4rem 0 1.15rem; color: var(--muted); font-size: 0.66rem; }
 .legend span { display: flex; align-items: center; gap: 0.35rem; }
-.legend i { display: inline-block; width: 21px; height: 10px; border: 1.5px dashed #566068; }
+.legend i { display: inline-block; width: 21px; height: 10px; border: 1.5px dashed #6b6350; }
 .legend i.legend-envelope { border-color: var(--primary); background: var(--active); }
 .preview-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 0.1rem 1rem; padding-top: 0.8rem; border-top: 1px solid var(--line); }
 .preview-facts div { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.45rem 0; }
@@ -468,7 +509,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   padding: 0.7rem 0.8rem;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: #fafbfc;
+  background: #fbf8f0;
 }
 .engine-step-num {
   display: grid;
@@ -520,7 +561,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .plan-feasibility.fits strong { color: #315f44; }
 .plan-feasibility.exceeds { border-color: #e3b8b4; background: #fff6f5; }
 .plan-feasibility.exceeds strong { color: #8b362e; }
-.plan-feasibility.unknown { border-style: dashed; background: #fafbfc; }
+.plan-feasibility.unknown { border-style: dashed; background: #fbf8f0; }
 .plan-feasibility.unknown strong { color: var(--nav); }
 .plan-checks { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.2rem 0; padding: 0; list-style: none; }
 .plan-checks li {
@@ -617,7 +658,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   border: 1px solid var(--line);
   border-radius: 9px;
   color: var(--muted);
-  background: #f7f9fa;
+  background: #fbf8f0;
   font-size: 0.72rem;
   line-height: 1.5;
 }
@@ -635,7 +676,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .review-header .brand { margin: 0; }
 .review-header > span { color: var(--muted); font-size: 0.75rem; }
 .review-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; padding: 1.5rem 0; }
-.review-summary div { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.85rem; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfd; }
+.review-summary div { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.85rem; border: 1px solid var(--line); border-radius: 10px; background: #fdfbf5; }
 .review-summary strong { font-size: 0.87rem; }
 .report-disclaimer { margin: 1rem 0 0; color: var(--muted); font-size: 0.68rem; line-height: 1.5; }
 
@@ -785,7 +826,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 }
 .district-code { font-weight: 800; min-width: 2.6rem; }
 .district-name { color: var(--muted); font-size: 0.82rem; flex: 1; }
-.district-check { color: var(--primary); font-weight: 800; }
+.district-check { color: var(--primary-fill); font-weight: 800; }
 .district-count { color: var(--muted); font-size: 0.78rem; border-top: 1px solid var(--line); padding-top: 0.7rem; margin: 0; }
 
 /* ---------- Admin: editor form ---------- */
@@ -854,7 +895,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   background: #fff;
   transition: left 0.15s ease;
 }
-.toggle.on { background: var(--primary); }
+.toggle.on { background: var(--primary-fill); }
 .toggle.on i { left: 23px; }
 .toggle-state { font-weight: 700; font-size: 0.8rem; color: var(--muted); }
 
@@ -863,8 +904,8 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   width: 100%;
   max-height: 260px;
   overflow: auto;
-  background: #0e2233;
-  color: #cde3f2;
+  background: #2b2b2b;
+  color: #ecdfba;
   border-radius: 10px;
   padding: 0.9rem 1rem;
   font-size: 0.76rem;
