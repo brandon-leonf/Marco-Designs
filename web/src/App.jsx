@@ -10,26 +10,34 @@ import {
   computeBuildable,
   computeBuildableFromAreas,
   conservativeInsetFt,
+  recordedRectDims,
 } from "./lib/envelope.js";
+import {
+  fetchNjginParcel,
+  njginParcelFromFeature,
+  NJGIN_SOURCE_URL,
+} from "./lib/njgin.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import ParcelPlan from "./components/ParcelPlan.jsx";
 import Logo from "./components/Logo.jsx";
 
-// Marketing names for the build-quality levels. The `id` stays on the database
-// tier keys so the loaded rate card keeps resolving without a migration.
+// Marketing names and copy for the build-quality levels. The ids are the
+// database tier keys as renamed by migration 0010 (builder_grade -> essential,
+// mid_level -> signature, high_end -> premium), so the loaded rate card keeps
+// resolving.
 const PACKAGES = [
   {
-    id: "builder_grade",
+    id: "essential",
     label: "Essential",
     description: "Efficient, code-compliant construction with standard finishes.",
   },
   {
-    id: "mid_level",
+    id: "signature",
     label: "Signature",
     description: "Upgraded finishes, detailing, and systems for most custom homes.",
   },
   {
-    id: "high_end",
+    id: "premium",
     label: "Premium",
     description: "High-end materials, custom millwork, and premium mechanicals.",
   },
@@ -156,6 +164,13 @@ export default function App() {
   const [zoningCheck, setZoningCheck] = useState(null);
   // "unknown" until the parcels table has been checked for this municipality.
   const [parcelData, setParcelData] = useState("unknown");
+  // Which parcel source is answering: "db" (imported into PostGIS, zoning can
+  // be verified from geometry) or "njgin" (the live statewide service, which
+  // gives a real boundary but no zoning layer to intersect it with).
+  const [parcelSource, setParcelSource] = useState("db");
+  // The live NJGIN feature, kept so changing the district re-insets the
+  // envelope without another round trip to the service.
+  const [njginFeature, setNjginFeature] = useState(null);
 
   useEffect(() => {
     if (!supabase) return;
@@ -170,9 +185,10 @@ export default function App() {
       .catch((e) => setError(e.message ?? String(e)));
   }, []);
 
-  // Address search is only worth offering when parcels exist for this town.
-  // Where the NJGIN import has not been run, fall back to manual entry rather
-  // than leaving the user on a search that can never return a result.
+  // The imported parcels are preferred: only they can be intersected with the
+  // municipal zoning layer. Where that import has not been run, fall back to
+  // the live NJGIN service rather than to manual entry — a real boundary from
+  // the State beats typed-in dimensions, even without automatic zoning.
   useEffect(() => {
     if (!muniId) return;
     let stale = false;
@@ -181,12 +197,11 @@ export default function App() {
       .then((available) => {
         if (stale) return;
         setParcelData(available ? "available" : "missing");
-        if (!available) {
-          setEntryMode("manual");
-          setParcelPick(null);
-          setParcel(null);
-          setZoningCheck(null);
-        }
+        setParcelSource(available ? "db" : "njgin");
+        setParcelPick(null);
+        setParcel(null);
+        setNjginFeature(null);
+        setZoningCheck(null);
       })
       .catch(() => {
         // A failed probe must not strand the user: leave search available and
@@ -206,9 +221,11 @@ export default function App() {
   useEffect(() => {
     if (!parcelPick || entryMode !== "search") {
       setParcel(null);
+      setNjginFeature(null);
       setZoningCheck(null);
       return;
     }
+    if (parcelSource !== "db") return;
 
     let stale = false;
     setParcel(null);
@@ -265,17 +282,71 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [entryMode, muni, parcelPick]);
+  }, [entryMode, muni, parcelPick, parcelSource]);
+
+  // Live NJGIN path: pull the parcel geometry once. There is no zoning layer to
+  // intersect it against here, so the district stays a manual, clearly labelled
+  // choice — the app never claims a verification it did not perform.
+  useEffect(() => {
+    if (!parcelPick || entryMode !== "search" || parcelSource !== "njgin") return;
+
+    let stale = false;
+    setParcel(null);
+    setNjginFeature(null);
+    setParcelError(null);
+    setZoningCheck({ status: "live_parcel" });
+
+    fetchNjginParcel(muni, parcelPick.pams_pin)
+      .then((loaded) => {
+        if (!stale) setNjginFeature(loaded.raw);
+      })
+      .catch((e) => {
+        if (stale) return;
+        setParcelError(e.message ?? String(e));
+        setZoningCheck({ status: "error" });
+      });
+
+    return () => {
+      stale = true;
+    };
+  }, [entryMode, muni, parcelPick, parcelSource]);
+
+  // Re-inset the live parcel whenever the chosen district changes. Cheap enough
+  // to run on every district switch: the geometry is already in memory.
+  useEffect(() => {
+    if (parcelSource !== "njgin" || !njginFeature) return;
+    setParcel(njginParcelFromFeature(njginFeature, district ? conservativeInsetFt(district) : 0));
+  }, [district, njginFeature, parcelSource]);
 
   const result = useMemo(() => {
     if (!district) return null;
     let zoningResult = null;
     if (entryMode === "search" && parcel) {
-      zoningResult = computeBuildableFromAreas(
-        Number(parcel.lot_area_sqft),
-        Number(parcel.envelope_area_sqft ?? 0),
-        district
-      );
+      const envelopeArea =
+        parcel.envelope_area_sqft == null ? null : Number(parcel.envelope_area_sqft);
+      // The uniform polygon inset (largest setback on every edge) collapses
+      // narrow lots to nothing. When that happens and MOD-IV recorded the
+      // rectangular dimensions, fall back to per-edge arithmetic on that
+      // rectangle — the approximation the project doc calls for — instead of
+      // reporting 0 sq ft.
+      const rectDims = envelopeArea > 0 ? null : recordedRectDims(parcel);
+      if (rectDims) {
+        const rect = computeBuildable(
+          { ...rectDims, area_sqft: Number(parcel.lot_area_sqft) },
+          district
+        );
+        zoningResult = {
+          ...rect,
+          envelopeArea: rect.envelope.areaSqft,
+          approximation: { widthFt: rectDims.width_ft, depthFt: rectDims.depth_ft },
+        };
+      } else {
+        zoningResult = computeBuildableFromAreas(
+          Number(parcel.lot_area_sqft),
+          envelopeArea ?? 0,
+          district
+        );
+      }
     } else if (entryMode === "manual" && lot.width_ft > 0 && lot.depth_ft > 0 && lot.area_sqft > 0) {
       zoningResult = computeBuildable(lot, district);
     }
@@ -349,9 +420,13 @@ export default function App() {
     (!validateField("width_ft", lot.width_ft, { required: true }) &&
       !validateField("depth_ft", lot.depth_ft, { required: true }) &&
       !validateField("area_sqft", lot.area_sqft, { required: true }));
+  // The live NJGIN source supplies a verified boundary but no zoning match, so
+  // it is ready once the boundary has loaded and a district has been picked.
   const locationReady =
     entryMode === "search"
-      ? Boolean(parcel && zoningCheck?.status === "matched")
+      ? parcelSource === "njgin"
+        ? Boolean(parcel && district)
+        : Boolean(parcel && zoningCheck?.status === "matched")
       : Boolean(
           district &&
             manualInputsValid &&
@@ -391,6 +466,7 @@ export default function App() {
     setEntryMode("manual");
     setParcelPick(null);
     setParcel(null);
+    setNjginFeature(null);
     setParcelError(null);
     setZoningCheck(null);
   };
@@ -399,8 +475,17 @@ export default function App() {
     setEntryMode("search");
     setParcelPick(null);
     setParcel(null);
+    setNjginFeature(null);
     setParcelError(null);
     setZoningCheck(null);
+  };
+
+  // Switching between the imported parcels and the live State service. Offered
+  // wherever both are available — the live layer is the more current of the
+  // two, and the import is the only one that can verify zoning.
+  const chooseSource = (next) => {
+    setParcelSource(next);
+    chooseSearch();
   };
 
   if (!supabase) {
@@ -436,6 +521,7 @@ export default function App() {
     district,
     lot,
     entryMode,
+    parcelSource,
     parcel,
     parcelPick,
     zoningCheck,
@@ -459,6 +545,7 @@ export default function App() {
           districtId={districtId}
           entryMode={entryMode}
           parcelData={parcelData}
+          parcelSource={parcelSource}
           lot={lot}
           parcelPick={parcelPick}
           parcel={parcel}
@@ -478,6 +565,7 @@ export default function App() {
             setDistrictId(nextMuni?.zoning_districts[0]?.id ?? null);
             setParcelPick(null);
             setParcel(null);
+            setNjginFeature(null);
             setZoningCheck(null);
           }}
           onDistrict={setDistrictId}
@@ -485,10 +573,12 @@ export default function App() {
           onParcel={(picked) => {
             setParcelPick(picked);
             setParcel(null);
+            setNjginFeature(null);
             setZoningCheck(null);
           }}
           onManual={chooseManual}
           onSearch={chooseSearch}
+          onSource={chooseSource}
           onContinue={() => advance(2)}
         />
       )}
@@ -515,6 +605,7 @@ export default function App() {
           district={district}
           lot={lot}
           entryMode={entryMode}
+          parcelSource={parcelSource}
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
@@ -615,6 +706,7 @@ function ProjectSetup({
   districtId,
   entryMode,
   parcelData,
+  parcelSource,
   lot,
   parcelPick,
   parcel,
@@ -634,10 +726,14 @@ function ProjectSetup({
   onParcel,
   onManual,
   onSearch,
+  onSource,
   onContinue,
 }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
-  const searchUnavailable = parcelData === "missing";
+  const liveParcels = parcelSource === "njgin";
+  // The district can only be resolved from geometry on the imported-parcel
+  // path, so every other path picks it by hand.
+  const manualDistrict = entryMode === "manual" || liveParcels;
 
   return (
     <section className={previewProps.visible ? "workspace-grid" : "workspace-grid solo"}>
@@ -686,7 +782,7 @@ function ProjectSetup({
                   ))}
                 </select>
               </label>
-              {entryMode === "manual" ? (
+              {manualDistrict ? (
                 <label>
                   Zoning district <span className="manual-badge">Manual—unverified</span>
                   <select
@@ -715,14 +811,19 @@ function ProjectSetup({
               )}
             </div>
 
-            {searchUnavailable && (
-              <div className="data-missing-notice" role="status">
-                <strong>Address search is unavailable for {muni?.name}.</strong>
+            {liveParcels && entryMode === "search" && (
+              <div className="live-source-notice" role="status">
+                <strong>Reading parcels live from the State of New Jersey.</strong>
                 <span>
-                  The public NJGIN parcel data has not been imported into this environment, so there are no
-                  addresses to search. Enter the lot dimensions from a deed, tax record, or survey to continue —
-                  the result will be labelled manual and unverified.
+                  {parcelData === "missing"
+                    ? `${muni?.name} has no parcel import in this environment, so addresses and lot boundaries come straight from the NJGIN statewide parcels service.`
+                    : "Addresses and lot boundaries come straight from the NJGIN statewide parcels service rather than the imported snapshot."}{" "}
+                  Boundaries are real; the zoning district is not — pick it above and confirm it with{" "}
+                  {muni?.name}.
                 </span>
+                <a href={NJGIN_SOURCE_URL} target="_blank" rel="noreferrer">
+                  nj.gov/njgin/edata/parcels →
+                </a>
               </div>
             )}
 
@@ -733,10 +834,13 @@ function ProjectSetup({
                     <h3>Find the property</h3>
                     <p>Search {muni?.name} public parcel records by street address.</p>
                   </div>
-                  <span className="data-tag">NJGIN public data</span>
+                  <span className={liveParcels ? "data-tag live" : "data-tag"}>
+                    {liveParcels ? "NJGIN live service" : "NJGIN public data"}
+                  </span>
                 </div>
                 <ParcelSearch
-                  muniSlug={muni.slug}
+                  muni={muni}
+                  source={parcelSource}
                   selected={parcelPick}
                   onSelect={onParcel}
                   onClear={() => onParcel(null)}
@@ -744,11 +848,14 @@ function ProjectSetup({
                 {zoningCheck?.status === "checking" && (
                   <p className="status-line">Checking the parcel against the municipal zoning layer…</p>
                 )}
+                {liveParcels && parcelPick && !parcel && !parcelError && (
+                  <p className="status-line">Loading the parcel boundary from NJGIN…</p>
+                )}
                 {parcelError && <p className="status-line error-text">Parcel lookup failed: {parcelError}</p>}
                 {parcelPick && (
                   <div className="selected-property">
-                    <span className={zoningCheck?.status === "matched" ? "check" : "check pending"}>
-                      {zoningCheck?.status === "matched" ? "✓" : "!"}
+                    <span className={parcelResolved(zoningCheck, parcel, liveParcels) ? "check" : "check pending"}>
+                      {parcelResolved(zoningCheck, parcel, liveParcels) ? "✓" : "!"}
                     </span>
                     <div>
                       <strong>{parcel?.address ?? parcelPick.address ?? parcelPick.pams_pin}</strong>
@@ -759,10 +866,28 @@ function ProjectSetup({
                     </div>
                   </div>
                 )}
-                <ZoningCheckNotice check={zoningCheck} />
-                <button type="button" className="text-button" onClick={onManual}>
-                  Can’t find the address? Enter lot details manually →
-                </button>
+                <ZoningCheckNotice
+                  check={zoningCheck}
+                  live={liveParcels}
+                  muni={muni}
+                  ready={Boolean(parcel)}
+                />
+                <div className="source-switch">
+                  <button type="button" className="text-button" onClick={onManual}>
+                    Can’t find the address? Enter lot details manually →
+                  </button>
+                  {parcelData === "available" && (
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => onSource(liveParcels ? "db" : "njgin")}
+                    >
+                      {liveParcels
+                        ? "Use the imported records instead (zoning verified) →"
+                        : "Search the live State parcel service instead →"}
+                    </button>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="property-method manual-entry">
@@ -771,11 +896,9 @@ function ProjectSetup({
                     <h3>Enter lot details manually</h3>
                     <p>Use dimensions from a deed, tax record, or recent survey.</p>
                   </div>
-                  {!searchUnavailable && (
-                    <button type="button" className="text-button compact" onClick={onSearch}>
-                      Search by address
-                    </button>
-                  )}
+                  <button type="button" className="text-button compact" onClick={onSearch}>
+                    Search by address
+                  </button>
                 </div>
                 <div className="form-grid three">
                   <NumberField
@@ -927,7 +1050,18 @@ function ProjectSetup({
  * Right-hand panel for the input step. Only rendered once a property exists to
  * draw — see `previewProps.visible`.
  */
-function PropertyPreview({ muni, district, lot, entryMode, parcel, parcelPick, zoningCheck, project }) {
+function PropertyPreview({
+  muni,
+  district,
+  lot,
+  entryMode,
+  parcelSource,
+  parcel,
+  parcelPick,
+  zoningCheck,
+  project,
+}) {
+  const liveParcels = parcelSource === "njgin";
   return (
     <aside className="card preview-card">
       <p className="eyebrow">Property preview</p>
@@ -938,8 +1072,9 @@ function PropertyPreview({ muni, district, lot, entryMode, parcel, parcelPick, z
           <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
           {!parcel.envelope_geojson && (
             <p className="parcel-preview-status">
-              Showing the actual NJGIN parcel boundary. The buildable envelope will appear after municipal zoning
-              geometry and setbacks are verified.
+              {liveParcels
+                ? "Showing the actual NJGIN parcel boundary. The setbacks for the selected district leave no buildable envelope to draw."
+                : "Showing the actual NJGIN parcel boundary. The buildable envelope will appear after municipal zoning geometry and setbacks are verified."}
             </p>
           )}
         </>
@@ -960,22 +1095,44 @@ function PropertyPreview({ muni, district, lot, entryMode, parcel, parcelPick, z
         <div>
           <span>Zoning</span>
           <strong>
-            {entryMode === "manual"
+            {entryMode === "manual" || liveParcels
               ? `${district?.code ?? "—"} (manual)`
               : zoningCheck?.status === "matched"
                 ? `${zoningCheck.district_code} (automatic)`
                 : zoningStatusLabel(zoningCheck)}
           </strong>
         </div>
-        <div><span>Data source</span><strong>{parcelPick ? "NJGIN parcel" : entryMode === "manual" ? "Manual entry" : "Awaiting address"}</strong></div>
+        <div>
+          <span>Data source</span>
+          <strong>
+            {parcelPick
+              ? liveParcels
+                ? "NJGIN live service"
+                : "NJGIN parcel (imported)"
+              : entryMode === "manual"
+                ? "Manual entry"
+                : "Awaiting address"}
+          </strong>
+        </div>
       </div>
     </aside>
   );
 }
 
+/**
+ * Whether the selected parcel is settled enough to build on. The two sources
+ * clear different bars: an imported parcel needs a geometry-verified district,
+ * a live NJGIN parcel only needs its boundary, because its district was chosen
+ * by hand and is labelled as such throughout.
+ */
+function parcelResolved(check, parcel, live) {
+  return live ? Boolean(parcel) : check?.status === "matched";
+}
+
 function zoningStatusLabel(check) {
   if (!check) return "Identified after parcel selection";
   if (check.status === "checking") return "Checking zoning geometry…";
+  if (check.status === "live_parcel") return "Chosen manually — no zoning layer loaded";
   if (check.status === "matched") {
     return `${check.district_code}${check.district_name ? ` — ${check.district_name}` : ""}`;
   }
@@ -986,7 +1143,35 @@ function zoningStatusLabel(check) {
   return "Automatic zoning check unavailable";
 }
 
-function ZoningCheckNotice({ check }) {
+function ZoningCheckNotice({ check, live, muni, ready }) {
+  // On the live path there is no automatic check to report. Say what was and
+  // was not established rather than raising an alert about a check that was
+  // never available for this municipality.
+  if (live) {
+    if (!ready && check?.status !== "error") return null;
+    if (check?.status === "error") {
+      return (
+        <div className="zoning-check blocked" role="alert">
+          <strong>The NJGIN parcel could not be loaded</strong>
+          <span>
+            The State parcel service did not return this boundary. Try another address, or enter the lot
+            dimensions manually.
+          </span>
+        </div>
+      );
+    }
+    return (
+      <div className="zoning-check live" role="status">
+        <strong>Boundary from NJGIN · district selected by hand</strong>
+        <span>
+          The lot boundary and area come from the State's parcel record. No machine-readable zoning layer is
+          loaded for {muni?.name ?? "this municipality"}, so the district above was not verified against the
+          parcel — confirm it before relying on the result.
+        </span>
+      </div>
+    );
+  }
+
   if (!check || check.status === "checking" || check.status === "matched") {
     if (check?.status !== "matched") return null;
     return (
@@ -1219,7 +1404,7 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
   );
 }
 
-function Results({ project, muni, district, lot, entryMode, parcel, result, costModel, onBack, onContinue }) {
+function Results({ project, muni, district, lot, entryMode, parcelSource, parcel, result, costModel, onBack, onContinue }) {
   return (
     <>
       <section className="results-heading">
@@ -1247,6 +1432,18 @@ function Results({ project, muni, district, lot, entryMode, parcel, result, cost
           <EngineSteps result={result} district={district} projectType={project?.id} />
           <PlanFeasibility result={result} projectType={project?.id} />
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
+          {/* The rectangular-fallback note has no equivalent below, so it stays
+              here. The capacity, ADU, and prevailing-setback warnings that came
+              with it do — zoningFindings and zoningCaveats already report all
+              three in the Zoning check card, and saying them twice in one
+              report reads as two separate problems. */}
+          {result.approximation && (
+            <p className="fine">
+              The uniform polygon inset collapses on this narrow lot, so figures use the recorded{" "}
+              {fmt(result.approximation.widthFt)}′ × {fmt(result.approximation.depthFt)}′ lot
+              rectangle with per-edge setbacks. A survey must confirm the true envelope.
+            </p>
+          )}
         </div>
 
         <CostCard result={result} costModel={costModel} projectType={project?.id} />
@@ -1265,6 +1462,8 @@ function Results({ project, muni, district, lot, entryMode, parcel, result, cost
           muni={muni}
           parcel={parcel}
           entryMode={entryMode}
+          parcelSource={parcelSource}
+          district={district}
           result={result}
           costModel={costModel}
         />
@@ -1284,7 +1483,7 @@ function Results({ project, muni, district, lot, entryMode, parcel, result, cost
  * A synthesis of what the three stages above produced — deliberately not a
  * repeat of the tier table or the findings list.
  */
-function AnswerSummary({ project, muni, parcel, entryMode, result, costModel }) {
+function AnswerSummary({ project, muni, parcel, entryMode, parcelSource, district, result, costModel }) {
   const rates = TIER_ORDER.map((tier) => tierRate(costModel, tier)).filter((value) => value != null);
   const { maxArea, plannedArea, fitsPlan } = result;
   const costArea = result.estimateArea; // planned size when given, else the max
@@ -1336,6 +1535,12 @@ function AnswerSummary({ project, muni, parcel, entryMode, result, costModel }) 
             : "Based on public NJGIN parcel data, which the State states is not survey data and does not represent legal boundaries."}{" "}
           A survey is required to confirm.
         </li>
+        {entryMode === "search" && parcelSource === "njgin" && (
+          <li>
+            The boundary was read live from the State's parcel service, but district {district?.code} was selected
+            by hand, not matched to this parcel by geometry. If the district is wrong, every figure above is wrong.
+          </li>
+        )}
         <li>
           Cost figures are planning averages
           {costModel?.provenance ? ` (${costModel.provenance})` : ""}, not a quote. An accurate price is not possible
@@ -1717,6 +1922,13 @@ function PropertyTable({ parcel, result, district, projectType }) {
           <td>Floor-area ratio</td>
           <td>{district.max_far != null ? district.max_far : "Not used here"}</td>
         </tr>
+        <tr>
+          <td>
+            Approx. envelope
+            {result.approximation && <span className="table-note"> (recorded lot rectangle)</span>}
+          </td>
+          <td>{fmt(envelopeAreaOf(result))} sq ft</td>
+        </tr>
         {hasExistingHouse && (
           <tr><td>Current structure location</td><td>{structureLocationLabel(result.existingLocation)}</td></tr>
         )}
@@ -1739,11 +1951,16 @@ function CostCard({ result, costModel, projectType }) {
   const usingPlanned = result.plannedArea != null;
   const maxLabel = projectType === "adu" ? "potential ADU capacity" : hasExistingHouse ? "remaining addition capacity" : "total allowable area";
   const basisLabel = usingPlanned ? "your planned size" : `the ${maxLabel}`;
+  const verified = costModel?.provenance === "verified";
   return (
     <div className="card result-card">
       <h3>
         Preliminary build cost
-        {costModel && <span className={`badge ${costModel.provenance}`}>{costModel.provenance}</span>}
+        {costModel && (
+          <span className={`provenance-flag ${costModel.provenance}`}>
+            {verified ? "✓ Verified Price" : "✕ Estimated"}
+          </span>
+        )}
       </h3>
       <p className="card-intro">
         Planning ranges based on {basisLabel}
@@ -1751,6 +1968,21 @@ function CostCard({ result, costModel, projectType }) {
         three levels are shown so the spread is visible — the finishes, not the floor area, are what move the number.
       </p>
       {!costModel && <p className="fine">No rate card is loaded for this municipality yet.</p>}
+      {costModel &&
+        (verified ? (
+          <div className="provenance-note verified" role="note">
+            <strong>✓ Verified Price</strong>
+            <span>Based on Marco Designs’ real figures from homes built in this area.</span>
+          </div>
+        ) : (
+          <div className="provenance-note estimated" role="alert">
+            <strong>✕ Rough estimate</strong>
+            <span>
+              This is a projection based on regional cost variables — not local build history. Actual
+              costs may include expenses not accounted for here.
+            </span>
+          </div>
+        ))}
       {costModel && hasExistingHouse && result.estimateArea == null && (
         <div className="cost-unavailable">
           Enter the existing number of stories or total square feet to estimate remaining floor area and construction cost.
@@ -1761,14 +1993,24 @@ function CostCard({ result, costModel, projectType }) {
           {TIER_ORDER.map((tierName) => {
             const tier = costModel.build_cost_tiers.find((item) => item.tier === tierName);
             if (!tier) return null;
+            const hasRange = tier.rate_per_sqft_max != null;
             return (
               <div className="cost-tier" key={tierName}>
                 <div>
                   <strong>{TIER_LABELS[tierName]}</strong>
                   <span className="tier-desc">{TIER_DESCRIPTIONS[tierName]}</span>
-                  <span className="tier-rate">${fmt(tier.rate_per_sqft, 2)} / sq ft</span>
+                  <span className="tier-rate">
+                    {hasRange
+                      ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
+                      : `$${fmt(tier.rate_per_sqft, 2)} / sq ft`}
+                  </span>
+                  {tier.notes && <small className="tier-notes">{tier.notes}</small>}
                 </div>
-                <b>${fmt(result.estimateArea * tier.rate_per_sqft)}</b>
+                <b>
+                  {hasRange
+                    ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
+                    : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`}
+                </b>
               </div>
             );
           })}
@@ -1842,14 +2084,27 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
               </strong>
             </div>
           )}
+          {/* All three tiers, each carrying the range and the provenance flag:
+              the printed report is where a reader is most likely to mistake a
+              projection for a quote, so the label travels with every price. */}
           {TIER_ORDER.map((tierName) => {
-            const rate = tierRate(costModel, tierName);
+            const tier = costModel?.build_cost_tiers.find((item) => item.tier === tierName);
+            const hasRange = tier?.rate_per_sqft_max != null;
             return (
               <div key={tierName}>
-                <span>{TIER_LABELS[tierName]} estimate</span>
+                <span>
+                  {TIER_LABELS[tierName]} estimate
+                  {costModel && (
+                    <span className={`provenance-flag inline ${costModel.provenance}`}>
+                      {costModel.provenance === "verified" ? "✓ Verified" : "✕ Estimated"}
+                    </span>
+                  )}
+                </span>
                 <strong>
-                  {rate != null && result.estimateArea != null
-                    ? `$${fmt(result.estimateArea * rate)}`
+                  {tier && result.estimateArea != null
+                    ? hasRange
+                      ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
+                      : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`
                     : "Needs floor-area input"}
                 </strong>
               </div>

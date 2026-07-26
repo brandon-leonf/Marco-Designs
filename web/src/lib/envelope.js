@@ -102,6 +102,18 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
   };
 }
 
+/**
+ * Recorded rectangular dimensions (MOD-IV "25X102") for a parcel, when the
+ * import parsed them. This is the fallback the project doc calls for: when
+ * the uniform polygon inset collapses a narrow lot to nothing, per-edge
+ * arithmetic on the recorded rectangle is more faithful than reporting zero.
+ */
+export function recordedRectDims(parcel) {
+  const width = Number(parcel?.lot_frontage_ft);
+  const depth = Number(parcel?.lot_depth_ft);
+  return width > 0 && depth > 0 ? { width_ft: width, depth_ft: depth } : null;
+}
+
 /** Largest applicable setback → conservative uniform inset for previews. */
 export function conservativeInsetFt(district) {
   return Math.max(
