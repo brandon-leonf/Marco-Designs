@@ -10,6 +10,7 @@ import {
   computeBuildable,
   computeBuildableFromAreas,
   conservativeInsetFt,
+  recordedRectDims,
 } from "./lib/envelope.js";
 import {
   fetchNjginParcel,
@@ -20,21 +21,23 @@ import ParcelSearch from "./components/ParcelSearch.jsx";
 import ParcelPlan from "./components/ParcelPlan.jsx";
 import Logo from "./components/Logo.jsx";
 
-// Marketing names for the build-quality levels. The `id` stays on the database
-// tier keys so the loaded rate card keeps resolving without a migration.
+// Marketing names and copy for the build-quality levels. The ids are the
+// database tier keys as renamed by migration 0010 (builder_grade -> essential,
+// mid_level -> signature, high_end -> premium), so the loaded rate card keeps
+// resolving.
 const PACKAGES = [
   {
-    id: "builder_grade",
+    id: "essential",
     label: "Essential",
     description: "Efficient, code-compliant construction with standard finishes.",
   },
   {
-    id: "mid_level",
+    id: "signature",
     label: "Signature",
     description: "Upgraded finishes, detailing, and systems for most custom homes.",
   },
   {
-    id: "high_end",
+    id: "premium",
     label: "Premium",
     description: "High-end materials, custom millwork, and premium mechanicals.",
   },
@@ -319,11 +322,31 @@ export default function App() {
     if (!district) return null;
     let zoningResult = null;
     if (entryMode === "search" && parcel) {
-      zoningResult = computeBuildableFromAreas(
-        Number(parcel.lot_area_sqft),
-        Number(parcel.envelope_area_sqft ?? 0),
-        district
-      );
+      const envelopeArea =
+        parcel.envelope_area_sqft == null ? null : Number(parcel.envelope_area_sqft);
+      // The uniform polygon inset (largest setback on every edge) collapses
+      // narrow lots to nothing. When that happens and MOD-IV recorded the
+      // rectangular dimensions, fall back to per-edge arithmetic on that
+      // rectangle — the approximation the project doc calls for — instead of
+      // reporting 0 sq ft.
+      const rectDims = envelopeArea > 0 ? null : recordedRectDims(parcel);
+      if (rectDims) {
+        const rect = computeBuildable(
+          { ...rectDims, area_sqft: Number(parcel.lot_area_sqft) },
+          district
+        );
+        zoningResult = {
+          ...rect,
+          envelopeArea: rect.envelope.areaSqft,
+          approximation: { widthFt: rectDims.width_ft, depthFt: rectDims.depth_ft },
+        };
+      } else {
+        zoningResult = computeBuildableFromAreas(
+          Number(parcel.lot_area_sqft),
+          envelopeArea ?? 0,
+          district
+        );
+      }
     } else if (entryMode === "manual" && lot.width_ft > 0 && lot.depth_ft > 0 && lot.area_sqft > 0) {
       zoningResult = computeBuildable(lot, district);
     }
@@ -1409,6 +1432,18 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
           <EngineSteps result={result} district={district} projectType={project?.id} />
           <PlanFeasibility result={result} projectType={project?.id} />
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
+          {/* The rectangular-fallback note has no equivalent below, so it stays
+              here. The capacity, ADU, and prevailing-setback warnings that came
+              with it do — zoningFindings and zoningCaveats already report all
+              three in the Zoning check card, and saying them twice in one
+              report reads as two separate problems. */}
+          {result.approximation && (
+            <p className="fine">
+              The uniform polygon inset collapses on this narrow lot, so figures use the recorded{" "}
+              {fmt(result.approximation.widthFt)}′ × {fmt(result.approximation.depthFt)}′ lot
+              rectangle with per-edge setbacks. A survey must confirm the true envelope.
+            </p>
+          )}
         </div>
 
         <CostCard result={result} costModel={costModel} projectType={project?.id} />
@@ -1887,6 +1922,13 @@ function PropertyTable({ parcel, result, district, projectType }) {
           <td>Floor-area ratio</td>
           <td>{district.max_far != null ? district.max_far : "Not used here"}</td>
         </tr>
+        <tr>
+          <td>
+            Approx. envelope
+            {result.approximation && <span className="table-note"> (recorded lot rectangle)</span>}
+          </td>
+          <td>{fmt(envelopeAreaOf(result))} sq ft</td>
+        </tr>
         {hasExistingHouse && (
           <tr><td>Current structure location</td><td>{structureLocationLabel(result.existingLocation)}</td></tr>
         )}
@@ -1909,11 +1951,16 @@ function CostCard({ result, costModel, projectType }) {
   const usingPlanned = result.plannedArea != null;
   const maxLabel = projectType === "adu" ? "potential ADU capacity" : hasExistingHouse ? "remaining addition capacity" : "total allowable area";
   const basisLabel = usingPlanned ? "your planned size" : `the ${maxLabel}`;
+  const verified = costModel?.provenance === "verified";
   return (
     <div className="card result-card">
       <h3>
         Preliminary build cost
-        {costModel && <span className={`badge ${costModel.provenance}`}>{costModel.provenance}</span>}
+        {costModel && (
+          <span className={`provenance-flag ${costModel.provenance}`}>
+            {verified ? "✓ Verified Price" : "✕ Estimated"}
+          </span>
+        )}
       </h3>
       <p className="card-intro">
         Planning ranges based on {basisLabel}
@@ -1921,6 +1968,21 @@ function CostCard({ result, costModel, projectType }) {
         three levels are shown so the spread is visible — the finishes, not the floor area, are what move the number.
       </p>
       {!costModel && <p className="fine">No rate card is loaded for this municipality yet.</p>}
+      {costModel &&
+        (verified ? (
+          <div className="provenance-note verified" role="note">
+            <strong>✓ Verified Price</strong>
+            <span>Based on Marco Designs’ real figures from homes built in this area.</span>
+          </div>
+        ) : (
+          <div className="provenance-note estimated" role="alert">
+            <strong>✕ Rough estimate</strong>
+            <span>
+              This is a projection based on regional cost variables — not local build history. Actual
+              costs may include expenses not accounted for here.
+            </span>
+          </div>
+        ))}
       {costModel && hasExistingHouse && result.estimateArea == null && (
         <div className="cost-unavailable">
           Enter the existing number of stories or total square feet to estimate remaining floor area and construction cost.
@@ -1931,14 +1993,24 @@ function CostCard({ result, costModel, projectType }) {
           {TIER_ORDER.map((tierName) => {
             const tier = costModel.build_cost_tiers.find((item) => item.tier === tierName);
             if (!tier) return null;
+            const hasRange = tier.rate_per_sqft_max != null;
             return (
               <div className="cost-tier" key={tierName}>
                 <div>
                   <strong>{TIER_LABELS[tierName]}</strong>
                   <span className="tier-desc">{TIER_DESCRIPTIONS[tierName]}</span>
-                  <span className="tier-rate">${fmt(tier.rate_per_sqft, 2)} / sq ft</span>
+                  <span className="tier-rate">
+                    {hasRange
+                      ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
+                      : `$${fmt(tier.rate_per_sqft, 2)} / sq ft`}
+                  </span>
+                  {tier.notes && <small className="tier-notes">{tier.notes}</small>}
                 </div>
-                <b>${fmt(result.estimateArea * tier.rate_per_sqft)}</b>
+                <b>
+                  {hasRange
+                    ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
+                    : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`}
+                </b>
               </div>
             );
           })}
@@ -2012,14 +2084,27 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
               </strong>
             </div>
           )}
+          {/* All three tiers, each carrying the range and the provenance flag:
+              the printed report is where a reader is most likely to mistake a
+              projection for a quote, so the label travels with every price. */}
           {TIER_ORDER.map((tierName) => {
-            const rate = tierRate(costModel, tierName);
+            const tier = costModel?.build_cost_tiers.find((item) => item.tier === tierName);
+            const hasRange = tier?.rate_per_sqft_max != null;
             return (
               <div key={tierName}>
-                <span>{TIER_LABELS[tierName]} estimate</span>
+                <span>
+                  {TIER_LABELS[tierName]} estimate
+                  {costModel && (
+                    <span className={`provenance-flag inline ${costModel.provenance}`}>
+                      {costModel.provenance === "verified" ? "✓ Verified" : "✕ Estimated"}
+                    </span>
+                  )}
+                </span>
                 <strong>
-                  {rate != null && result.estimateArea != null
-                    ? `$${fmt(result.estimateArea * rate)}`
+                  {tier && result.estimateArea != null
+                    ? hasRange
+                      ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
+                      : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`
                     : "Needs floor-area input"}
                 </strong>
               </div>

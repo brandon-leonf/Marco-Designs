@@ -481,6 +481,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .result-table td { padding: 0.62rem 0.65rem; border-bottom: 1px solid var(--line); }
 .result-table td:first-child { padding-left: 0.65rem; }
 .result-table td:last-child { color: var(--ink); font-weight: 700; text-align: right; white-space: nowrap; }
+.result-table .table-note { color: var(--muted); font-size: 0.65rem; }
 .fine { margin: 0.75rem 0 0; color: var(--muted); font-size: 0.72rem; line-height: 1.5; }
 .adu-review-note {
   margin-top: 0.85rem;
@@ -915,3 +916,125 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .save-ok { color: var(--green); font-weight: 700; }
 .admin-actions { justify-content: flex-end; }
 button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
+
+/* ---------- Cost provenance (verified vs estimated) ---------- */
+.provenance-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.6rem;
+  padding: 0.18rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+.provenance-flag.verified { background: var(--green-soft); color: var(--green); }
+.provenance-flag.estimated { background: #fdecec; color: #b3261e; }
+.provenance-flag.inline { margin-left: 0.45rem; padding: 0.05rem 0.45rem; font-size: 0.66rem; }
+
+.provenance-note {
+  display: grid;
+  gap: 0.2rem;
+  border-radius: 10px;
+  padding: 0.75rem 0.95rem;
+  font-size: 0.82rem;
+  margin: 0.35rem 0 0.75rem;
+  border: 1px solid;
+}
+.provenance-note strong { font-size: 0.85rem; }
+.provenance-note.verified {
+  background: var(--green-soft);
+  border-color: #bcd9c6;
+  color: var(--green);
+}
+.provenance-note.estimated {
+  background: #fdecec;
+  border-color: #f2b8b5;
+  color: #8c1d18;
+}
+.tier-notes {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  margin-top: 0.2rem;
+  max-width: 30ch;
+}
+
+/* ---------- Admin: tier editor + inline create forms ---------- */
+.tier-editor {
+  border-top: 1px dashed var(--line);
+  padding-top: 0.8rem;
+  margin-top: 0.9rem;
+  display: grid;
+  gap: 0.6rem;
+}
+.tier-editor-name { font-weight: 800; font-size: 0.88rem; color: var(--primary-fill); }
+.tier-notes-field { display: grid; gap: 0.3rem; font-weight: 700; font-size: 0.8rem; }
+.tier-notes-field input {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.5rem 0.6rem;
+  width: 100%;
+  font-weight: 400;
+}
+
+.inline-create {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.8rem;
+  display: grid;
+  gap: 0.6rem;
+  background: var(--bg);
+}
+.inline-create label { display: grid; gap: 0.25rem; font-weight: 700; font-size: 0.78rem; }
+.inline-create input {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  width: 100%;
+  font-weight: 400;
+}
+.inline-create-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+.inline-create-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+.inline-create code { font-size: 0.74rem; }
+
+/* ---------- Admin: draft state, validation, test panel ---------- */
+.draft-badge {
+  background: #fff7e6;
+  border: 1px solid #f0d9a8;
+  color: #8a6116;
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+.validate-panel {
+  border-radius: 10px;
+  border: 1px solid;
+  padding: 0.85rem 1rem;
+  display: grid;
+  gap: 0.5rem;
+  font-size: 0.84rem;
+}
+.validate-panel.good { background: var(--green-soft); border-color: #bcd9c6; color: var(--green); }
+.validate-panel.bad { background: #fdecec; border-color: #f2b8b5; color: #8c1d18; }
+.validate-panel ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 0.25rem; }
+.validate-panel li { list-style: none; }
+.validate-panel.bad li { color: var(--green); }
+.validate-panel.bad li.validate-bad { color: #8c1d18; font-weight: 700; }
+.test-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.4rem;
+  margin-top: 0.9rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.test-summary div { display: grid; gap: 0.1rem; }
+.test-summary span { color: var(--muted); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.test-summary strong { font-size: 1.05rem; }
+.test-log { margin-top: 0.7rem; max-height: 320px; }

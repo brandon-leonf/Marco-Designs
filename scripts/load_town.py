@@ -171,17 +171,29 @@ def upsert_town(cur, town: dict, rates: dict | None):
     model_id = cur.fetchone()[0]
 
     for tier_name, tier in rates["tiers"].items():
+        # Estimated tiers carry a single derived number; verified tiers carry a
+        # {min, max} range. Both land in the same columns: rate_per_sqft is the
+        # rate (or range minimum), rate_per_sqft_max is NULL for estimated.
+        rate = tier["rate_per_sqft"]
+        if isinstance(rate, dict):
+            rate_min, rate_max = rate["min"], rate["max"]
+        else:
+            rate_min, rate_max = rate, None
         cur.execute(
             """
             INSERT INTO build_cost_tiers
-                (cost_model_id, tier, rate_per_sqft, provenance, formula_reference)
-            VALUES (%s, %s, %s, %s, %s)
+                (cost_model_id, tier, rate_per_sqft, rate_per_sqft_max, notes,
+                 provenance, formula_reference)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (cost_model_id, tier) DO UPDATE SET
                 rate_per_sqft = EXCLUDED.rate_per_sqft,
+                rate_per_sqft_max = EXCLUDED.rate_per_sqft_max,
+                notes = EXCLUDED.notes,
                 provenance = EXCLUDED.provenance,
                 formula_reference = EXCLUDED.formula_reference
             """,
-            (model_id, tier_name, tier["rate_per_sqft"], prov, tier.get("formula_reference")),
+            (model_id, tier_name, rate_min, rate_max, tier.get("notes"),
+             prov, tier.get("formula_reference")),
         )
     return muni_id, n_districts, len(rates["tiers"])
 
