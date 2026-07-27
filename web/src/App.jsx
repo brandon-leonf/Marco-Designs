@@ -56,6 +56,9 @@ export default function App() {
   const [parcel, setParcel] = useState(null);
   const [parcelError, setParcelError] = useState(null);
   const [zoningCheck, setZoningCheck] = useState(null);
+  // Marco's guide calls Signature "our most popular level", so it starts
+  // selected. The client's choice drives the report and the contingency.
+  const [selectedTier, setSelectedTier] = useState("signature");
 
   useEffect(() => {
     if (!supabase) return;
@@ -326,6 +329,8 @@ export default function App() {
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
+          selectedTier={selectedTier}
+          onSelectTier={setSelectedTier}
           onBack={() => goToStep(1)}
           onContinue={() => advance(3)}
         />
@@ -341,6 +346,7 @@ export default function App() {
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
+          selectedTier={selectedTier}
           onBack={() => goToStep(2)}
         />
       )}
@@ -809,7 +815,7 @@ function SurveyNotice() {
   );
 }
 
-function Results({ project, muni, district, lot, parcel, result, costModel, onBack, onContinue }) {
+function Results({ project, muni, district, lot, parcel, result, costModel, selectedTier, onSelectTier, onBack, onContinue }) {
   return (
     <>
       <section className="results-heading">
@@ -854,7 +860,7 @@ function Results({ project, muni, district, lot, parcel, result, costModel, onBa
             <p className="fine">Front setback may depend on the prevailing block average; the minimum shown is a planning floor.</p>
           )}
         </div>
-        <CostCard result={result} costModel={costModel} projectType={project?.id} />
+        <CostCard result={result} costModel={costModel} projectType={project?.id} selectedTier={selectedTier} onSelectTier={onSelectTier} />
       </section>
 
       <SurveyNotice />
@@ -989,7 +995,7 @@ function structureLocationLabel(location) {
   }[location] ?? "Not sure";
 }
 
-function CostCard({ result, costModel, projectType }) {
+function CostCard({ result, costModel, projectType, selectedTier, onSelectTier }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
   const estimateLabel = projectType === "adu" ? "potential ADU capacity" : hasExistingHouse ? "remaining addition capacity" : "total allowable area";
   const verified = costModel?.provenance === "verified";
@@ -1026,16 +1032,28 @@ function CostCard({ result, costModel, projectType }) {
         </div>
       )}
       {costModel && result.estimateArea != null && (
-        <div className="cost-tiers">
+        <>
+        <div className="cost-tiers" role="radiogroup" aria-label="Build level">
           {TIER_ORDER.map((tierName) => {
             const tier = costModel.build_cost_tiers.find((item) => item.tier === tierName);
             if (!tier) return null;
             const hasRange = tier.rate_per_sqft_max != null;
+            const selected = tierName === selectedTier;
             return (
-              <div className="cost-tier" key={tierName}>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className={selected ? "cost-tier selected" : "cost-tier"}
+                onClick={() => onSelectTier?.(tierName)}
+                key={tierName}
+              >
                 <div className="cost-tier-head">
                   <div>
-                    <strong>{TIER_LABELS[tierName]}</strong>
+                    <strong>
+                      <span className="tier-mark" aria-hidden="true" />
+                      {TIER_LABELS[tierName]}
+                    </strong>
                     <span>
                       {hasRange
                         ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
@@ -1049,17 +1067,21 @@ function CostCard({ result, costModel, projectType }) {
                   </b>
                 </div>
                 {tier.notes && <p className="tier-notes">{tier.notes}</p>}
-              </div>
+              </button>
             );
           })}
         </div>
+        <p className="tier-hint">
+          Select a build level to carry it through to your report.
+        </p>
+        </>
       )}
       {costModel?.provenance === "estimated" && result.estimateArea != null && (
         <p className="fine">
           Based on a ${fmt(costModel.regional_baseline_per_sqft, 2)}/sq ft regional baseline × {costModel.local_cost_factor} local factor.
         </p>
       )}
-      <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} />
+      <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} selectedTier={selectedTier} />
     </div>
   );
 }
@@ -1070,16 +1092,16 @@ function CostCard({ result, costModel, projectType }) {
  * separate. Without this the total reads as the whole project cost, which is
  * the exact surprise the estimate exists to prevent.
  */
-function CostScope({ scope, estimateArea, costModel }) {
+function CostScope({ scope, estimateArea, costModel, selectedTier }) {
   if (!scope) return null;
   const includes = scope.includes ?? [];
   const excludes = scope.excludes ?? [];
   const pct = scope.contingency_pct;
 
-  // Contingency is a share of construction cost, so show it against the
-  // mid tier the client is most likely to land on.
-  const signature = costModel?.build_cost_tiers?.find((t) => t.tier === "signature");
-  const base = signature && estimateArea != null ? estimateArea * Number(signature.rate_per_sqft) : null;
+  // Contingency is a share of construction cost, so it follows the build
+  // level the client selected.
+  const chosen = costModel?.build_cost_tiers?.find((t) => t.tier === selectedTier);
+  const base = chosen && estimateArea != null ? estimateArea * Number(chosen.rate_per_sqft) : null;
 
   return (
     <div className="cost-scope">
@@ -1105,8 +1127,8 @@ function CostScope({ scope, estimateArea, costModel }) {
   );
 }
 
-function Review({ project, muni, district, lot, parcel, result, costModel, onBack }) {
-  const midTier = costModel?.build_cost_tiers.find((item) => item.tier === "signature");
+function Review({ project, muni, district, lot, parcel, result, costModel, selectedTier, onBack }) {
+  const chosenTier = costModel?.build_cost_tiers.find((item) => item.tier === selectedTier);
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
   return (
     <>
@@ -1155,7 +1177,7 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
           )}
           <div>
             <span>
-              Signature cost estimate
+              {TIER_LABELS[selectedTier]} cost estimate
               {costModel && (
                 <span className={`provenance-flag inline ${costModel.provenance}`}>
                   {costModel.provenance === "verified" ? "✓ Verified" : "✕ Estimated"}
@@ -1163,10 +1185,10 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
               )}
             </span>
             <strong>
-              {midTier && result.estimateArea != null
-                ? midTier.rate_per_sqft_max != null
-                  ? `$${fmt(result.estimateArea * midTier.rate_per_sqft)} – $${fmt(result.estimateArea * midTier.rate_per_sqft_max)}`
-                  : `$${fmt(result.estimateArea * midTier.rate_per_sqft)}`
+              {chosenTier && result.estimateArea != null
+                ? chosenTier.rate_per_sqft_max != null
+                  ? `$${fmt(result.estimateArea * chosenTier.rate_per_sqft)} – $${fmt(result.estimateArea * chosenTier.rate_per_sqft_max)}`
+                  : `$${fmt(result.estimateArea * chosenTier.rate_per_sqft)}`
                 : "Needs floor-area input"}
             </strong>
           </div>
@@ -1183,7 +1205,7 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
             location, setback, parking, utility, and occupancy requirements.
           </p>
         )}
-        <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} />
+        <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} selectedTier={selectedTier} />
         <p className="report-disclaimer">
           This report is for early planning only. It is not a zoning determination, site plan, survey, architectural drawing,
           construction estimate, or approval to build. Confirm requirements with {muni.name} and licensed professionals.
