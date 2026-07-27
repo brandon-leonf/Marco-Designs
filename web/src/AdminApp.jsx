@@ -752,6 +752,11 @@ function ConfigEditor({ adminEmail, ready }) {
             <strong>Save draft</strong> keeps changes in this browser only. Nothing reaches the live
             database used by the public calculator until you <strong>Publish configuration</strong>.
           </p>
+          <p>
+            After publishing, run <code>scripts/export_town.py</code> and commit the diff — the
+            config file stays the source of truth, and the next town load would otherwise revert
+            what you changed here.
+          </p>
         </div>
         <p className="admin-side-note admin-signed-in">
           Signed in as <strong>{adminEmail}</strong>
