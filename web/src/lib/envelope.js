@@ -35,6 +35,28 @@ export function missingDistrictRules(district) {
 }
 
 /**
+ * ADU policy for a district, from `extra_rules.adu`.
+ *
+ * Three states, and the difference matters. A district that explicitly says
+ * ADUs are not permitted is an answer to the client's question, not a reason
+ * to compute a price. A district with no ADU block recorded is unknown — the
+ * remaining-capacity figure is still useful there, carrying its caveat.
+ */
+export function aduRules(district) {
+  const adu = district?.extra_rules?.adu;
+  if (!adu || adu.allowed == null) {
+    return { known: false, allowed: null, maxSizeSqft: null };
+  }
+  return {
+    known: true,
+    allowed: Boolean(adu.allowed),
+    maxSizeSqft: adu.max_size_sqft == null ? null : Number(adu.max_size_sqft),
+    detachedAllowed: adu.detached_allowed == null ? null : Boolean(adu.detached_allowed),
+    parkingRequired: adu.parking_required == null ? null : Boolean(adu.parking_required),
+  };
+}
+
+/**
  * Assumed floor-to-floor height, used only to convert a height limit into a
  * number of floors. Surfaced in the UI whenever the height limit is what
  * binds, so the assumption is never hidden inside a number.
