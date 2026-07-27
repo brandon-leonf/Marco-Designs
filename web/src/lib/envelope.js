@@ -10,6 +10,72 @@
 import * as turf from "@turf/turf";
 
 /**
+ * Rules the algorithm cannot run without. A district missing any of these
+ * would silently produce a wrong answer — a lot with no setbacks reads as
+ * "build on 100% of the parcel" — so the UI refuses to calculate instead.
+ */
+const REQUIRED_RULES = {
+  front_yard_min_ft: "front setback",
+  rear_yard_min_ft: "rear setback",
+  max_building_coverage_pct: "maximum building coverage",
+  max_stories: "maximum stories",
+};
+
+/** Plain-language list of the rules a district is still missing. */
+export function missingDistrictRules(district) {
+  if (!district) return ["all zoning rules"];
+  const missing = Object.entries(REQUIRED_RULES)
+    .filter(([field]) => district[field] == null)
+    .map(([, label]) => label);
+  // Either side-yard expression is enough; the resolver derives the other.
+  if (district.side_yard_one_min_ft == null && district.side_yard_total_min_ft == null) {
+    missing.push("side setback");
+  }
+  return missing;
+}
+
+/**
+ * Assumed floor-to-floor height, used only to convert a height limit into a
+ * number of floors. Surfaced in the UI whenever the height limit is what
+ * binds, so the assumption is never hidden inside a number.
+ */
+export const FLOOR_TO_FLOOR_FT = 10;
+
+/**
+ * Allowable stories = the permitted count, capped by what the height limit
+ * physically allows (kickoff core algorithm, step 3).
+ */
+export function resolveStories(district) {
+  const permitted = district.max_stories ?? 1;
+  const heightFt = district.max_height_ft;
+  if (heightFt == null) {
+    return { stories: permitted, heightLimited: false, storiesByHeight: null };
+  }
+  const byHeight = Math.floor(Number(heightFt) / FLOOR_TO_FLOOR_FT);
+  const stories = Math.max(1, Math.min(permitted, byHeight));
+  return { stories, heightLimited: stories < permitted, storiesByHeight: byHeight };
+}
+
+/**
+ * Dimensional non-conformities: the lot is smaller than the district's
+ * minimums. Reported, never used to block — pre-existing undersized lots are
+ * common and are often still buildable, which is a municipal determination.
+ */
+export function lotViolations(district, lot) {
+  const out = [];
+  const check = (value, min, label, unit) => {
+    if (value == null || min == null) return;
+    if (Number(value) > 0 && Number(value) < Number(min)) {
+      out.push({ label, value: Number(value), min: Number(min), unit });
+    }
+  };
+  check(lot.areaSqft, district.min_lot_area_sqft, "Lot area", "sq ft");
+  check(lot.widthFt, district.min_lot_width_ft, "Lot width", "ft");
+  check(lot.depthFt, district.min_lot_depth_ft, "Lot depth", "ft");
+  return out;
+}
+
+/**
  * Per-edge inset of a rectangular lot. Exact arithmetic — better than a
  * uniform buffer for rectangles, and matches how the rules engine will treat
  * front/side/rear setbacks differently.
@@ -54,7 +120,7 @@ export function computeBuildable(lot, district) {
   const coverageCap = coveragePct != null ? lotArea * (coveragePct / 100) : Infinity;
   const footprint = Math.min(envelope.areaSqft, coverageCap);
 
-  const stories = district.max_stories ?? 1;
+  const { stories, heightLimited, storiesByHeight } = resolveStories(district);
   let buildable = footprint * stories;
 
   const farCap = district.max_far != null ? lotArea * district.max_far : Infinity;
@@ -65,6 +131,9 @@ export function computeBuildable(lot, district) {
     envelope,
     footprint,
     stories,
+    heightLimited,
+    storiesByHeight,
+    permittedStories: district.max_stories ?? 1,
     buildable,
     binding:
       footprint === 0
@@ -86,7 +155,7 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
   const coverageCap = coveragePct != null ? lotAreaSqft * (coveragePct / 100) : Infinity;
   const footprint = Math.min(envelopeAreaSqft ?? 0, coverageCap);
 
-  const stories = district.max_stories ?? 1;
+  const { stories, heightLimited, storiesByHeight } = resolveStories(district);
   let buildable = footprint * stories;
   const farCap = district.max_far != null ? lotAreaSqft * district.max_far : Infinity;
   buildable = Math.min(buildable, farCap);
@@ -96,6 +165,9 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
     envelopeArea: envelopeAreaSqft ?? 0,
     footprint,
     stories,
+    heightLimited,
+    storiesByHeight,
+    permittedStories: district.max_stories ?? 1,
     buildable,
     binding: footprint === 0 ? "setbacks" : coverageCap < (envelopeAreaSqft ?? 0) ? "coverage" : "setbacks",
     farLimited: buildable === farCap && farCap !== Infinity,
