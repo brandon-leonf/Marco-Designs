@@ -828,3 +828,4 @@ button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
 .cost-scope ul { margin: 0; padding-left: 1rem; display: grid; gap: 0.22rem; }
 .cost-scope li { color: var(--muted); font-size: 0.72rem; line-height: 1.45; }
 .report-licenses { margin: 0.4rem 0 0; color: var(--muted); font-size: 0.66rem; }
+.adu-conditions { display: block; margin-top: 0.35rem; font-weight: 700; }

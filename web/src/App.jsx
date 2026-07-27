@@ -12,6 +12,7 @@ import {
   recordedRectDims,
   missingDistrictRules,
   lotViolations,
+  aduRules,
   FLOOR_TO_FLOOR_FT,
 } from "./lib/envelope.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
@@ -147,6 +148,10 @@ export default function App() {
   // "no setbacks, no coverage limit" and report the whole lot as buildable).
   const missingRules = useMemo(() => missingDistrictRules(district), [district]);
   const rulesReady = Boolean(district) && missingRules.length === 0;
+  // A district that records ADUs as not permitted answers the client's
+  // question outright; pricing one would contradict the ordinance on file.
+  const adu = useMemo(() => aduRules(district), [district]);
+  const aduBlocked = projectType === "adu" && adu.known && !adu.allowed;
 
   const result = useMemo(() => {
     if (!district || missingRules.length > 0) return null;
@@ -202,6 +207,19 @@ export default function App() {
     const availableFootprint = Math.max(0, zoningResult.footprint - existingFootprint);
     const availableBuildingArea = existingArea == null ? null : Math.max(0, zoningResult.buildable - existingArea);
 
+    // An ADU is capped by the district's own size limit, not just by what is
+    // left over on the lot. Without this the tool quotes the full remaining
+    // capacity for a unit the ordinance would not allow at that size.
+    const adu = aduRules(district);
+    let estimateArea = hasExistingHouse ? availableBuildingArea : zoningResult.buildable;
+    let aduSizeCapped = false;
+    if (projectType === "adu" && adu.maxSizeSqft != null && estimateArea != null) {
+      if (estimateArea > adu.maxSizeSqft) {
+        estimateArea = adu.maxSizeSqft;
+        aduSizeCapped = true;
+      }
+    }
+
     return {
       ...zoningResult,
       existingFootprint,
@@ -211,7 +229,9 @@ export default function App() {
       existingLocation: existingStructure.location,
       availableFootprint,
       availableBuildingArea,
-      estimateArea: hasExistingHouse ? availableBuildingArea : zoningResult.buildable,
+      estimateArea,
+      aduSizeCapped,
+      aduMaxSizeSqft: adu.maxSizeSqft,
     };
   }, [district, missingRules, entryMode, existingStructure, lot, parcel, projectType]);
 
@@ -223,7 +243,7 @@ export default function App() {
   const structureReady =
     projectType === "new_house" ||
     Number(existingStructure.footprint_sqft) > 0;
-  const canContinue = Boolean(projectType && rulesReady && propertyReady && structureReady);
+  const canContinue = Boolean(projectType && rulesReady && propertyReady && structureReady && !aduBlocked);
 
   const goToStep = (next) => {
     if (next > maxStepReached) return;
@@ -295,6 +315,8 @@ export default function App() {
           parcelError={parcelError}
           zoningCheck={zoningCheck}
           missingRules={missingRules}
+          adu={adu}
+          aduBlocked={aduBlocked}
           canContinue={canContinue}
           onProjectType={setProjectType}
           onMuni={(id) => {
@@ -331,6 +353,7 @@ export default function App() {
           costModel={costModel}
           selectedTier={selectedTier}
           onSelectTier={setSelectedTier}
+          adu={adu}
           onBack={() => goToStep(1)}
           onContinue={() => advance(3)}
         />
@@ -432,6 +455,8 @@ function PropertyInput({
   parcelError,
   zoningCheck,
   missingRules,
+  adu,
+  aduBlocked,
   canContinue,
   onProjectType,
   onMuni,
@@ -652,6 +677,7 @@ function PropertyInput({
         )}
 
         <RulesMissingNotice missing={missingRules} muniName={muni?.name} districtCode={district?.code} />
+        <AduNotPermittedNotice show={aduBlocked} muniName={muni?.name} districtCode={district?.code} />
 
         <SurveyNotice />
 
@@ -794,6 +820,27 @@ function RulesMissingNotice({ missing, muniName, districtCode }) {
   );
 }
 
+/**
+ * The district records ADUs as not permitted. That is the answer to the
+ * client's question — quoting a price for one would contradict the ordinance
+ * on file. A variance is possible, but that is the municipality's call.
+ */
+function AduNotPermittedNotice({ show, muniName, districtCode }) {
+  if (!show) return null;
+  return (
+    <div className="zoning-check blocked" role="alert">
+      <strong>ADUs are not a permitted use in this district</strong>
+      <span>
+        {muniName ?? "This municipality"}
+        {districtCode ? ` district ${districtCode}` : ""} records accessory dwelling units as not
+        permitted, so no ADU capacity or cost is calculated. If you believe a variance or a recent
+        ordinance change applies, confirm with {muniName ?? "the municipality"} — or choose Addition
+        to see what you can add to the existing house.
+      </span>
+    </div>
+  );
+}
+
 function listPhrase(items) {
   if (items.length === 1) return items[0];
   if (items.length === 2) return `${items[0]} and ${items[1]}`;
@@ -815,7 +862,7 @@ function SurveyNotice() {
   );
 }
 
-function Results({ project, muni, district, lot, parcel, result, costModel, selectedTier, onSelectTier, onBack, onContinue }) {
+function Results({ project, muni, district, lot, parcel, result, costModel, selectedTier, onSelectTier, adu, onBack, onContinue }) {
   return (
     <>
       <section className="results-heading">
@@ -846,7 +893,22 @@ function Results({ project, muni, district, lot, parcel, result, costModel, sele
             )}
           {project?.id === "adu" && (
             <div className="adu-result-note">
-              This is the property’s remaining zoning capacity—not confirmation that an ADU of this size is permitted.
+              {result.aduSizeCapped ? (
+                <>
+                  Capped at district {district.code}’s {fmt(result.aduMaxSizeSqft)} sq ft ADU size
+                  limit — the lot itself could take{" "}
+                  {fmt(result.availableBuildingArea)} sq ft.
+                </>
+              ) : (
+                <>This is the property’s remaining zoning capacity—not confirmation that an ADU of this size is permitted.</>
+              )}
+              {adu?.known && adu.allowed && (
+                <span className="adu-conditions">
+                  {adu.detachedAllowed === false && " A detached ADU is not permitted here."}
+                  {adu.detachedAllowed === true && " Detached ADUs are permitted."}
+                  {adu.parkingRequired === true && " Off-street parking is required."}
+                </span>
+              )}
             </div>
           )}
           {result.approximation && (
