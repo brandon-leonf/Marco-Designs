@@ -10,6 +10,9 @@ import {
   computeBuildableFromAreas,
   conservativeInsetFt,
   recordedRectDims,
+  missingDistrictRules,
+  lotViolations,
+  FLOOR_TO_FLOOR_FT,
 } from "./lib/envelope.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import ParcelPlan from "./components/ParcelPlan.jsx";
@@ -136,8 +139,14 @@ export default function App() {
     };
   }, [entryMode, muni, parcelPick]);
 
+  // A district with unfilled rules cannot produce a trustworthy answer, so the
+  // calculation is refused rather than run against nulls (which would read as
+  // "no setbacks, no coverage limit" and report the whole lot as buildable).
+  const missingRules = useMemo(() => missingDistrictRules(district), [district]);
+  const rulesReady = Boolean(district) && missingRules.length === 0;
+
   const result = useMemo(() => {
-    if (!district) return null;
+    if (!district || missingRules.length > 0) return null;
     let zoningResult = null;
     if (entryMode === "search" && parcel) {
       const envelopeArea =
@@ -201,7 +210,7 @@ export default function App() {
       availableBuildingArea,
       estimateArea: hasExistingHouse ? availableBuildingArea : zoningResult.buildable,
     };
-  }, [district, entryMode, existingStructure, lot, parcel, projectType]);
+  }, [district, missingRules, entryMode, existingStructure, lot, parcel, projectType]);
 
   const project = PROJECT_TYPES.find((item) => item.id === projectType);
   const propertyReady =
@@ -211,7 +220,7 @@ export default function App() {
   const structureReady =
     projectType === "new_house" ||
     Number(existingStructure.footprint_sqft) > 0;
-  const canContinue = Boolean(projectType && district && propertyReady && structureReady);
+  const canContinue = Boolean(projectType && rulesReady && propertyReady && structureReady);
 
   const goToStep = (next) => {
     if (next > maxStepReached) return;
@@ -282,6 +291,7 @@ export default function App() {
           parcel={parcel}
           parcelError={parcelError}
           zoningCheck={zoningCheck}
+          missingRules={missingRules}
           canContinue={canContinue}
           onProjectType={setProjectType}
           onMuni={(id) => {
@@ -415,6 +425,7 @@ function PropertyInput({
   parcel,
   parcelError,
   zoningCheck,
+  missingRules,
   canContinue,
   onProjectType,
   onMuni,
@@ -634,6 +645,8 @@ function PropertyInput({
           </div>
         )}
 
+        <RulesMissingNotice missing={missingRules} muniName={muni?.name} districtCode={district?.code} />
+
         <SurveyNotice />
 
         <button type="button" className="primary full" disabled={!canContinue} onClick={onContinue}>
@@ -755,6 +768,32 @@ function structureReadyFromInputs(projectType, existingStructure) {
   );
 }
 
+/**
+ * Refuses the calculation when a municipality's district is only partly
+ * filled in. Without this, null rules read as zeros and the tool reports the
+ * entire lot as buildable — a confident wrong answer is worse than none.
+ */
+function RulesMissingNotice({ missing, muniName, districtCode }) {
+  if (!missing || missing.length === 0) return null;
+  return (
+    <div className="zoning-check blocked" role="alert">
+      <strong>Zoning rules are not loaded for this municipality</strong>
+      <span>
+        {muniName ?? "This municipality"}
+        {districtCode ? ` district ${districtCode}` : ""} is missing its {listPhrase(missing)}.
+        Calculation is disabled until those rules are entered — an incomplete
+        configuration would report the whole lot as buildable.
+      </span>
+    </div>
+  );
+}
+
+function listPhrase(items) {
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
 function SurveyNotice() {
   return (
     <div className="survey-notice" role="note">
@@ -791,6 +830,7 @@ function Results({ project, muni, district, lot, parcel, result, costModel, onBa
             <LotDiagram lot={lot} result={result} />
           )}
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
+          <ComplianceNotes district={district} lot={lot} parcel={parcel} result={result} muniName={muni.name} />
           {(project?.id === "addition" || project?.id === "adu") &&
             result.availableFootprint === 0 && (
               <div className="capacity-warning">
@@ -823,6 +863,54 @@ function Results({ project, muni, district, lot, parcel, result, costModel, onBa
         <button type="button" className="primary" onClick={onContinue}>Review &amp; export →</button>
       </div>
     </>
+  );
+}
+
+/**
+ * Plain-language compliance flags: dimensional non-conformities against the
+ * district minimums, and the height limit when it governs instead of the
+ * permitted story count.
+ */
+function ComplianceNotes({ district, lot, parcel, result, muniName }) {
+  const measured = parcel
+    ? {
+        areaSqft: Number(parcel.lot_area_sqft) || null,
+        widthFt: Number(parcel.lot_frontage_ft) || null,
+        depthFt: Number(parcel.lot_depth_ft) || null,
+      }
+    : { areaSqft: Number(lot.area_sqft) || null, widthFt: Number(lot.width_ft) || null, depthFt: Number(lot.depth_ft) || null };
+  const violations = lotViolations(district, measured);
+
+  if (violations.length === 0 && !result.heightLimited) return null;
+
+  return (
+    <div className="compliance-notes">
+      {violations.length > 0 && (
+        <div className="compliance-flag" role="note">
+          <strong>Non-conforming lot — {violations.length === 1 ? "1 minimum not met" : `${violations.length} minimums not met`}</strong>
+          <ul>
+            {violations.map((v) => (
+              <li key={v.label}>
+                {v.label} is {fmt(v.value)} {v.unit}; district {district.code} requires at least{" "}
+                {fmt(v.min)} {v.unit}.
+              </li>
+            ))}
+          </ul>
+          <span>
+            Undersized lots of record can often still be built on, but the allowance is{" "}
+            {muniName}’s determination — confirm before relying on these figures.
+          </span>
+        </div>
+      )}
+      {result.heightLimited && (
+        <p className="fine">
+          The {fmt(district.max_height_ft)} ft height limit governs: it fits about{" "}
+          {result.storiesByHeight} floor{result.storiesByHeight === 1 ? "" : "s"} at{" "}
+          {FLOOR_TO_FLOOR_FT} ft floor-to-floor, fewer than the {result.permittedStories} stories
+          the district permits. Figures use {result.stories}.
+        </p>
+      )}
+    </div>
   );
 }
 
