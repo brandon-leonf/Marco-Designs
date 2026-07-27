@@ -274,7 +274,7 @@ export default function App() {
       <Stepper step={step} maxStepReached={maxStepReached} onStep={goToStep} />
 
       {error && <div className="card error">Failed to load data: {error}</div>}
-      {!error && !munis && <div className="card loading-card">Loading Union City property data…</div>}
+      {!error && !munis && <div className="card loading-card">Loading property data…</div>}
 
       {munis && step === 1 && (
         <PropertyInput
@@ -538,7 +538,7 @@ function PropertyInput({
             {projectType === "adu" && (
               <p className="adu-note">
                 ADU eligibility, size, setbacks, parking, utilities, and whether it may be detached must still be
-                confirmed with Union City.
+                confirmed with {muni?.name ?? "the municipality"}.
               </p>
             )}
           </div>
@@ -565,7 +565,7 @@ function PropertyInput({
                   </option>
                 ))}
               </select>
-              <small>Confirm this district with Union City before relying on the result.</small>
+              <small>Confirm this district with {muni?.name ?? "the municipality"} before relying on the result.</small>
             </label>
           ) : (
             <div className="auto-zoning-field">
@@ -581,7 +581,7 @@ function PropertyInput({
             <div className="method-title">
               <div>
                 <h3>Find the property</h3>
-                <p>Search Union City public parcel records by street address.</p>
+                <p>Search {muni?.name ?? "municipal"} public parcel records by street address.</p>
               </div>
               <span className="data-tag">NJGIN public data</span>
             </div>
@@ -609,7 +609,7 @@ function PropertyInput({
                 </div>
               </div>
             )}
-            <ZoningCheckNotice check={zoningCheck} />
+            <ZoningCheckNotice check={zoningCheck} muniName={muni?.name} />
             <button type="button" className="text-button" onClick={onManual}>
               Can’t find the address? Enter lot details manually →
             </button>
@@ -660,7 +660,7 @@ function PropertyInput({
 
       <aside className="card preview-card">
         <p className="eyebrow">Property preview</p>
-        <h2>{parcel?.address ?? parcelPick?.address ?? "Union City lot"}</h2>
+        <h2>{parcel?.address ?? parcelPick?.address ?? `${muni?.name ?? "Selected"} lot`}</h2>
         <p className="preview-note">Diagram is for reference only and is not a survey.</p>
         {parcel ? (
           <>
@@ -716,7 +716,7 @@ function zoningStatusLabel(check) {
   return "Automatic zoning check unavailable";
 }
 
-function ZoningCheckNotice({ check }) {
+function ZoningCheckNotice({ check, muniName }) {
   if (!check || check.status === "checking" || check.status === "matched") {
     if (check?.status !== "matched") return null;
     return (
@@ -731,7 +731,7 @@ function ZoningCheckNotice({ check }) {
   }
 
   const messages = {
-    no_layer: "Union City’s machine-readable zoning polygons have not been loaded. Calculation is disabled rather than assuming a district.",
+    no_layer: `${muniName ?? "This municipality"}’s machine-readable zoning polygons have not been loaded. Calculation is disabled rather than assuming a district.`,
     unmapped: "This parcel does not intersect the loaded municipal zoning layer. Calculation is disabled pending review.",
     boundary_conflict: `This parcel intersects multiple districts${check.competing_codes?.length ? ` (${check.competing_codes.join(", ")})` : ""}. Municipal review is required.`,
     rules_missing: `The parcel is in district ${check.district_code ?? "unknown"}, but that district’s rules are not loaded yet.`,
@@ -835,7 +835,7 @@ function Results({ project, muni, district, lot, parcel, result, costModel, onBa
             result.availableFootprint === 0 && (
               <div className="capacity-warning">
                 The entered existing footprint uses or exceeds the footprint calculated from the zoning rules. Review
-                the dimensions and consult Union City before planning additional construction.
+                the dimensions and consult {muni.name} before planning additional construction.
               </div>
             )}
           {project?.id === "adu" && (
@@ -1033,20 +1033,22 @@ function CostCard({ result, costModel, projectType }) {
             const hasRange = tier.rate_per_sqft_max != null;
             return (
               <div className="cost-tier" key={tierName}>
-                <div>
-                  <strong>{TIER_LABELS[tierName]}</strong>
-                  <span>
+                <div className="cost-tier-head">
+                  <div>
+                    <strong>{TIER_LABELS[tierName]}</strong>
+                    <span>
+                      {hasRange
+                        ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
+                        : `$${fmt(tier.rate_per_sqft, 2)} / sq ft`}
+                    </span>
+                  </div>
+                  <b>
                     {hasRange
-                      ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
-                      : `$${fmt(tier.rate_per_sqft, 2)} / sq ft`}
-                  </span>
-                  {tier.notes && <small className="tier-notes">{tier.notes}</small>}
+                      ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
+                      : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`}
+                  </b>
                 </div>
-                <b>
-                  {hasRange
-                    ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
-                    : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`}
-                </b>
+                {tier.notes && <p className="tier-notes">{tier.notes}</p>}
               </div>
             );
           })}
@@ -1057,6 +1059,48 @@ function CostCard({ result, costModel, projectType }) {
           Based on a ${fmt(costModel.regional_baseline_per_sqft, 2)}/sq ft regional baseline × {costModel.local_cost_factor} local factor.
         </p>
       )}
+      <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} />
+    </div>
+  );
+}
+
+/**
+ * The boundary around the number. A per-square-foot price covers the house
+ * itself; land, site work, design, permits and a contingency reserve are all
+ * separate. Without this the total reads as the whole project cost, which is
+ * the exact surprise the estimate exists to prevent.
+ */
+function CostScope({ scope, estimateArea, costModel }) {
+  if (!scope) return null;
+  const includes = scope.includes ?? [];
+  const excludes = scope.excludes ?? [];
+  const pct = scope.contingency_pct;
+
+  // Contingency is a share of construction cost, so show it against the
+  // mid tier the client is most likely to land on.
+  const signature = costModel?.build_cost_tiers?.find((t) => t.tier === "signature");
+  const base = signature && estimateArea != null ? estimateArea * Number(signature.rate_per_sqft) : null;
+
+  return (
+    <div className="cost-scope">
+      <div className="cost-scope-cols">
+        <div>
+          <strong>What this price includes</strong>
+          <ul>{includes.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+        <div>
+          <strong>Billed separately</strong>
+          <ul>
+            {excludes.map((item) => <li key={item}>{item}</li>)}
+            {pct && (
+              <li>
+                A contingency reserve — {pct.min}–{pct.max}% recommended
+                {base != null && ` (about $${fmt((base * pct.min) / 100)}–$${fmt((base * pct.max) / 100)})`}
+              </li>
+            )}
+          </ul>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1135,13 +1179,20 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
         <SurveyNotice />
         {project?.id === "adu" && (
           <p className="adu-review-note">
-            ADU capacity is preliminary. Union City must confirm that an ADU is permitted and determine applicable size,
+            ADU capacity is preliminary. {muni.name} must confirm that an ADU is permitted and determine applicable size,
             location, setback, parking, utility, and occupancy requirements.
           </p>
         )}
+        <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} />
         <p className="report-disclaimer">
           This report is for early planning only. It is not a zoning determination, site plan, survey, architectural drawing,
-          construction estimate, or approval to build. Confirm requirements with Union City and licensed professionals.
+          construction estimate, or approval to build. Confirm requirements with {muni.name} and licensed professionals.
+        </p>
+        <p className="report-licenses">
+          Figures are planning estimates for discussion purposes and are not a quote or contract. Final pricing is set
+          by your approved design and selections.
+          <br />
+          Marco Design LLC · NJ New Home Builder Lic. #0053907 · NJ Home Improvement Lic. #13VH12052000
         </p>
       </section>
       <div className="actions no-print">

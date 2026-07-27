@@ -18,7 +18,7 @@ export async function fetchMunicipalities() {
       `id, name, slug, county, state_code, last_updated, source_url,
        zoning_districts (*),
        build_cost_models (
-         id, provenance, regional_baseline_per_sqft, local_cost_factor, effective_date,
+         id, provenance, regional_baseline_per_sqft, local_cost_factor, effective_date, cost_scope,
          build_cost_tiers ( tier, rate_per_sqft, rate_per_sqft_max, notes, provenance, formula_reference )
        )`
     )
