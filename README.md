@@ -136,6 +136,37 @@ digitize and QA the official map before importing. District polygons may be
 loaded before all rule configs exist; those parcels safely return
 `rules_missing` until the corresponding district rules are configured.
 
+## Two ways to edit config — and keeping them in sync
+
+There are two paths into the live rules, and the config file is the one that
+counts:
+
+- **Config file → database** (`scripts/load_town.py`). The source of truth.
+  Version-controlled, reviewed, validated in CI.
+- **Config editor → database** (the app's `#/admin` page). Fast for adjusting
+  rates or a setback, but it writes straight to Postgres, so the committed file
+  goes stale — or, for a town created in the app, never exists.
+
+`scripts/export_town.py` closes that loop by writing the database back out in
+exactly the shape `load_town.py` reads:
+
+```bash
+python scripts/export_town.py union-city-nj     # refresh one town's file
+python scripts/export_town.py --all             # refresh every town
+python scripts/export_town.py --all --check     # report drift, write nothing
+```
+
+`--check` exits non-zero when a committed file differs from the live database,
+which is the signal that someone edited config in the app and hasn't committed
+the result. **After editing in the config editor, run the export and commit the
+diff** — otherwise the next `load_town.py` silently reverts your change.
+
+A town whose database rows are missing required rules fails export with the
+specific fields named; that is the same incompleteness the public app refuses to
+calculate against.
+
+Rate cards are deliberately not exported — they are proprietary and git-ignored.
+
 ## Adding a new municipality
 
 1. Copy an existing file in `config/towns/` to `config/towns/<slug>.json`.
