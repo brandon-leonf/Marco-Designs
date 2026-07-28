@@ -1757,11 +1757,16 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
         <span className="preliminary-badge">Preliminary</span>
       </section>
 
-      {/* Order matches the flow diagram: the engine's four steps, then cost
-          across the three tiers, then the zoning check, then the answer. */}
-      <div className="results-flow">
+      {/* Two panels, matching step 2: the choice on the left, what the choice
+          applies to on the right. Prices are deliberately absent here — the
+          level is picked on what it is, and the figures follow in the report. */}
+      <section className="workspace-grid">
+        <BuildLevelPicker
+          costModel={costModel}
+          selectedTier={selectedTier}
+          onSelectTier={onSelectTier}
+        />
         <div className="card result-card">
-          <h3>{projectResultTitle(project?.id)}</h3>
           <section className="result-3d-preview" aria-label="3D property preview">
             <p className="eyebrow">3D property preview</p>
             <h3>{parcel?.address ?? `${muni.name}, ${muni.state_code}`}</h3>
@@ -1787,13 +1792,6 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
               }}
             />
           </section>
-          <EngineSteps result={result} district={district} projectType={project?.id} />
-          <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
-          {/* ComplianceNotes owns dimensional non-conformity and the height
-              limit; the Zoning check card below owns capacity conflicts. Split
-              that way so no finding is reported twice in one report — the
-              capacity warning that used to sit here is a zoningFindings entry. */}
-          <ComplianceNotes district={district} lot={lot} parcel={parcel} result={result} muniName={muni.name} />
           {project?.id === "adu" && (
             <div className="adu-result-note">
               {result.aduSizeCapped ? (
@@ -1814,43 +1812,8 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
               )}
             </div>
           )}
-          {result.approximation && (
-            <p className="fine">
-              The uniform polygon inset collapses on this narrow lot, so figures use the recorded{" "}
-              {fmt(result.approximation.widthFt)}′ × {fmt(result.approximation.depthFt)}′ lot
-              rectangle with per-edge setbacks. A survey must confirm the true envelope.
-            </p>
-          )}
         </div>
-
-        <CostCard
-          result={result}
-          costModel={costModel}
-          projectType={project?.id}
-          selectedTier={selectedTier}
-          onSelectTier={onSelectTier}
-        />
-
-        <ZoningCheck
-          result={result}
-          district={district}
-          lot={lot}
-          entryMode={entryMode}
-          projectType={project?.id}
-          muni={muni}
-        />
-
-        <AnswerSummary
-          project={project}
-          muni={muni}
-          parcel={parcel}
-          entryMode={entryMode}
-          parcelSource={parcelSource}
-          district={district}
-          result={result}
-          costModel={costModel}
-        />
-      </div>
+      </section>
 
       <SurveyNotice />
       <div className="actions">
@@ -1945,102 +1908,6 @@ function AnswerSummary({ project, muni, parcel, entryMode, parcelSource, distric
  * `farLimited` come straight from the engine, so the UI never re-derives which
  * rule actually governed the answer.
  */
-function EngineSteps({ result, district, projectType }) {
-  const hasExistingHouse = projectType === "addition" || projectType === "adu";
-  const envelopeArea = envelopeAreaOf(result);
-  const coveragePct = district.max_building_coverage_pct;
-  const coverageCap = coveragePct != null ? result.lotArea * (coveragePct / 100) : null;
-
-  const steps = [
-    {
-      label: "Inset by setbacks",
-      value: `${fmt(envelopeArea)} sq ft`,
-      note: `The ${fmt(result.lotArea)} sq ft lot, less the front, side, and rear yards ${district.code} requires. What remains is the buildable envelope.`,
-    },
-    {
-      label: "Apply coverage cap",
-      value: `${fmt(result.footprint)} sq ft`,
-      note:
-        coverageCap == null
-          ? `${district.code} sets no building-coverage limit, so the setback envelope alone governs the footprint.`
-          : `The smaller of the ${fmt(envelopeArea)} sq ft envelope and ${fmt(coverageCap)} sq ft — ${coveragePct}% of the lot.`,
-      flag:
-        coverageCap == null
-          ? null
-          : result.binding === "coverage"
-            ? "Coverage limit binds first"
-            : "Setbacks bind first",
-    },
-    {
-      label: "Multiply by stories",
-      value: `${fmt(result.buildable)} sq ft`,
-      note: `${fmt(result.footprint)} sq ft footprint × ${result.stories} ${
-        Number(result.stories) === 1 ? "story" : "stories"
-      } allowed in ${district.code}${
-        district.max_far != null ? `, then capped by the ${district.max_far} floor-area ratio` : ""
-      }.`,
-      flag: result.heightLimited
-        ? "Height limit binds before the permitted story count"
-        : result.farLimited
-          ? `Floor-area ratio binds`
-          : null,
-      // resolveStories() converts the height limit into a story count using a
-      // fixed floor-to-floor assumption. That assumption is stated here rather
-      // than buried in the number, since a tall-ceiling design changes it.
-      caution:
-        district.max_height_ft != null
-          ? `${district.code} limits height to ${fmt(district.max_height_ft)} ft, which fits about ${
-              result.storiesByHeight
-            } floors at the ${FLOOR_TO_FLOOR_FT} ft floor-to-floor this tool assumes${
-              result.heightLimited
-                ? ` — fewer than the ${result.permittedStories} stories the district permits, so height is what governs above.`
-                : `. The permitted story count governs above. A tall-ceiling design could hit the height limit sooner.`
-            }`
-          : null,
-    },
-  ];
-
-  if (hasExistingHouse) {
-    const pending = result.availableBuildingArea == null;
-    steps.push({
-      label: "Subtract existing",
-      value: pending ? "—" : `${fmt(result.availableBuildingArea)} sq ft`,
-      pending,
-      note: pending
-        ? "Enter the existing number of stories or total floor area on the previous step to complete this calculation."
-        : `${fmt(result.buildable)} sq ft permitted, less ${fmt(result.existingArea)} sq ft of existing floor area${
-            result.existingAreaSource === "footprint_times_stories" ? " (estimated from footprint × stories)" : ""
-          }.`,
-      footprintNote: `Ground floor: ${fmt(result.footprint)} sq ft permitted − ${fmt(
-        result.existingFootprint
-      )} sq ft existing = ${fmt(result.availableFootprint)} sq ft of additional footprint.`,
-    });
-  }
-
-  return (
-    <>
-      <h4 className="engine-heading">How this number is calculated</h4>
-      <ol className="engine-steps">
-        {steps.map((item, index) => (
-          <li className={item.pending ? "engine-step pending" : "engine-step"} key={item.label}>
-            <span className="engine-step-num" aria-hidden="true">{index + 1}</span>
-            <div className="engine-step-body">
-              <div className="engine-step-head">
-                <strong>{item.label}</strong>
-                <b>{item.value}</b>
-              </div>
-              <span>{item.note}</span>
-              {item.footprintNote && <span>{item.footprintNote}</span>}
-              {item.caution && <span className="engine-caution">{item.caution}</span>}
-              {item.flag && <em className="engine-flag">{item.flag}</em>}
-            </div>
-          </li>
-        ))}
-      </ol>
-    </>
-  );
-}
-
 /**
  * Plain-language review of the lot against the district's loaded rules. Only
  * checks backed by fields that actually exist in the district record are
@@ -2299,6 +2166,82 @@ function structureLocationLabel(location) {
     rear: "Toward rear of lot",
     unsure: "Not sure",
   }[location] ?? "Not sure";
+}
+
+/**
+ * Step 3's left panel: pick a build level on what it is, not what it costs.
+ *
+ * Prices are deliberately withheld here so the choice is made on scope and
+ * finish — the figures follow in the report, against the level chosen. The
+ * inclusion list is shared across levels: it describes what a per-square-foot
+ * price covers at any level, which is exactly the boundary a client needs
+ * before comparing them.
+ */
+function BuildLevelPicker({ costModel, selectedTier, onSelectTier }) {
+  const scope = costModel?.cost_scope;
+  return (
+    <div className="card form-card build-level-picker">
+      <div className="section-heading">
+        <span className="section-icon" aria-hidden="true">$</span>
+        <div>
+          {/* No step eyebrow: the page heading above already says Step 3. */}
+          <h2>Choose your build level</h2>
+          <p>Pick the level of finish you have in mind. Costs follow in your report.</p>
+        </div>
+      </div>
+
+      <div className="level-options" role="radiogroup" aria-label="Build level">
+        {PACKAGES.map((pkg) => {
+          const tier = costModel?.build_cost_tiers?.find((item) => item.tier === pkg.id);
+          const selected = pkg.id === selectedTier;
+          return (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              className={selected ? "level-option selected" : "level-option"}
+              onClick={() => onSelectTier?.(pkg.id)}
+              key={pkg.id}
+            >
+              <span className="level-option-head">
+                <span className="tier-mark" aria-hidden="true" />
+                <strong>{pkg.label}</strong>
+              </span>
+              <span className="level-option-desc">{pkg.description}</span>
+              {tier?.notes && <span className="level-option-notes">{tier.notes}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {scope?.includes?.length > 0 && (
+        <div className="level-includes">
+          <strong>What every level includes</strong>
+          <ul>
+            {scope.includes.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {scope?.excludes?.length > 0 && (
+        <div className="level-includes">
+          <strong>Billed separately</strong>
+          <ul>
+            {scope.excludes.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+            {scope.contingency_pct && (
+              <li>
+                A contingency reserve — {scope.contingency_pct.min}–{scope.contingency_pct.max}%
+                recommended
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function CostCard({ result, costModel, projectType, selectedTier, onSelectTier }) {
