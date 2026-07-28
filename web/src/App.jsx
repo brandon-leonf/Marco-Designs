@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   supabase,
   fetchMunicipalities,
@@ -22,7 +22,7 @@ import {
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
-import ParcelPlan from "./components/ParcelPlan.jsx";
+import BuildingPreview3D from "./components/BuildingPreview3D.jsx";
 // Leaflet is a large dependency for one panel, so the map is split out of
 // the main bundle and fetched when a municipality is actually shown.
 const ZoningMap = lazy(() => import("./components/ZoningMap.jsx"));
@@ -77,14 +77,38 @@ const envelopeAreaOf = (result) => result.envelopeArea ?? result.envelope?.areaS
  * floor count. Returns nulls when no floor size has been entered.
  */
 function derivePlan(plannedFloors) {
-  const sizes = plannedFloors.map((v) => Number(v)).filter((v) => v > 0);
-  if (sizes.length === 0) {
-    return { plannedArea: null, plannedFootprint: null, plannedFloorCount: plannedFloors.length };
+  const dimensions = plannedFloors.map((floor) => {
+    const widthFt = Number(floor?.width_ft);
+    const depthFt = Number(floor?.depth_ft);
+    const heightFt = Number(floor?.height_ft);
+    return {
+      widthFt: widthFt > 0 ? widthFt : null,
+      depthFt: depthFt > 0 ? depthFt : null,
+      heightFt: heightFt > 0 ? heightFt : null,
+      areaSqft: widthFt > 0 && depthFt > 0 ? widthFt * depthFt : null,
+    };
+  });
+  const sizes = dimensions.map((floor) => floor.areaSqft).filter((area) => area != null);
+  const heights = dimensions.map((floor) => floor.heightFt).filter((height) => height != null);
+  const plannedHeight =
+    heights.length === plannedFloors.length
+      ? heights.reduce((sum, height) => sum + height, 0)
+      : null;
+  if (sizes.length === 0 || sizes.length !== plannedFloors.length) {
+    return {
+      plannedArea: null,
+      plannedFootprint: null,
+      plannedFloorCount: plannedFloors.length,
+      plannedHeight,
+      plannedDimensions: dimensions,
+    };
   }
   return {
     plannedArea: sizes.reduce((sum, v) => sum + v, 0),
     plannedFootprint: Math.max(...sizes),
     plannedFloorCount: plannedFloors.length,
+    plannedHeight,
+    plannedDimensions: dimensions,
   };
 }
 
@@ -98,7 +122,8 @@ const FIELD_RULES = {
   footprint_sqft: { label: "Existing footprint", min: 1, max: 1000000 },
   stories: { label: "Number of stories", min: 0, max: 100 },
   total_area_sqft: { label: "Existing total floor area", min: 0, max: 5000000 },
-  planned_floor_sqft: { label: "Floor size", min: 1, max: 1000000 },
+  planned_floor_dimension: { label: "Floor dimension", min: 1, max: 5000 },
+  planned_floor_height: { label: "Floor height", min: 1, max: 50 },
 };
 
 /** Returns an error string for a field value, or null when it is acceptable. */
@@ -412,14 +437,23 @@ export default function App() {
 
     // The client's planned building, floor by floor, reduced to comparable
     // figures. When present, the total drives cost; otherwise the ceiling does.
-    const { plannedArea: planned, plannedFootprint, plannedFloorCount } = derivePlan(plannedFloors);
+    const {
+      plannedArea: planned,
+      plannedFootprint,
+      plannedFloorCount,
+      plannedHeight,
+      plannedDimensions,
+    } = derivePlan(plannedFloors);
     const fitsArea = planned == null || maxArea == null ? null : planned <= maxArea;
     const fitsFootprint =
       plannedFootprint == null || maxFootprint == null ? null : plannedFootprint <= maxFootprint;
     const fitsFloors = planned == null || maxFloors == null ? null : plannedFloorCount <= maxFloors;
+    const maxHeight = Number(district.max_height_ft) || null;
+    const fitsHeight =
+      plannedHeight == null || maxHeight == null ? null : plannedHeight <= maxHeight;
     // Overall fit is a pass unless any applicable check explicitly fails.
     const fitsPlan =
-      planned == null ? null : ![fitsArea, fitsFootprint, fitsFloors].includes(false);
+      planned == null ? null : ![fitsArea, fitsFootprint, fitsFloors, fitsHeight].includes(false);
     const planDelta = planned == null || maxArea == null ? null : maxArea - planned;
 
     return {
@@ -437,9 +471,13 @@ export default function App() {
       plannedArea: planned,
       plannedFootprint,
       plannedFloorCount,
+      plannedHeight,
+      plannedDimensions,
+      maxHeight,
       fitsArea,
       fitsFootprint,
       fitsFloors,
+      fitsHeight,
       fitsPlan,
       planDelta,
       estimateArea: planned ?? maxArea,
@@ -565,6 +603,13 @@ export default function App() {
     parcelPick,
     zoningCheck,
     project,
+    parcelData,
+    onParcel: (picked) => {
+      setParcelPick(picked);
+      setParcel(null);
+      setNjginFeature(null);
+      setZoningCheck(null);
+    },
   };
 
   return (
@@ -593,7 +638,6 @@ export default function App() {
           zoningCheck={zoningCheck}
           projectType={projectType}
           existingStructure={existingStructure}
-          locationReady={locationReady}
           propertyReady={propertyReady}
           missingRules={missingRules}
           adu={adu}
@@ -762,7 +806,6 @@ function ProjectSetup({
   zoningCheck,
   projectType,
   existingStructure,
-  locationReady,
   propertyReady,
   missingRules,
   adu,
@@ -793,8 +836,8 @@ function ProjectSetup({
           <span className="section-icon">⌂</span>
           <div>
             <p className="eyebrow">Step 1</p>
-            <h2>What are you building, and where?</h2>
-            <p>Start with the type of project. The rest of the form opens up as you go.</p>
+            <h2>Project Type?</h2>
+            <p>New Construction / Addition on your house / Separete Living Space</p>
           </div>
         </div>
 
@@ -815,10 +858,6 @@ function ProjectSetup({
             ))}
           </div>
         </fieldset>
-
-        {!projectType && (
-          <p className="reveal-hint">Choose a project type to continue.</p>
-        )}
 
         {projectType && (
           <div className="reveal">
@@ -989,14 +1028,6 @@ function ProjectSetup({
           </div>
         )}
 
-        {projectType && !locationReady && (
-          <p className="reveal-hint">
-            {entryMode === "search"
-              ? "Select a property whose zoning is verified to see the remaining questions."
-              : "Enter the lot dimensions to see the remaining questions."}
-          </p>
-        )}
-
         {propertyReady && (
           <div className="reveal">
             {projectType === "new_house" && (
@@ -1085,7 +1116,7 @@ function ProjectSetup({
         <RulesMissingNotice missing={missingRules} muniName={muni?.name} districtCode={district?.code} />
         <AduNotPermittedNotice show={aduBlocked} muniName={muni?.name} districtCode={district?.code} />
 
-        <SurveyNotice />
+        {!projectType && <SurveyNotice />}
 
         <button type="button" className="primary full" disabled={!canContinue} onClick={onContinue}>
           See what you can build <span aria-hidden="true">→</span>
@@ -1106,80 +1137,165 @@ function ProjectSetup({
  */
 function PropertyPreview({
   muni,
-  district,
-  lot,
-  entryMode,
   parcelSource,
   parcel,
   parcelPick,
-  zoningCheck,
-  project,
+  parcelData,
+  onParcel,
 }) {
-  const liveParcels = parcelSource === "njgin";
+  const [mapOpen, setMapOpen] = useState(false);
+  const propertyLabel = parcel?.address ?? parcelPick?.address ?? `${muni?.name ?? "Selected"} lot`;
+
   return (
     <aside className="card preview-card">
-      <p className="eyebrow">Property preview</p>
-      <h2>{parcel?.address ?? parcelPick?.address ?? `${muni?.name ?? "Selected"} lot`}</h2>
-      <p className="preview-note">Diagram is for reference only and is not a survey.</p>
       {muni?.slug && (
         <Suspense fallback={<div className="preview-placeholder">Loading the zoning map…</div>}>
           <ZoningMap
             muniSlug={muni.slug}
             muniName={muni.name}
+            districts={muni.zoning_districts}
             parcelGeojson={parcel?.parcel_geojson_wgs84 ?? null}
-            parcelLabel={parcel?.address ?? parcelPick?.address}
+            parcelLabel={propertyLabel}
+            headingLabel="Property preview"
+            note="Diagram is for reference only and is not a survey."
+            onExpand={() => setMapOpen(true)}
           />
         </Suspense>
       )}
-      {parcel ? (
-        <>
-          <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
-          {!parcel.envelope_geojson && (
-            <p className="parcel-preview-status">
-              {liveParcels
-                ? "Showing the actual NJGIN parcel boundary. The setbacks for the selected district leave no buildable envelope to draw."
-                : "Showing the actual NJGIN parcel boundary. The buildable envelope will appear after municipal zoning geometry and setbacks are verified."}
-            </p>
-          )}
-        </>
-      ) : parcelPick ? (
-        <div className="preview-placeholder parcel-loading">Loading the public parcel boundary…</div>
-      ) : (
-        <LotPreview lot={lot} district={district} />
+      {mapOpen && (
+        <ExpandedMapDialog
+          muni={muni}
+          parcelSource={parcelSource}
+          parcelData={parcelData}
+          parcel={parcel}
+          parcelPick={parcelPick}
+          propertyLabel={propertyLabel}
+          onParcel={onParcel}
+          onClose={() => setMapOpen(false)}
+        />
       )}
-      <div className="legend">
-        <span><i className="legend-lot" /> Property boundary</span>
-        {(entryMode === "manual" || parcel?.envelope_geojson) && (
-          <span><i className="legend-envelope" /> Approx. buildable envelope</span>
-        )}
-      </div>
-      <div className="preview-facts">
-        <div><span>Project type</span><strong>{project?.label ?? "Not selected"}</strong></div>
-        <div><span>Municipality</span><strong>{muni?.name}, {muni?.state_code}</strong></div>
-        <div>
-          <span>Zoning</span>
-          <strong>
-            {entryMode === "manual" || liveParcels
-              ? `${district?.code ?? "—"} (manual)`
-              : zoningCheck?.status === "matched"
-                ? `${zoningCheck.district_code} (automatic)`
-                : zoningStatusLabel(zoningCheck)}
-          </strong>
-        </div>
-        <div>
-          <span>Data source</span>
-          <strong>
-            {parcelPick
-              ? liveParcels
-                ? "NJGIN live service"
-                : "NJGIN parcel (imported)"
-              : entryMode === "manual"
-                ? "Manual entry"
-                : "Awaiting address"}
-          </strong>
-        </div>
-      </div>
     </aside>
+  );
+}
+
+function ExpandedMapDialog({
+  muni,
+  parcelSource,
+  parcelData,
+  parcel,
+  parcelPick,
+  propertyLabel,
+  onParcel,
+  onClose,
+}) {
+  const closeRef = useRef(null);
+  const liveParcels = parcelSource === "njgin";
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="map-dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="map-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="map-dialog-title"
+      >
+        <header className="map-dialog-header">
+          <div>
+            <p className="eyebrow">Union City property map</p>
+            <h2 id="map-dialog-title">Find and preview a property</h2>
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            className="map-dialog-close"
+            onClick={onClose}
+            aria-label="Close expanded property map"
+          >
+            ×
+          </button>
+        </header>
+
+        <div className="map-dialog-body">
+          <div className="map-dialog-search">
+            <h3>Select a property address</h3>
+            <p>
+              Search {muni.name} public parcel records. Selecting a result updates both maps and
+              automatically checks the parcel against the zoning layer.
+            </p>
+            <ParcelSearch
+              muni={muni}
+              source={parcelSource}
+              selected={parcelPick}
+              onSelect={onParcel}
+              onClear={() => onParcel(null)}
+            />
+            <span className={liveParcels ? "data-tag live" : "data-tag"}>
+              {liveParcels ? "NJGIN live service" : "NJGIN public data"}
+            </span>
+            {parcelData === "missing" && (
+              <p className="fine">
+                This environment is using the live State parcel service because imported parcels
+                are unavailable.
+              </p>
+            )}
+            {parcelPick && (
+              <div className="selected-property">
+                <span className={parcel ? "check" : "check pending"}>{parcel ? "✓" : "!"}</span>
+                <div>
+                  <strong>{parcel?.address ?? parcelPick.address ?? parcelPick.pams_pin}</strong>
+                  <span>
+                    Block {parcel?.block ?? parcelPick.block ?? "—"} / Lot{" "}
+                    {parcel?.lot ?? parcelPick.lot ?? "—"} ·{" "}
+                    {fmt(parcel?.lot_area_sqft ?? parcelPick.lot_area_sqft)} sq ft
+                  </span>
+                </div>
+              </div>
+            )}
+            <button
+              type="button"
+              className="primary full map-dialog-apply"
+              disabled={!parcel}
+              onClick={onClose}
+            >
+              {parcelPick && !parcel ? "Loading property…" : "Apply property"}
+            </button>
+          </div>
+
+          <Suspense fallback={<div className="preview-placeholder">Loading the expanded map…</div>}>
+            <ZoningMap
+              muniSlug={muni.slug}
+              muniName={muni.name}
+              districts={muni.zoning_districts}
+              parcelGeojson={parcel?.parcel_geojson_wgs84 ?? null}
+              parcelLabel={propertyLabel}
+              headingLabel="Property preview"
+              note="Public parcel boundaries are preliminary and are not a survey."
+              expanded
+            />
+          </Suspense>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1236,18 +1352,7 @@ function ZoningCheckNotice({ check, live, muni, ready }) {
     );
   }
 
-  if (!check || check.status === "checking" || check.status === "matched") {
-    if (check?.status !== "matched") return null;
-    return (
-      <div className="zoning-check matched" role="status">
-        <strong>Zoning verified from geometry: {check.district_code}</strong>
-        <span>
-          The zoning polygon covers {fmt(check.overlap_pct, 1)}% of this parcel. The identified district—not the
-          manual dropdown—governs this calculation.
-        </span>
-      </div>
-    );
-  }
+  if (!check || check.status === "checking" || check.status === "matched") return null;
 
   const messages = {
     no_layer: `${muni?.name ?? "This municipality"}’s machine-readable zoning polygons have not been loaded. Calculation is disabled rather than assuming a district.`,
@@ -1264,7 +1369,16 @@ function ZoningCheckNotice({ check, live, muni, ready }) {
   );
 }
 
-function NumberField({ label, value, onChange, help, step = "1", fieldKey, required = false }) {
+function NumberField({
+  label,
+  value,
+  onChange,
+  help,
+  step = "1",
+  fieldKey,
+  required = false,
+  max,
+}) {
   // Only surface an error once the field has been touched, so a blank optional
   // (or not-yet-filled required) input doesn't shout on first render.
   const [touched, setTouched] = useState(false);
@@ -1277,7 +1391,7 @@ function NumberField({ label, value, onChange, help, step = "1", fieldKey, requi
       <input
         type="number"
         min={rule?.min ?? 0}
-        max={rule?.max}
+        max={max ?? rule?.max}
         step={step}
         value={value}
         aria-invalid={showError || undefined}
@@ -1370,17 +1484,81 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
   const footprintValue = hasExistingHouse ? result.availableFootprint : result.footprint;
   const footprintLabel = hasExistingHouse ? "Additional footprint available" : "Maximum building footprint";
+  const recordedLot = parcel ? recordedRectDims(parcel) : null;
+  const lotWidthFt = Number(recordedLot?.width_ft ?? lot.width_ft) || 25;
+  const lotDepthFt = Number(recordedLot?.depth_ft ?? lot.depth_ft) || 100;
+  const rectangularEnvelope = result.envelope;
+  let maxHouseWidthFt =
+    Number(rectangularEnvelope?.widthFt) > 0
+      ? Math.min(lotWidthFt, Number(rectangularEnvelope.widthFt))
+      : lotWidthFt;
+  let maxHouseDepthFt =
+    Number(rectangularEnvelope?.depthFt) > 0
+      ? Math.min(lotDepthFt, Number(rectangularEnvelope.depthFt))
+      : lotDepthFt;
+  const footprintCap = Number(result.maxFootprint);
+  if (footprintCap > 0 && maxHouseWidthFt * maxHouseDepthFt > footprintCap) {
+    const scale = Math.sqrt(footprintCap / (maxHouseWidthFt * maxHouseDepthFt));
+    maxHouseWidthFt *= scale;
+    maxHouseDepthFt *= scale;
+  }
+  // Round down to the nearest half foot. Rounding either side up could make
+  // the default rectangle fractionally larger than the calculated footprint.
+  maxHouseWidthFt = Math.max(1, Math.floor(maxHouseWidthFt * 2) / 2);
+  maxHouseDepthFt = Math.max(1, Math.floor(maxHouseDepthFt * 2) / 2);
 
-  // Resize the per-floor array while preserving values already typed.
+  // Resize the per-floor array while preserving values already typed. New
+  // floors copy the floor below, producing an immediate 3D preview while
+  // guaranteeing that an upper floor starts inside the lower footprint.
   const setFloorCount = (value) => {
     const count = Math.max(0, Math.min(20, Math.floor(Number(value) || 0)));
     const next = plannedFloors.slice(0, count);
-    while (next.length < count) next.push("");
+    while (next.length < count) {
+      const lowerFloor = next[next.length - 1];
+      next.push(
+        lowerFloor
+          ? {
+              width_ft: lowerFloor.width_ft,
+              depth_ft: lowerFloor.depth_ft,
+              height_ft: FLOOR_TO_FLOOR_FT,
+            }
+          : {
+              width_ft: maxHouseWidthFt,
+              depth_ft: maxHouseDepthFt,
+              height_ft: FLOOR_TO_FLOOR_FT,
+            }
+      );
+    }
     onPlannedFloors(next);
   };
-  const setFloorSize = (index, value) => {
+  const setFloorDimension = (index, field, value) => {
     const next = plannedFloors.slice();
-    next[index] = value;
+    const numeric = value === "" ? "" : Math.max(1, Number(value));
+    if (field === "height_ft") {
+      const heightLimit = Number(district.max_height_ft) || FIELD_RULES.planned_floor_height.max;
+      next[index] = {
+        ...next[index],
+        height_ft: numeric === "" ? "" : Math.min(numeric, heightLimit),
+      };
+      onPlannedFloors(next);
+      return;
+    }
+    const lowerLimit =
+      index === 0
+        ? field === "width_ft"
+          ? maxHouseWidthFt
+          : maxHouseDepthFt
+        : Number(next[index - 1]?.[field]) || Infinity;
+    const constrained = numeric === "" ? "" : Math.min(numeric, lowerLimit);
+    next[index] = { ...next[index], [field]: constrained };
+
+    // Shrinking a lower floor also shrinks every floor above it. This makes
+    // the no-overhang rule structural rather than a warning the user can miss.
+    for (let upper = index + 1; upper < next.length; upper += 1) {
+      if (Number(next[upper]?.[field]) > Number(constrained)) {
+        next[upper] = { ...next[upper], [field]: constrained };
+      }
+    }
     onPlannedFloors(next);
   };
   const plannedTotal = result.plannedArea;
@@ -1436,8 +1614,9 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
               <div>
                 <h3>{plannedSizeLabel(project?.id)}</h3>
                 <p>
-                  Optional. Say how many floors you plan and the size of each — we’ll check it against the maximums
-                  above and base the cost estimate on it. Leave the floor count at zero to estimate the full maximum.
+                  Optional. Enter each floor’s width, depth, and height. The app calculates its square footage,
+                  checks the full plan against the maximums above, and updates the interactive 3D preview. Leave the
+                  floor count at zero to estimate the full maximum.
                 </p>
               </div>
               <span className="data-tag">Optional</span>
@@ -1461,35 +1640,77 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
                   </small>
                 ) : (
                   <small>
-                    Sets one size field per floor.{maxFloors != null ? ` Up to ${maxFloors} allowed here.` : ""}
+                    Adds width, depth, and height fields for each floor.
+                    {maxFloors != null ? ` Up to ${maxFloors} allowed here.` : ""}
                   </small>
                 )}
               </label>
             </div>
             {plannedFloors.length > 0 && (
               <>
-                <div className="form-grid floor-fields">
-                  {plannedFloors.map((size, index) => (
-                    <NumberField
-                      key={index}
-                      label={`Floor ${index + 1} size (sq ft)`}
-                      value={size}
-                      onChange={(value) => setFloorSize(index, value)}
-                      fieldKey="planned_floor_sqft"
-                    />
-                  ))}
+                <div className="floor-fields">
+                  {plannedFloors.map((floor, index) => {
+                    const widthMax =
+                      index === 0
+                        ? maxHouseWidthFt
+                        : Number(plannedFloors[index - 1]?.width_ft) || maxHouseWidthFt;
+                    const depthMax =
+                      index === 0
+                        ? maxHouseDepthFt
+                        : Number(plannedFloors[index - 1]?.depth_ft) || maxHouseDepthFt;
+                    const floorArea =
+                      Number(floor?.width_ft) > 0 && Number(floor?.depth_ft) > 0
+                        ? Number(floor.width_ft) * Number(floor.depth_ft)
+                        : null;
+                    return (
+                      <fieldset className="floor-dimensions" key={index}>
+                        <legend>Floor {index + 1}</legend>
+                        <div className="form-grid">
+                          <NumberField
+                            label="Width (ft)"
+                            value={floor?.width_ft ?? ""}
+                            onChange={(value) => setFloorDimension(index, "width_ft", value)}
+                            fieldKey="planned_floor_dimension"
+                            max={widthMax}
+                            step="0.5"
+                            help={`Maximum ${fmt(widthMax, 1)} ft${index > 0 ? " — cannot exceed the floor below." : "."}`}
+                          />
+                          <NumberField
+                            label="Depth (ft)"
+                            value={floor?.depth_ft ?? ""}
+                            onChange={(value) => setFloorDimension(index, "depth_ft", value)}
+                            fieldKey="planned_floor_dimension"
+                            max={depthMax}
+                            step="0.5"
+                            help={`Maximum ${fmt(depthMax, 1)} ft${index > 0 ? " — cannot exceed the floor below." : "."}`}
+                          />
+                          <NumberField
+                            label="Height (ft)"
+                            value={floor?.height_ft ?? ""}
+                            onChange={(value) => setFloorDimension(index, "height_ft", value)}
+                            fieldKey="planned_floor_height"
+                            max={Number(district.max_height_ft) || FIELD_RULES.planned_floor_height.max}
+                            step="0.5"
+                            help={`Defaults to ${FLOOR_TO_FLOOR_FT} ft. Total height is checked against zoning.`}
+                          />
+                        </div>
+                        <p>
+                          Floor area: <strong>{floorArea == null ? "—" : `${fmt(floorArea)} sq ft`}</strong>
+                        </p>
+                      </fieldset>
+                    );
+                  })}
                 </div>
                 <p className="planned-total">
                   Planned total: <strong>{plannedTotal == null ? "—" : `${fmt(plannedTotal)} sq ft`}</strong>
                   {result.plannedFootprint != null && (
                     <> · largest floor {fmt(result.plannedFootprint)} sq ft</>
                   )}
+                  {result.plannedHeight != null && <> · height {fmt(result.plannedHeight, 1)} ft</>}
                 </p>
               </>
             )}
           </div>
-
-          <PlanFeasibility result={result} projectType={project?.id} />
 
           <div className="actions">
             <button type="button" className="secondary" onClick={onBack}>← Back</button>
@@ -1500,20 +1721,17 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
         </div>
 
         <aside className="card preview-card">
-          <p className="eyebrow">Property preview</p>
-          <h2>{parcel?.address ?? "Lot diagram"}</h2>
-          <p className="preview-note">Diagram is for reference only and is not a survey.</p>
-          {parcel ? (
-            <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
-          ) : (
-            <LotDiagram lot={lot} result={result} />
-          )}
-          <div className="legend">
-            <span><i className="legend-lot" /> Property boundary</span>
-            {(entryMode === "manual" || parcel?.envelope_geojson) && (
-              <span><i className="legend-envelope" /> Approx. buildable envelope</span>
-            )}
-          </div>
+          <p className="eyebrow">3D property preview</p>
+          <h2>{parcel?.address ?? "Planned building"}</h2>
+          <p className="preview-note">
+            Drag to orbit and use the mouse wheel to zoom. Dimensions are preliminary and are not a survey.
+          </p>
+          <BuildingPreview3D
+            lotWidthFt={lotWidthFt}
+            lotDepthFt={lotDepthFt}
+            floors={result.plannedDimensions ?? []}
+            defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
+          />
         </aside>
       </section>
     </>
@@ -1521,6 +1739,10 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
 }
 
 function Results({ project, muni, district, lot, entryMode, parcelSource, parcel, result, costModel, selectedTier, onSelectTier, adu, onBack, onContinue }) {
+  const recordedLot = parcel ? recordedRectDims(parcel) : null;
+  const lotWidthFt = Number(recordedLot?.width_ft ?? lot.width_ft) || 25;
+  const lotDepthFt = Number(recordedLot?.depth_ft ?? lot.depth_ft) || 100;
+
   return (
     <>
       <section className="results-heading">
@@ -1540,13 +1762,32 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
       <div className="results-flow">
         <div className="card result-card">
           <h3>{projectResultTitle(project?.id)}</h3>
-          {parcel ? (
-            <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
-          ) : (
-            <LotDiagram lot={lot} result={result} />
-          )}
+          <section className="result-3d-preview" aria-label="3D property preview">
+            <p className="eyebrow">3D property preview</p>
+            <h3>{parcel?.address ?? `${muni.name}, ${muni.state_code}`}</h3>
+            <p className="preview-note">
+              Drag to orbit and use the mouse wheel to zoom. Dimensions are preliminary and are not a survey.
+            </p>
+            <BuildingPreview3D
+              lotWidthFt={lotWidthFt}
+              lotDepthFt={lotDepthFt}
+              floors={result.plannedDimensions ?? []}
+              defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
+              lotAreaSqft={result.lotArea}
+              setbacks={{
+                front: district.front_yard_min_ft,
+                // What the envelope actually insets per side: the combined
+                // requirement halved, or the per-side minimum when that is all
+                // the ordinance gives. Mirrors rectEnvelope in lib/envelope.js.
+                side:
+                  district.side_yard_total_min_ft != null
+                    ? district.side_yard_total_min_ft / 2
+                    : district.side_yard_one_min_ft,
+                rear: district.rear_yard_min_ft,
+              }}
+            />
+          </section>
           <EngineSteps result={result} district={district} projectType={project?.id} />
-          <PlanFeasibility result={result} projectType={project?.id} />
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
           {/* ComplianceNotes owns dimensional non-conformity and the height
               limit; the Zoning check card below owns capacity conflicts. Split
@@ -1959,89 +2200,6 @@ function projectResultTitle(projectType) {
   return "Maximum new house capacity";
 }
 
-/**
- * Compares the client's planned size against the zoning maximum — the "compare
- * the program to the envelope" step from kickoff section 6. Renders nothing
- * until a planned size is entered.
- */
-function PlanFeasibility({ result, projectType }) {
-  const {
-    plannedArea,
-    plannedFootprint,
-    plannedFloorCount,
-    maxArea,
-    maxFootprint,
-    maxFloors,
-    fitsArea,
-    fitsFootprint,
-    fitsFloors,
-    fitsPlan,
-  } = result;
-  if (plannedArea == null) return null;
-
-  if (maxArea == null) {
-    return (
-      <div className="plan-feasibility unknown">
-        <strong>Planned total: {fmt(plannedArea)} sq ft across {plannedFloorCount} floors</strong>
-        <span>
-          Enter the existing floor area on the previous step to check this against the remaining{" "}
-          {projectType === "adu" ? "ADU" : "addition"} capacity.
-        </span>
-      </div>
-    );
-  }
-
-  // One row per applicable check. A null "fits" means the rule isn't set, so
-  // the dimension is reported without a verdict rather than silently passed.
-  const rows = [
-    {
-      key: "floors",
-      label: "Floors",
-      planned: `${plannedFloorCount}`,
-      max: maxFloors == null ? "no limit" : `${maxFloors}`,
-      fits: fitsFloors,
-    },
-    {
-      key: "footprint",
-      label: "Largest floor",
-      planned: `${fmt(plannedFootprint)} sq ft`,
-      max: maxFootprint == null ? "—" : `${fmt(maxFootprint)} sq ft`,
-      fits: fitsFootprint,
-    },
-    {
-      key: "area",
-      label: "Total floor area",
-      planned: `${fmt(plannedArea)} sq ft`,
-      max: `${fmt(maxArea)} sq ft`,
-      fits: fitsArea,
-    },
-  ];
-
-  return (
-    <div className={`plan-feasibility ${fitsPlan ? "fits" : "exceeds"}`}>
-      <strong>{fitsPlan ? "Your plan fits what the zoning allows" : "Your plan exceeds what the zoning allows"}</strong>
-      <ul className="plan-checks">
-        {rows.map((row) => (
-          <li className={row.fits == null ? "check-na" : row.fits ? "check-ok" : "check-bad"} key={row.key}>
-            <span className="plan-check-label">{row.label}</span>
-            <span className="plan-check-values">
-              {row.planned} <em>/ {row.max}</em>
-            </span>
-            <span className="plan-check-mark" aria-hidden="true">
-              {row.fits == null ? "–" : row.fits ? "✓" : "✕"}
-            </span>
-          </li>
-        ))}
-      </ul>
-      <span>
-        {fitsPlan
-          ? "Everything checked is within the limits. The cost estimate is based on your planned total."
-          : "At least one dimension is over the limit — the plan would need to shrink or seek zoning relief. The cost estimate is still based on your planned total."}
-      </span>
-    </div>
-  );
-}
-
 function plannedSizeLabel(projectType) {
   if (projectType === "addition") return "Planned addition size";
   if (projectType === "adu") return "Planned ADU size";
@@ -2075,6 +2233,35 @@ function PropertyTable({ parcel, result, district, projectType }) {
         {district.min_lot_area_sqft != null && (
           <tr><td>Minimum lot area</td><td>{fmt(district.min_lot_area_sqft)} sq ft</td></tr>
         )}
+        {/* Setbacks drive the envelope but were the one input the table never
+            named, so the reader could not check the first step of the
+            calculation against the ordinance. */}
+        <tr>
+          <td>Front setback</td>
+          <td>
+            {district.front_yard_min_ft != null ? `${fmt(district.front_yard_min_ft)} ft` : "Not specified"}
+            {district.front_yard_prevailing_rule && (
+              <span className="table-note"> (or the prevailing block average)</span>
+            )}
+          </td>
+        </tr>
+        <tr>
+          <td>Side setback</td>
+          <td>
+            {district.side_yard_total_min_ft != null
+              ? `${fmt(district.side_yard_total_min_ft)} ft combined`
+              : district.side_yard_one_min_ft != null
+                ? `${fmt(district.side_yard_one_min_ft)} ft each`
+                : "Not specified"}
+            {district.side_yard_total_min_ft != null && district.side_yard_one_min_ft != null && (
+              <span className="table-note"> · {fmt(district.side_yard_one_min_ft)} ft minimum one side</span>
+            )}
+          </td>
+        </tr>
+        <tr>
+          <td>Rear setback</td>
+          <td>{district.rear_yard_min_ft != null ? `${fmt(district.rear_yard_min_ft)} ft` : "Not specified"}</td>
+        </tr>
         <tr>
           <td>Maximum building coverage</td>
           <td>{district.max_building_coverage_pct != null ? `${district.max_building_coverage_pct}%` : "Not limited"}</td>

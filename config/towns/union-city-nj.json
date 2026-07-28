@@ -30,12 +30,12 @@
         "front_yard_prevailing_rule": true
       },
       "max_height": {
-        "stories": 2,
+        "stories": 3,
         "feet": 38
       },
       "max_coverage_pct": {
-        "building": 75,
-        "lot_impervious": 90
+        "building": 65,
+        "lot_impervious": 95
       },
       "max_far": null,
       "extra_rules": {

@@ -47,6 +47,23 @@ export default function ParcelSearch({ muni, source = "db", selected, onSelect, 
     return () => clearTimeout(timer.current);
   }, [query, muni, live]);
 
+  const clearSelection = () => {
+    setQuery("");
+    setResults(null);
+    setError(null);
+    onClear();
+  };
+
+  if (selected) {
+    return (
+      <div className="parcel-search selected-mode">
+        <button type="button" className="ghost" onClick={clearSelection}>
+          Choose a different property
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="parcel-search">
       <div className="row">
@@ -59,11 +76,6 @@ export default function ParcelSearch({ muni, source = "db", selected, onSelect, 
             onChange={(e) => setQuery(e.target.value)}
           />
         </label>
-        {selected && (
-          <button type="button" className="ghost" onClick={onClear}>
-            Choose a different property
-          </button>
-        )}
       </div>
 
       {error && <p className="fine">Search failed: {error}</p>}
@@ -71,7 +83,7 @@ export default function ParcelSearch({ muni, source = "db", selected, onSelect, 
       {results && !searching && results.length === 0 && (
         <p className="fine">No parcels match “{query.trim()}”.</p>
       )}
-      {results && results.length > 0 && !selected && (
+      {results && results.length > 0 && (
         <ul className="results">
           {results.map((r) => (
             <li key={r.pams_pin}>

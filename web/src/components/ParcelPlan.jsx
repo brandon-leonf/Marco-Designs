@@ -25,10 +25,18 @@ function toPath(polygons, tx, ty, s) {
     .join(" ");
 }
 
-export default function ParcelPlan({ parcelGeojson, envelopeGeojson }) {
+export default function ParcelPlan({
+  parcelGeojson,
+  envelopeGeojson,
+  recordedWidthFt,
+  recordedDepthFt,
+}) {
   const parcel = polys(parcelGeojson);
   if (!parcel.length) return null;
   const envelope = polys(envelopeGeojson);
+  const widthLabel = Number(recordedWidthFt);
+  const depthLabel = Number(recordedDepthFt);
+  const hasRecordedDimensions = widthLabel > 0 && depthLabel > 0;
 
   const pts = parcel
     .flat(2)
@@ -40,34 +48,33 @@ export default function ParcelPlan({ parcelGeojson, envelopeGeojson }) {
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const wFt = maxX - minX, dFt = maxY - minY;
 
-  const maxDim = 260, pad = 14;
+  const maxDim = 260, pad = 8;
   const s = maxDim / Math.max(wFt, dFt, 1);
   const w = wFt * s, d = dFt * s;
 
   return (
-    <svg
-      viewBox={`${-pad} ${-pad} ${w + pad * 2} ${d + pad * 2}`}
-      className="diagram"
-      role="img"
-      aria-label="Parcel with buildable envelope"
-      preserveAspectRatio="xMidYMid meet"
-    >
-      <path d={toPath(parcel, minX, maxY, s)} className="lot" fillRule="evenodd" />
-      {envelope.length > 0 && (
-        <path d={toPath(envelope, minX, maxY, s)} className="envelope" fillRule="evenodd" />
+    <div className="parcel-plan">
+      {hasRecordedDimensions && (
+        <p className="parcel-recorded-dimensions">
+          Recorded lot dimensions: <strong>{Math.round(widthLabel)}′ × {Math.round(depthLabel)}′</strong>
+        </p>
       )}
-      <text x={w / 2} y={-4} textAnchor="middle" className="dim">
-        {Math.round(wFt)}′
-      </text>
-      <text
-        x={-5}
-        y={d / 2}
-        textAnchor="middle"
-        className="dim"
-        transform={`rotate(-90 -5 ${d / 2})`}
+      <svg
+        viewBox={`${-pad} ${-pad} ${w + pad * 2} ${d + pad * 2}`}
+        className="diagram"
+        role="img"
+        aria-label={
+          hasRecordedDimensions
+            ? `Parcel boundary. Recorded lot dimensions ${Math.round(widthLabel)} by ${Math.round(depthLabel)} feet.`
+            : "Parcel boundary with buildable envelope"
+        }
+        preserveAspectRatio="xMidYMid meet"
       >
-        {Math.round(dFt)}′
-      </text>
-    </svg>
+        <path d={toPath(parcel, minX, maxY, s)} className="lot" fillRule="evenodd" />
+        {envelope.length > 0 && (
+          <path d={toPath(envelope, minX, maxY, s)} className="envelope" fillRule="evenodd" />
+        )}
+      </svg>
+    </div>
   );
 }

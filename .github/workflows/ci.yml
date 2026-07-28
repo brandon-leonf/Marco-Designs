@@ -97,6 +97,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
+      - run: npm run test:zoning
+        working-directory: web
       - run: npm run build
         working-directory: web
 
@@ -122,3 +124,4 @@ jobs:
             exit 0
           fi
           python scripts/migrate.py
+          python scripts/load_town.py --all
