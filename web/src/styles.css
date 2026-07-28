@@ -663,9 +663,46 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   font-size: 0.72rem;
   line-height: 1.5;
 }
-.cost-tier { display: flex; justify-content: space-between; align-items: center; gap: 1.2rem; padding: 0.85rem 0; border-bottom: 1px solid var(--line); }
-.cost-tier div { display: flex; flex-direction: column; gap: 0.2rem; max-width: 30rem; }
-.cost-tier strong { display: flex; align-items: center; gap: 0.45rem; font-size: 0.85rem; }
+.cost-tier {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.85rem 0.9rem;
+  margin-bottom: 0.4rem;
+  border: 1px solid transparent;
+  border-bottom-color: var(--line);
+  border-radius: 11px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.cost-tier:hover { background: var(--info-bg); }
+.cost-tier.selected {
+  border-color: var(--primary);
+  background: var(--active);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+/* Radio dot rendered inline with the level name. */
+.tier-mark {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 0.45rem;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+  vertical-align: -1px;
+}
+.cost-tier.selected .tier-mark {
+  border-color: var(--primary-fill);
+  background:
+    radial-gradient(circle, var(--primary-fill) 0 3px, transparent 3.5px);
+}
+.cost-tier:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.tier-hint { margin: 0.5rem 0 0; color: var(--muted); font-size: 0.72rem; }
+.cost-tier-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.cost-tier-head > div { display: flex; flex-direction: column; gap: 0.16rem; }
+.cost-tier strong { font-size: 0.85rem; }
 .cost-tier span { color: var(--muted); font-size: 0.7rem; }
 .cost-tier .tier-desc { line-height: 1.4; }
 .cost-tier .tier-rate { color: var(--info-ink); font-weight: 700; }
@@ -955,11 +992,10 @@ button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
   color: #8c1d18;
 }
 .tier-notes {
-  display: block;
   color: var(--muted);
-  font-size: 0.74rem;
-  margin-top: 0.2rem;
-  max-width: 30ch;
+  font-size: 0.73rem;
+  line-height: 1.5;
+  margin: 0.4rem 0 0;
 }
 
 /* ---------- Admin: tier editor + inline create forms ---------- */
@@ -1038,3 +1074,29 @@ button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
 .test-summary span { color: var(--muted); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
 .test-summary strong { font-size: 1.05rem; }
 .test-log { margin-top: 0.7rem; max-height: 320px; }
+
+/* ---------- Compliance flags ---------- */
+.compliance-notes { display: grid; gap: 0.6rem; margin-top: 0.9rem; }
+.compliance-flag {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid #e3ca91;
+  border-radius: 10px;
+  background: #fff8e9;
+  color: #7b5412;
+  font-size: 0.8rem;
+}
+.compliance-flag strong { font-size: 0.84rem; }
+.compliance-flag ul { margin: 0; padding-left: 1.1rem; display: grid; gap: 0.2rem; }
+.compliance-flag span { color: #8a6116; }
+
+/* ---------- Cost scope (what's included vs. billed separately) ---------- */
+.cost-scope { margin-top: 1.1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.cost-scope-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; }
+@media (max-width: 720px) { .cost-scope-cols { grid-template-columns: 1fr; } }
+.cost-scope strong { display: block; font-size: 0.78rem; margin-bottom: 0.4rem; }
+.cost-scope ul { margin: 0; padding-left: 1rem; display: grid; gap: 0.22rem; }
+.cost-scope li { color: var(--muted); font-size: 0.72rem; line-height: 1.45; }
+.report-licenses { margin: 0.4rem 0 0; color: var(--muted); font-size: 0.66rem; }
+.adu-conditions { display: block; margin-top: 0.35rem; font-weight: 700; }
