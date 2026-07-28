@@ -575,6 +575,7 @@ export default function App() {
           munis={munis}
           muni={muni}
           muniId={muniId}
+          district={district}
           districtId={districtId}
           entryMode={entryMode}
           parcelData={parcelData}
@@ -743,6 +744,7 @@ function ProjectSetup({
   munis,
   muni,
   muniId,
+  district,
   districtId,
   entryMode,
   parcelData,
