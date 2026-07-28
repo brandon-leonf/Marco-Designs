@@ -21,6 +21,7 @@ import {
   njginParcelFromFeature,
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
+import { northAngleFromParcel } from "./lib/orientation.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import BuildingPreview3D from "./components/BuildingPreview3D.jsx";
 // Leaflet is a large dependency for one panel, so the map is split out of
@@ -1369,6 +1370,16 @@ function ZoningCheckNotice({ check, live, muni, ready }) {
   );
 }
 
+function LockGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+         strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="11" width="16" height="10" rx="2" />
+      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
 function NumberField({
   label,
   value,
@@ -1663,9 +1674,13 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
                         ? Number(floor.width_ft) * Number(floor.depth_ft)
                         : null;
                     return (
-                      <fieldset className="floor-dimensions" key={index}>
-                        <legend>Floor {index + 1}</legend>
-                        <div className="form-grid">
+                      <fieldset className="floor-row" key={index}>
+                        <legend className="sr-only">Floor {index + 1}</legend>
+                        <div className="floor-row-id" aria-hidden="true">
+                          <span className="floor-row-num">{index + 1}</span>
+                          <span className="floor-row-label">Floor {index + 1}</span>
+                        </div>
+                        <div className="floor-row-fields">
                           <NumberField
                             label="Width (ft)"
                             value={floor?.width_ft ?? ""}
@@ -1693,10 +1708,30 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
                             step="0.5"
                             help={`Defaults to ${FLOOR_TO_FLOOR_FT} ft. Total height is checked against zoning.`}
                           />
+                          {/* The maxima are not arbitrary: floor 1 is capped by
+                              zoning, every floor above by the one beneath it. */}
+                          <span
+                            className="floor-row-lock"
+                            title={
+                              index === 0
+                                ? `Limited by ${district.code} zoning: ${fmt(widthMax, 1)} × ${fmt(depthMax, 1)} ft.`
+                                : "Cannot exceed the floor below."
+                            }
+                            aria-hidden="true"
+                          >
+                            <LockGlyph />
+                          </span>
                         </div>
-                        <p>
-                          Floor area: <strong>{floorArea == null ? "—" : `${fmt(floorArea)} sq ft`}</strong>
-                        </p>
+                        <div className={floorArea == null ? "floor-row-area" : "floor-row-area done"}>
+                          <span>Floor area</span>
+                          <strong>
+                            {floorArea == null ? "—" : fmt(floorArea)}
+                            {floorArea != null && <em> sq ft</em>}
+                          </strong>
+                          <span className="floor-row-status" aria-hidden="true">
+                            {floorArea == null ? "" : "✓"}
+                          </span>
+                        </div>
                       </fieldset>
                     );
                   })}
@@ -1731,6 +1766,7 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
             lotDepthFt={lotDepthFt}
             floors={result.plannedDimensions ?? []}
             defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
+            northAngleDeg={northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
           />
         </aside>
       </section>
@@ -1779,6 +1815,7 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
               floors={result.plannedDimensions ?? []}
               defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
               lotAreaSqft={result.lotArea}
+              northAngleDeg={northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
               setbacks={{
                 front: district.front_yard_min_ft,
                 // What the envelope actually insets per side: the combined

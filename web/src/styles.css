@@ -1547,3 +1547,91 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 .level-includes strong { display: block; font-size: 0.78rem; margin-bottom: 0.4rem; }
 .level-includes ul { margin: 0; padding-left: 1rem; display: grid; gap: 0.22rem; }
 .level-includes li { color: var(--muted); font-size: 0.73rem; line-height: 1.45; }
+
+/* ---------- Step 2: per-floor input rows ---------- */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}
+.floor-row {
+  display: grid;
+  grid-template-columns: minmax(110px, auto) minmax(0, 1fr) minmax(130px, auto);
+  align-items: center;
+  gap: 1rem;
+  margin: 0 0 0.7rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+.floor-row-id { display: flex; align-items: center; gap: 0.6rem; }
+.floor-row-num {
+  display: grid;
+  place-items: center;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--active);
+  color: var(--nav);
+  font-size: 0.76rem;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.floor-row-label { font-weight: 800; font-size: 0.92rem; }
+.floor-row-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: start;
+  gap: 0.75rem;
+  padding-left: 1rem;
+  border-left: 1px solid var(--line);
+}
+/* Uppercase field captions, as in the reference layout. */
+.floor-row-fields label { gap: 0.3rem; font-size: 0.66rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.floor-row-fields label small { font-size: 0.62rem; text-transform: none; letter-spacing: 0; }
+.floor-row-lock { align-self: center; color: var(--line-strong); }
+.floor-row-area {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0 0.5rem;
+  padding-left: 1rem;
+  border-left: 1px solid var(--line);
+  text-align: left;
+}
+.floor-row-area > span:first-child {
+  grid-column: 1;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.floor-row-area strong { grid-column: 1; font-size: 1.3rem; font-weight: 900; }
+.floor-row-area strong em { font-style: normal; font-size: 0.72rem; font-weight: 700; color: var(--muted); }
+.floor-row-status {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  display: grid;
+  place-items: center;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  color: transparent;
+  font-weight: 900;
+}
+.floor-row-area.done .floor-row-status {
+  color: var(--green);
+  border: 2px solid var(--green);
+}
+@media (max-width: 900px) {
+  .floor-row { grid-template-columns: 1fr; gap: 0.75rem; }
+  .floor-row-fields, .floor-row-area { padding-left: 0; border-left: 0; }
+  .floor-row-area { border-top: 1px solid var(--line); padding-top: 0.6rem; }
+}
+
+/* North arrow: rotated to true north for this parcel, not screen-up. */
+.massing-compass circle { fill: rgba(255, 255, 255, 0.85); stroke: var(--line-strong); stroke-width: 1; }
+.massing-compass polygon { fill: #8c1d18; }
+.massing-compass text { font-size: 9px; font-weight: 800; fill: var(--nav); }
