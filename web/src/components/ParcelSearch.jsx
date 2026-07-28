@@ -1,25 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 import { searchParcels } from "../lib/supabase.js";
+import { searchNjginParcels } from "../lib/njgin.js";
 
 const fmt = (n) =>
   n == null ? "—" : Number(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
 
 /**
- * Address search over the imported NJGIN parcels for one municipality.
- * Debounced; calls onSelect(parcelRow) when a result is picked.
+ * Address search over NJGIN parcels for one municipality. `source` picks where
+ * the records come from: "db" for the local import (PostGIS geometry, zoning
+ * verifiable) or "njgin" for the live statewide service. Both return the same
+ * row shape. Debounced; calls onSelect(parcelRow) when a result is picked.
  */
-export default function ParcelSearch({ muniSlug, selected, onSelect, onClear }) {
+export default function ParcelSearch({ muni, source = "db", selected, onSelect, onClear }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState(null);
   const timer = useRef(null);
+  const live = source === "njgin";
 
   useEffect(() => {
     setQuery("");
     setResults(null);
     setError(null);
-  }, [muniSlug]);
+  }, [muni?.slug, source]);
 
   useEffect(() => {
     clearTimeout(timer.current);
@@ -31,7 +35,8 @@ export default function ParcelSearch({ muniSlug, selected, onSelect, onClear }) 
     }
     setSearching(true);
     timer.current = setTimeout(() => {
-      searchParcels(muniSlug, q)
+      const request = live ? searchNjginParcels(muni, q) : searchParcels(muni.slug, q);
+      request
         .then((rows) => {
           setResults(rows);
           setError(null);
@@ -40,13 +45,13 @@ export default function ParcelSearch({ muniSlug, selected, onSelect, onClear }) 
         .finally(() => setSearching(false));
     }, 300);
     return () => clearTimeout(timer.current);
-  }, [query, muniSlug]);
+  }, [query, muni, live]);
 
   return (
     <div className="parcel-search">
       <div className="row">
         <label style={{ flex: 1 }}>
-          Property address (public NJGIN parcel data)
+          Property address ({live ? "live NJGIN parcel service" : "imported NJGIN parcel data"})
           <input
             type="search"
             placeholder="e.g. 3901 PALISADE"
@@ -69,10 +74,10 @@ export default function ParcelSearch({ muniSlug, selected, onSelect, onClear }) 
       {results && results.length > 0 && !selected && (
         <ul className="results">
           {results.map((r) => (
-            <li key={r.parcel_id}>
+            <li key={r.pams_pin}>
               <button
                 type="button"
-                className={selected?.parcel_id === r.parcel_id ? "hit active" : "hit"}
+                className={selected?.pams_pin === r.pams_pin ? "hit active" : "hit"}
                 onClick={() => onSelect(r)}
               >
                 <strong>{r.address ?? "(no address)"}</strong>
