@@ -61,9 +61,9 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 
 .shell {
-  max-width: 1120px;
+  width: min(95%, 1400px);
   margin: 0 auto;
-  padding: 1.5rem 1.5rem 4rem;
+  padding: 1.5rem;
 }
 
 /* Brand block used on the printable report */
@@ -127,7 +127,7 @@ button { -webkit-tap-highlight-color: transparent; }
   display: grid;
   grid-template-columns: minmax(0, 1.12fr) minmax(340px, 0.88fr);
   gap: 1.25rem;
-  align-items: start;
+  align-items: stretch;
 }
 /* No property yet: the form takes the full shell, capped so lines stay readable. */
 .workspace-grid.solo { grid-template-columns: minmax(0, 1fr); max-width: 760px; margin: 0 auto; }
@@ -345,6 +345,7 @@ select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed;
 .parcel-search { margin-top: 0.8rem; }
 .parcel-search .row { display: flex; gap: 0.65rem; align-items: flex-end; }
 .parcel-search .row label { flex: 1; }
+.parcel-search.selected-mode { display: flex; justify-content: flex-end; }
 .status-line { margin: 0.6rem 0 0; color: var(--muted); font-size: 0.76rem; }
 .error-text { color: #9d312b; }
 
@@ -417,7 +418,36 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .zoning-check span { opacity: 0.9; }
 
 .survey-notice { display: flex; gap: 0.75rem; margin: 1.35rem 0; padding: 0.85rem; border: 1px solid var(--info-line); border-radius: 11px; background: var(--info-bg); }
-.survey-notice > span { display: grid; place-items: center; flex: 0 0 25px; height: 25px; border-radius: 50%; background: var(--primary-fill); color: #fff; font-weight: 850; font-size: 0.75rem; }
+.survey-notice > span {
+  display: grid;
+  place-items: center;
+  flex: 0 0 25px;
+  height: 25px;
+  border-radius: 50%;
+  background: var(--primary-fill);
+  color: #fff;
+  font-weight: 850;
+  font-size: 0.75rem;
+  animation: survey-icon-pulse 2.6s ease-out infinite;
+  will-change: transform, box-shadow;
+}
+@keyframes survey-icon-pulse {
+  0%, 58%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(151, 115, 22, 0);
+  }
+  10% {
+    transform: scale(1.12);
+    box-shadow: 0 0 0 0 rgba(151, 115, 22, 0.38);
+  }
+  28% {
+    transform: scale(1);
+    box-shadow: 0 0 0 8px rgba(151, 115, 22, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .survey-notice > span { animation: none; }
+}
 .survey-notice strong { display: block; color: var(--nav); font-size: 0.79rem; }
 .survey-notice p { margin: 0.2rem 0 0; color: var(--info-ink); font-size: 0.7rem; line-height: 1.45; }
 
@@ -426,13 +456,26 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .primary:hover:not(:disabled) { background: var(--primary-dark); }
 .primary:disabled { cursor: not-allowed; opacity: 0.45; box-shadow: none; }
 .primary.full { display: flex; justify-content: center; align-items: center; gap: 0.7rem; width: 100%; }
+.form-card > .primary.full { margin-top: 1.25rem; }
 .secondary { color: var(--primary-fill); background: #fff; border-color: var(--line-strong); }
 .secondary:hover { border-color: var(--primary); }
 .form-hint { margin: 0.5rem 0 0; color: var(--muted); font-size: 0.7rem; text-align: center; }
 
-.preview-card { position: sticky; top: 1rem; }
+.preview-card { position: sticky; top: 1rem; height: 100%; box-sizing: border-box; }
+.preview-card > .zoning-map {
+  height: 100%;
+  grid-template-rows: auto minmax(340px, 1fr) auto auto;
+}
+.preview-card > .zoning-map .zoning-map-canvas { height: 100%; min-height: 340px; }
 .preview-card h2 { margin: 0.2rem 0; font-size: 1.2rem; font-weight: 800; }
 .preview-note { margin: 0 0 1rem; color: var(--muted); font-size: 0.73rem; }
+.parcel-recorded-dimensions {
+  margin: 0.7rem 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-align: center;
+}
+.parcel-recorded-dimensions strong { color: var(--ink); }
 .diagram { display: block; width: 100%; max-width: 100%; height: 300px; margin: 1.1rem auto; }
 .diagram .lot { fill: #faf6ec; stroke: #6b6350; stroke-width: 1.5; stroke-dasharray: 5 3; }
 .diagram .envelope { fill: rgba(167, 133, 41, 0.13); stroke: var(--primary); stroke-width: 1.5; stroke-dasharray: 5 3; }
@@ -548,47 +591,142 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .engine-step.pending .engine-step-num { background: var(--muted); }
 .engine-step.pending .engine-step-head b { color: var(--muted); }
 
-/* ---------- Planned size vs. capacity ---------- */
-.plan-feasibility {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin: 0 0 1.5rem;
-  padding: 0.9rem 1rem;
+.floor-fields { display: grid; gap: 0.75rem; margin-top: 0.85rem; }
+.floor-dimensions {
+  margin: 0;
+  padding: 0.8rem;
   border: 1px solid var(--line);
   border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
 }
-.plan-feasibility strong { font-size: 0.9rem; }
-.plan-feasibility span { color: var(--muted); font-size: 0.72rem; line-height: 1.5; }
-.plan-feasibility.fits { border-color: #b9d4c2; background: var(--green-soft); }
-.plan-feasibility.fits strong { color: #315f44; }
-.plan-feasibility.exceeds { border-color: #e3b8b4; background: #fff6f5; }
-.plan-feasibility.exceeds strong { color: #8b362e; }
-.plan-feasibility.unknown { border-style: dashed; background: #fbf8f0; }
-.plan-feasibility.unknown strong { color: var(--nav); }
-.plan-checks { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.2rem 0; padding: 0; list-style: none; }
-.plan-checks li {
-  display: grid;
-  grid-template-columns: 1fr auto 1.2rem;
-  align-items: baseline;
-  gap: 0.7rem;
-  padding: 0.4rem 0.6rem;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.55);
-  font-size: 0.75rem;
-}
-.plan-check-label { color: var(--ink); font-weight: 700; }
-.plan-check-values { color: var(--muted); font-variant-numeric: tabular-nums; }
-.plan-check-values em { font-style: normal; }
-.plan-check-mark { font-weight: 900; text-align: center; }
-.plan-checks li.check-ok .plan-check-mark { color: var(--green); }
-.plan-checks li.check-bad .plan-check-mark { color: #c0504a; }
-.plan-checks li.check-bad .plan-check-values { color: #8b362e; }
-.plan-checks li.check-na .plan-check-mark { color: var(--muted); }
-
-.floor-fields { margin-top: 0.85rem; }
+.floor-dimensions legend { padding: 0 0.35rem; color: var(--nav); font-size: 0.78rem; font-weight: 800; }
+.floor-dimensions .form-grid { max-width: none; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.floor-dimensions > p { margin: 0.55rem 0 0; color: var(--muted); font-size: 0.68rem; }
+.floor-dimensions > p strong { color: var(--nav); }
 .planned-total { margin: 0.75rem 0 0; color: var(--muted); font-size: 0.75rem; }
 .planned-total strong { color: var(--nav); font-size: 0.85rem; }
+
+/* ---------- Step 2: conceptual 3D massing ---------- */
+.building-preview-3d { display: grid; gap: 0.75rem; margin-top: 0.8rem; }
+.result-3d-preview {
+  width: min(100%, 560px);
+  margin: 1.1rem auto 1.6rem;
+}
+.result-3d-preview > .eyebrow { margin-bottom: 0.2rem; }
+.result-3d-preview > .preview-note { margin-bottom: 0.75rem; }
+.building-dimension-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.8rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.building-dimension-summary span {
+  padding: 0.32rem 0.5rem;
+  border-radius: 99px;
+  background: var(--info-bg);
+}
+.building-dimension-summary strong { color: var(--nav); }
+.building-dimension-summary .building-preview-prompt {
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: transparent;
+}
+.building-viewer-stage {
+  position: relative;
+  min-height: 240px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 50% 38%, rgba(244, 237, 213, 0.65), transparent 58%),
+    #fff;
+}
+.building-viewer-tools {
+  position: absolute;
+  z-index: 2;
+  top: 0.65rem;
+  right: 0.65rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-size: 0.64rem;
+  pointer-events: none;
+}
+.building-viewer-tools button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--nav);
+  font-size: 1.15rem;
+  font-weight: 800;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.building-viewer-tools button:hover { background: var(--info-bg); }
+.building-massing {
+  display: block;
+  width: 100%;
+  min-height: 240px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.building-massing.dragging {
+  cursor: grabbing;
+}
+.massing-lot {
+  fill: var(--info-bg);
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+}
+.massing-dimensions text {
+  fill: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.massing-face { stroke: var(--primary-dark); stroke-width: 1.1; }
+.massing-face-wall-a { fill: #bca252; }
+.massing-face-wall-b { fill: #927326; }
+.massing-face-top { fill: #e8d89e; }
+.massing-dimensions line {
+  stroke: var(--nav);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 3;
+}
+.massing-dimensions text {
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+.massing-floor-list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.massing-floor-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.massing-floor-list li strong { color: var(--nav); }
+.massing-floor-list li span { margin-left: auto; font-variant-numeric: tabular-nums; }
+.massing-height-note { margin: 0; color: var(--muted); font-size: 0.64rem; line-height: 1.45; }
 
 /* ---------- Zoning check ---------- */
 .zoning-check-card { margin-top: 1.2rem; }
@@ -723,11 +861,15 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 @media (max-width: 820px) {
   .workspace-grid { grid-template-columns: 1fr; }
   .answer-figures { grid-template-columns: 1fr; gap: 0.9rem; }
-  .preview-card { position: static; }
+  .preview-card { position: static; height: auto; }
+  .preview-card > .zoning-map { height: auto; grid-template-rows: auto; }
+  .preview-card > .zoning-map .zoning-map-canvas { height: 340px; min-height: 0; }
   .step { padding: 0.6rem; font-size: 0.75rem; }
   .step-line { margin: 0 0.2rem; }
   .review-summary { grid-template-columns: 1fr 1fr; }
   .nav-tagline { display: none; }
+  .map-dialog-body { grid-template-columns: 1fr; }
+  .zoning-map.expanded .zoning-map-canvas { height: 52vh; min-height: 360px; }
 }
 
 @media (max-width: 560px) {
@@ -739,9 +881,26 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   .step { flex-direction: column; gap: 0.3rem; width: 100%; white-space: normal; text-align: center; font-size: 0.64rem; }
   .form-card, .card { padding: 1.1rem; }
   .project-types, .form-grid, .form-grid.three, .review-summary { grid-template-columns: 1fr; }
+  .floor-dimensions .form-grid { grid-template-columns: 1fr; }
+  .building-viewer-tools > span { display: none; }
+  .building-viewer-stage { min-height: 220px; }
+  .building-massing { min-height: 220px; }
   .project-option { min-height: 0; }
   .method-title { flex-direction: column; }
   .parcel-search .row { align-items: stretch; flex-direction: column; }
+  .zoning-map-head { flex-direction: column; }
+  .zoning-map-actions { justify-content: flex-start; }
+  .map-dialog-backdrop { padding: 0; }
+  .map-dialog {
+    width: 100%;
+    max-height: 100vh;
+    min-height: 100vh;
+    border: 0;
+    border-radius: 0;
+  }
+  .map-dialog-header { padding: 1rem; }
+  .map-dialog-body { padding: 1rem; }
+  .zoning-map.expanded .zoning-map-canvas { min-height: 320px; }
   .preview-facts { grid-template-columns: 1fr; }
   .actions { flex-direction: column-reverse; }
   .actions button { width: 100%; }
@@ -909,6 +1068,22 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   padding: 0.5rem 0.6rem;
   width: 100%;
 }
+.admin-fields label.pdf-imported {
+  background: #fff9df;
+  border: 2px solid #d6a915;
+  border-radius: 10px;
+  padding: 0.55rem;
+  box-shadow: 0 0 0 3px rgba(214, 169, 21, 0.12);
+  animation: pdf-import-pulse 0.8s ease-out;
+}
+.admin-fields label.pdf-imported input {
+  border-color: #b88c08;
+  background: #fffef7;
+}
+@keyframes pdf-import-pulse {
+  from { background: #ffe47a; transform: translateY(-2px); }
+  to { background: #fff9df; transform: translateY(0); }
+}
 .admin-hint { color: var(--muted); font-size: 0.78rem; margin: 0.8rem 0 0; }
 
 .admin-toggle { font-weight: 700; }
@@ -955,6 +1130,62 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .save-ok { color: var(--green); font-weight: 700; }
 .admin-actions { justify-content: flex-end; }
 button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
+
+/* ---------- Admin: zoning PDF import ---------- */
+.pdf-import-section { border-color: var(--active-line); background: #fffdf8; }
+.pdf-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.pdf-import-head .admin-hint { margin-top: 0.25rem; }
+.file-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.file-button.disabled { opacity: 0.55; cursor: wait; }
+.pdf-import-results {
+  border-top: 1px dashed var(--line);
+  padding-top: 0.85rem;
+  margin-top: 0.85rem;
+  display: grid;
+  gap: 0.75rem;
+}
+.pdf-import-summary { display: flex; justify-content: space-between; gap: 1rem; font-size: 0.82rem; }
+.pdf-import-summary span { color: var(--muted); }
+.pdf-field-list { display: grid; gap: 0.55rem; }
+.pdf-field {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.7rem;
+  background: #fff;
+  cursor: pointer;
+}
+.pdf-field.setback { border-left: 4px solid var(--primary-fill); }
+.pdf-field > input { margin-top: 0.25rem; flex: 0 0 auto; }
+.pdf-field-copy { min-width: 0; display: grid; gap: 0.3rem; flex: 1; }
+.pdf-field-copy > span { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.pdf-field-copy b { color: var(--primary-fill); font-size: 1rem; }
+.pdf-field-copy em { color: var(--muted); font-size: 0.7rem; font-style: normal; margin-left: auto; }
+.pdf-field-copy small {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 650px) {
+  .pdf-import-head { align-items: stretch; flex-direction: column; }
+  .file-button { width: 100%; }
+  .pdf-field-copy em { margin-left: 0; }
+}
 
 /* ---------- Cost provenance (verified vs estimated) ---------- */
 .provenance-flag {
@@ -1154,7 +1385,30 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 /* ---------- Zoning map ---------- */
 .zoning-map { display: grid; gap: 0.6rem; }
 .zoning-map-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
-.zoning-map-head h3 { margin: 0.1rem 0 0; font-size: 1.05rem; }
+.zoning-map-head h3 { margin: 0.1rem 0 0; font-size: 1.2rem; }
+.zoning-map-note { margin: 0.15rem 0 0; color: var(--muted); font-size: 0.73rem; }
+.zoning-map-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  padding-top: 0.15rem;
+}
+.map-expand-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--primary-fill);
+  background: #fff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+.map-expand-button:hover { border-color: var(--primary); background: var(--active); }
 .zoning-map-canvas {
   height: 340px;
   border: 1px solid var(--line);
@@ -1183,3 +1437,74 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 .zoning-legend em { font-style: normal; color: #8a6116; }
 .zoning-map-caveat { margin-top: 0; }
 .zoning-map-caveat a { color: var(--primary-fill); font-weight: 700; }
+
+.map-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: rgba(22, 25, 28, 0.7);
+  backdrop-filter: blur(3px);
+}
+.map-dialog {
+  width: min(1180px, 100%);
+  max-height: calc(100vh - 2.5rem);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(20, 24, 28, 0.28);
+}
+.map-dialog-header {
+  position: sticky;
+  top: 0;
+  z-index: 1001;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.97);
+}
+.map-dialog-header h2 { margin: 0.15rem 0 0; font-size: 1.35rem; }
+.map-dialog-close {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--ink);
+  background: #fff;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.map-dialog-close:hover { color: var(--primary); border-color: var(--primary); }
+.map-dialog-body {
+  display: grid;
+  grid-template-columns: minmax(270px, 0.72fr) minmax(0, 1.8fr);
+  gap: 1.4rem;
+  padding: 1.4rem;
+}
+.map-dialog-search {
+  align-self: start;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fdfbf5;
+}
+.map-dialog-search h3 { margin: 0; font-size: 1rem; }
+.map-dialog-search > p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.map-dialog-search .data-tag { margin-top: 0.8rem; }
+.map-dialog-search ul.results { max-height: 18rem; background: #fff; }
+.map-dialog-apply { margin-top: 1rem; }
+.zoning-map.expanded .zoning-map-canvas { height: min(62vh, 680px); min-height: 460px; }

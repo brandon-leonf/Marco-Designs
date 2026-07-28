@@ -31,9 +31,42 @@ const DISTRICT_COLORS = {
   "R-2": "#efd97a",
 };
 const FALLBACK_COLOR = "#9e9e9e";
-const districtColor = (code) => DISTRICT_COLORS[code] ?? FALLBACK_COLOR;
+const normalizeCode = (code) => String(code ?? "").trim().toUpperCase();
+const districtColor = (code) => DISTRICT_COLORS[normalizeCode(code)] ?? FALLBACK_COLOR;
 
-export default function ZoningMap({ muniSlug, muniName, parcelGeojson, parcelLabel }) {
+// Matches the calculation guard in lib/envelope.js. Merely creating a
+// district row makes it visible, but does not imply that enough rules have
+// been published to calculate a buildable envelope safely.
+function districtHasRules(district) {
+  if (!district) return false;
+  return (
+    district.front_yard_min_ft != null &&
+    district.rear_yard_min_ft != null &&
+    district.max_building_coverage_pct != null &&
+    district.max_stories != null &&
+    (district.side_yard_one_min_ft != null || district.side_yard_total_min_ft != null)
+  );
+}
+
+const escapeHtml = (value) =>
+  String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+
+export default function ZoningMap({
+  muniSlug,
+  muniName,
+  districts = [],
+  parcelGeojson,
+  parcelLabel,
+  headingLabel = "Property preview",
+  note,
+  onExpand,
+  expanded = false,
+}) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const zoningLayerRef = useRef(null);
@@ -44,6 +77,15 @@ export default function ZoningMap({ muniSlug, muniName, parcelGeojson, parcelLab
   const [provenance, setProvenance] = useState(null);
   const [error, setError] = useState(null);
   const [zoomedToParcel, setZoomedToParcel] = useState(false);
+  const districtByCode = new Map(
+    districts.map((district) => [normalizeCode(district.code), district])
+  );
+  // The admin configuration is the public catalog of supported districts.
+  // Imported polygons whose code has not been defined there stay hidden
+  // instead of appearing as an unsupported "rules not published" district.
+  const visibleZoning = (zoning ?? []).filter((area) =>
+    districtByCode.has(normalizeCode(area.district_code))
+  );
 
   // Create the map once; React never re-renders into this container.
   useEffect(() => {
@@ -89,14 +131,14 @@ export default function ZoningMap({ muniSlug, muniName, parcelGeojson, parcelLab
     if (!map || !zoning) return;
 
     zoningLayerRef.current?.remove();
-    if (zoning.length === 0) {
+    if (visibleZoning.length === 0) {
       zoningLayerRef.current = null;
       muniBoundsRef.current = null;
       return;
     }
 
     const layer = L.geoJSON(
-      zoning.map((area) => ({
+      visibleZoning.map((area) => ({
         type: "Feature",
         geometry: area.geojson,
         properties: area,
@@ -115,12 +157,17 @@ export default function ZoningMap({ muniSlug, muniName, parcelGeojson, parcelLab
         },
         onEachFeature: (feature, lyr) => {
           const p = feature.properties;
-          const name = p.district_name ? ` — ${p.district_name}` : "";
-          const rules = p.has_rules
+          // A newly-created district may exist before an older polygon has
+          // been backfilled with its district_id. Match by normalized code as
+          // an immediate UI fallback; migration 0015 repairs the DB link.
+          const district = districtByCode.get(normalizeCode(p.district_code));
+          const districtName = p.district_name ?? district?.name;
+          const name = districtName ? ` — ${escapeHtml(districtName)}` : "";
+          const rules = p.has_rules || districtHasRules(district)
             ? ""
-            : "<br><em>No rules loaded for this district yet.</em>";
+            : "<br><em>Rules have not been published for this district yet.</em>";
           lyr.bindPopup(
-            `<strong>${p.district_code}${name}</strong>${p.is_overlay ? " (overlay)" : ""}${rules}`
+            `<strong>${escapeHtml(p.district_code)}${name}</strong>${p.is_overlay ? " (overlay)" : ""}${rules}`
           );
         },
       }
@@ -129,7 +176,7 @@ export default function ZoningMap({ muniSlug, muniName, parcelGeojson, parcelLab
     zoningLayerRef.current = layer;
     muniBoundsRef.current = layer.getBounds();
     if (!parcelGeojson) map.fitBounds(layer.getBounds(), { padding: [12, 12] });
-  }, [zoning]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [zoning, districts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Zoom to the chosen parcel; fall back to the whole town when cleared.
   useEffect(() => {
@@ -153,35 +200,74 @@ export default function ZoningMap({ muniSlug, muniName, parcelGeojson, parcelLab
     setZoomedToParcel(true);
   }, [parcelGeojson]);
 
-  const legend = zoning
-    ? [...new Map(zoning.map((a) => [a.district_code, a])).values()]
-    : [];
+  // Union the polygon layer with the municipality's configured districts.
+  // A configured district without geometry still belongs in the legend; it
+  // is labelled honestly as not mapped rather than silently disappearing.
+  const legendByCode = new Map();
+  for (const area of visibleZoning) {
+    const code = normalizeCode(area.district_code);
+    const district = districtByCode.get(code);
+    legendByCode.set(code, {
+      ...area,
+      district_code: code,
+      district_name: area.district_name ?? district?.name ?? null,
+      has_rules: Boolean(area.has_rules || districtHasRules(district)),
+      has_polygon: true,
+    });
+  }
+  for (const district of districts) {
+    const code = normalizeCode(district.code);
+    if (!legendByCode.has(code)) {
+      legendByCode.set(code, {
+        district_code: code,
+        district_name: district.name,
+        has_rules: districtHasRules(district),
+        has_polygon: false,
+      });
+    }
+  }
+  const legend = [...legendByCode.values()].sort((a, b) =>
+    a.district_code.localeCompare(b.district_code)
+  );
 
   return (
-    <div className="zoning-map">
+    <div className={`zoning-map${expanded ? " expanded" : ""}`}>
       <div className="zoning-map-head">
         <div>
-          <p className="eyebrow">Zoning map</p>
-          <h3>{zoomedToParcel ? parcelLabel || "Selected property" : `${muniName ?? "Municipality"} districts`}</h3>
+          <p className="eyebrow">{headingLabel}</p>
+          <h3>
+            {zoomedToParcel
+              ? parcelLabel || "Selected property"
+              : `${muniName ?? "Municipality"} districts`}
+          </h3>
+          {note && <p className="zoning-map-note">{note}</p>}
         </div>
-        {zoomedToParcel && muniBoundsRef.current && (
-          <button
-            type="button"
-            className="text-button compact"
-            onClick={() => mapRef.current?.fitBounds(muniBoundsRef.current, { padding: [12, 12] })}
-          >
-            Zoom out to {muniName ?? "town"}
-          </button>
-        )}
+        <div className="zoning-map-actions">
+          {zoomedToParcel && muniBoundsRef.current && (
+            <button
+              type="button"
+              className="text-button compact"
+              onClick={() => mapRef.current?.fitBounds(muniBoundsRef.current, { padding: [12, 12] })}
+            >
+              View all {muniName ?? "town"}
+            </button>
+          )}
+          {onExpand && (
+            <button type="button" className="map-expand-button" onClick={onExpand}>
+              <span aria-hidden="true">↗</span>
+              Expand map
+            </button>
+          )}
+        </div>
       </div>
 
       <div ref={containerRef} className="zoning-map-canvas" role="application" aria-label="Municipal zoning map" />
 
       {error && <p className="status-line error-text">Zoning layer failed to load: {error}</p>}
-      {zoning && zoning.length === 0 && (
+      {zoning && visibleZoning.length === 0 && (
         <p className="fine">
-          No zoning polygons are loaded for {muniName ?? "this municipality"}, so only the parcel
-          boundary can be drawn.
+          No admin-defined zoning polygons are loaded for {muniName ?? "this municipality"}, so
+          only the parcel boundary can be drawn.
         </p>
       )}
 
@@ -193,7 +279,8 @@ export default function ZoningMap({ muniSlug, muniName, parcelGeojson, parcelLab
               <span>
                 {a.district_code}
                 {a.district_name ? ` — ${a.district_name}` : ""}
-                {!a.has_rules && <em> (no rules loaded)</em>}
+                {!a.has_polygon && <em> (no mapped polygon)</em>}
+                {!a.has_rules && <em> (rules not published)</em>}
               </span>
             </li>
           ))}

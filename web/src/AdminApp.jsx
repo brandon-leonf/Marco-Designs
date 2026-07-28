@@ -236,6 +236,10 @@ function ConfigEditor({ adminEmail, ready }) {
   const [validation, setValidation] = useState(null); // {issues: [], ok: []}
   const [testLot, setTestLot] = useState({ width: 25, depth: 102, area: 2548 });
   const [testResult, setTestResult] = useState(null); // {lines: [], summary: {}}
+  const [pdfImport, setPdfImport] = useState(null);
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState("");
+  const [pdfImportedKeys, setPdfImportedKeys] = useState([]);
 
   const reload = () =>
     fetchMunicipalities()
@@ -280,6 +284,9 @@ function ConfigEditor({ adminEmail, ready }) {
     setSaveState(null);
     setValidation(null);
     setTestResult(null);
+    setPdfImport(null);
+    setPdfProgress("");
+    setPdfImportedKeys([]);
   }, [district]);
   useEffect(() => {
     if (!muni) {
@@ -436,7 +443,14 @@ function ConfigEditor({ adminEmail, ready }) {
       depth_ft: Number(testLot.depth) || 0,
       area_sqft: Number(testLot.area) || 0,
     };
-    const res = computeBuildable(lot, d);
+    let res;
+    try {
+      res = computeBuildable(lot, d);
+    } catch (err) {
+      setTestResult(null);
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+      return;
+    }
     const num = (n) => Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
 
     // The full calculation trace: every input and intermediate, in order.
@@ -684,11 +698,73 @@ function ConfigEditor({ adminEmail, ready }) {
     }
   };
 
+  const importPdf = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !district) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      setSaveState({ kind: "error", text: "Choose a PDF file." });
+      return;
+    }
+    setPdfBusy(true);
+    setPdfImport(null);
+    setSaveState(null);
+    setPdfProgress("Opening PDF…");
+    try {
+      // PDF.js is large and only admins importing a document need it. Keep it
+      // out of the public calculator's initial bundle.
+      const { parseZoningPdf } = await import("./lib/pdfImport.js");
+      const result = await parseZoningPdf(file, district.code, (page, total) =>
+        setPdfProgress(`Reading page ${page} of ${total}…`)
+      );
+      setPdfImport({
+        ...result,
+        fileName: file.name,
+        selected: Object.fromEntries(result.fields.map((field) => [field.key, true])),
+      });
+      setPdfProgress("");
+    } catch (err) {
+      setSaveState({
+        kind: "error",
+        text: `Could not read ${file.name}: ${err.message ?? String(err)}`,
+      });
+      setPdfProgress("");
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
+  const applyPdfImport = () => {
+    const selectedFields = pdfImport?.fields.filter((field) => pdfImport.selected[field.key]) ?? [];
+    if (!selectedFields.length) return;
+    setDraft((current) => ({
+      ...current,
+      ...Object.fromEntries(selectedFields.map((field) => [field.key, field.value])),
+    }));
+    setPdfImportedKeys(selectedFields.map((field) => field.key));
+    setPdfImport(null);
+    setValidation(null);
+    setTestResult(null);
+    setSaveState({
+      kind: "ok",
+      text: `${selectedFields.length} value${selectedFields.length === 1 ? "" : "s"} imported into the draft. Review them, then validate before publishing.`,
+    });
+    requestAnimationFrame(() =>
+      document.querySelector(".admin-fields .pdf-imported")?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      })
+    );
+  };
+
   if (loadError) return <div className="card error">Failed to load data: {loadError}</div>;
   if (!munis || !draft || !costDraft)
     return <div className="card loading-card">Loading configuration…</div>;
 
-  const setField = (key) => (value) => setDraft((d) => ({ ...d, [key]: value }));
+  const setField = (key) => (value) => {
+    setDraft((d) => ({ ...d, [key]: value }));
+    setPdfImportedKeys((keys) => keys.filter((item) => item !== key));
+  };
   const setCostField = (key) => (value) => setCostDraft((d) => ({ ...d, [key]: value }));
   const setTierField = (name, key) => (value) =>
     setCostDraft((d) => ({
@@ -1012,22 +1088,115 @@ function ConfigEditor({ adminEmail, ready }) {
           )}
         </div>
 
+        <fieldset className="admin-section pdf-import-section" disabled={!ready || saving}>
+          <legend>
+            <span className="admin-section-icon" aria-hidden="true">PDF</span> Import zoning PDF
+          </legend>
+          <div className="pdf-import-head">
+            <div>
+              <strong>Populate this district from an ordinance or zoning schedule</strong>
+              <p className="admin-hint">
+                Select the PDF for <strong>{district.code}</strong>. The file stays in this browser.
+                Detected values are never applied until you review and confirm them.
+              </p>
+            </div>
+            <label className={pdfBusy ? "secondary compact file-button disabled" : "secondary compact file-button"}>
+              {pdfBusy ? "Parsing…" : "Choose PDF"}
+              <input type="file" accept="application/pdf,.pdf" onChange={importPdf} disabled={pdfBusy} />
+            </label>
+          </div>
+          {pdfProgress && <p className="status-line">{pdfProgress}</p>}
+          {pdfImport && (
+            <div className="pdf-import-results">
+              <div className="pdf-import-summary">
+                <strong>{pdfImport.fileName}</strong>
+                <span>{pdfImport.pageCount} pages</span>
+              </div>
+              {pdfImport.scanned ? (
+                <div className="validate-panel bad" role="alert">
+                  <strong>Scanned PDF detected</strong>
+                  <p>
+                    This file has little or no selectable text. Run OCR on it, then upload the
+                    searchable PDF. No values were guessed.
+                  </p>
+                </div>
+              ) : pdfImport.fields.length === 0 ? (
+                <div className="validate-panel bad" role="alert">
+                  <strong>No labeled rules were found for district {district.code}</strong>
+                  <p>
+                    The PDF may use a table layout or different terminology. Enter the setbacks
+                    manually and verify them against the official document.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className="admin-hint">
+                    Check every value against the cited page. Setbacks are highlighted first because
+                    they directly control the buildable envelope.
+                  </p>
+                  <div className="pdf-field-list">
+                    {pdfImport.fields.map((field) => (
+                      <label
+                        className={field.key.includes("yard") ? "pdf-field setback" : "pdf-field"}
+                        key={field.key}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={Boolean(pdfImport.selected[field.key])}
+                          onChange={(event) =>
+                            setPdfImport((current) => ({
+                              ...current,
+                              selected: { ...current.selected, [field.key]: event.target.checked },
+                            }))
+                          }
+                        />
+                        <span className="pdf-field-copy">
+                          <span>
+                            <strong>{field.label}</strong>
+                            <b>{field.value}</b>
+                            <em>page {field.page} · {field.confidence === "high" ? `${district.code} nearby` : "review district"}</em>
+                          </span>
+                          <small>{field.excerpt}</small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="inline-create-actions">
+                    <button type="button" className="secondary compact" onClick={() => setPdfImport(null)}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="primary compact"
+                      disabled={!Object.values(pdfImport.selected).some(Boolean)}
+                      onClick={applyPdfImport}
+                    >
+                      Import selected into draft
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </fieldset>
+
         <fieldset className="admin-section" disabled={!ready || saving}>
           <legend>
             <span className="admin-section-icon" aria-hidden="true">📏</span> A. Setbacks &amp; Dimensional Rules
           </legend>
           <div className="admin-fields five">
-            <Num label="Front Yard Min (ft)" value={draft.front_yard_min_ft} onChange={setField("front_yard_min_ft")} />
-            <Num label="Rear Yard Min (ft)" value={draft.rear_yard_min_ft} onChange={setField("rear_yard_min_ft")} />
-            <Num label="Side Yard One Min (ft)" value={draft.side_yard_one_min_ft} onChange={setField("side_yard_one_min_ft")} />
-            <Num label="Side Yard Total Min (ft)" value={draft.side_yard_total_min_ft} onChange={setField("side_yard_total_min_ft")} />
-            <Num label="Min Lot Area (sq ft)" value={draft.min_lot_area_sqft} onChange={setField("min_lot_area_sqft")} />
-            <Num label="Min Lot Width (ft)" value={draft.min_lot_width_ft} onChange={setField("min_lot_width_ft")} />
-            <Num label="Min Lot Depth (ft)" value={draft.min_lot_depth_ft} onChange={setField("min_lot_depth_ft")} />
+            <Num label="Front Yard Min (ft)" value={draft.front_yard_min_ft} onChange={setField("front_yard_min_ft")} imported={pdfImportedKeys.includes("front_yard_min_ft")} />
+            <Num label="Rear Yard Min (ft)" value={draft.rear_yard_min_ft} onChange={setField("rear_yard_min_ft")} imported={pdfImportedKeys.includes("rear_yard_min_ft")} />
+            <Num label="Side Yard One Min (ft)" value={draft.side_yard_one_min_ft} onChange={setField("side_yard_one_min_ft")} imported={pdfImportedKeys.includes("side_yard_one_min_ft")} />
+            <Num label="Side Yard Total Min (ft)" value={draft.side_yard_total_min_ft} onChange={setField("side_yard_total_min_ft")} imported={pdfImportedKeys.includes("side_yard_total_min_ft")} />
+            <Num label="Min Lot Area (sq ft)" value={draft.min_lot_area_sqft} onChange={setField("min_lot_area_sqft")} imported={pdfImportedKeys.includes("min_lot_area_sqft")} />
+            <Num label="Min Lot Width (ft)" value={draft.min_lot_width_ft} onChange={setField("min_lot_width_ft")} imported={pdfImportedKeys.includes("min_lot_width_ft")} />
+            <Num label="Min Lot Depth (ft)" value={draft.min_lot_depth_ft} onChange={setField("min_lot_depth_ft")} imported={pdfImportedKeys.includes("min_lot_depth_ft")} />
             <Toggle
               label="Prevailing Front Yard Rule"
               checked={draft.front_yard_prevailing_rule}
               onChange={setField("front_yard_prevailing_rule")}
+              imported={pdfImportedKeys.includes("front_yard_prevailing_rule")}
             />
           </div>
         </fieldset>
@@ -1037,11 +1206,11 @@ function ConfigEditor({ adminEmail, ready }) {
             <span className="admin-section-icon" aria-hidden="true">🏗</span> B. Build Limits
           </legend>
           <div className="admin-fields four">
-            <Num label="Max Building Coverage (%)" value={draft.max_building_coverage_pct} onChange={setField("max_building_coverage_pct")} />
-            <Num label="Max Stories" value={draft.max_stories} onChange={setField("max_stories")} step="0.5" />
+            <Num label="Max Building Coverage (%)" value={draft.max_building_coverage_pct} onChange={setField("max_building_coverage_pct")} imported={pdfImportedKeys.includes("max_building_coverage_pct")} />
+            <Num label="Max Stories" value={draft.max_stories} onChange={setField("max_stories")} step="0.5" imported={pdfImportedKeys.includes("max_stories")} />
             <Num label="Max FAR" value={draft.max_far} onChange={setField("max_far")} step="0.05" />
-            <Num label="Max Height (ft)" value={draft.max_height_ft} onChange={setField("max_height_ft")} />
-            <Num label="Max Impervious Coverage (%)" value={draft.max_impervious_coverage_pct} onChange={setField("max_impervious_coverage_pct")} />
+            <Num label="Max Height (ft)" value={draft.max_height_ft} onChange={setField("max_height_ft")} imported={pdfImportedKeys.includes("max_height_ft")} />
+            <Num label="Max Impervious Coverage (%)" value={draft.max_impervious_coverage_pct} onChange={setField("max_impervious_coverage_pct")} imported={pdfImportedKeys.includes("max_impervious_coverage_pct")} />
           </div>
         </fieldset>
 
@@ -1241,6 +1410,7 @@ function ConfigEditor({ adminEmail, ready }) {
               setSaveState(null);
               setValidation(null);
               setTestResult(null);
+              setPdfImportedKeys([]);
             }}
           >
             ⟲ Discard draft
@@ -1263,9 +1433,9 @@ function ConfigEditor({ adminEmail, ready }) {
   );
 }
 
-function Num({ label, value, onChange, step = "1" }) {
+function Num({ label, value, onChange, step = "1", imported = false }) {
   return (
-    <label>
+    <label className={imported ? "pdf-imported" : undefined}>
       {label}
       <input
         type="number"
@@ -1278,9 +1448,9 @@ function Num({ label, value, onChange, step = "1" }) {
   );
 }
 
-function Toggle({ label, checked, onChange }) {
+function Toggle({ label, checked, onChange, imported = false }) {
   return (
-    <label className="admin-toggle">
+    <label className={imported ? "admin-toggle pdf-imported" : "admin-toggle"}>
       {label}
       <span className="toggle-row">
         <button

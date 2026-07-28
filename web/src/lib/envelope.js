@@ -35,6 +35,18 @@ export function missingDistrictRules(district) {
 }
 
 /**
+ * Calculation entry-point guard. UI checks are useful feedback, but the rules
+ * engine must protect itself too: no caller may obtain a result from defaults
+ * when the published zoning configuration is incomplete.
+ */
+function requireDistrictRules(district) {
+  const missing = missingDistrictRules(district);
+  if (missing.length) {
+    throw new Error(`Cannot calculate: missing zoning rules (${missing.join(", ")}).`);
+  }
+}
+
+/**
  * ADU policy for a district, from `extra_rules.adu`.
  *
  * Three states, and the difference matters. A district that explicitly says
@@ -129,6 +141,7 @@ export function rectEnvelope(lot, district) {
  *   buildable = footprint * stories, then capped by FAR if the town uses it.
  */
 export function computeBuildable(lot, district) {
+  requireDistrictRules(district);
   // A deed/tax-record area may differ slightly from the simple bounding
   // rectangle. Prefer the explicitly entered area for coverage and FAR caps,
   // while width/depth continue to drive the preview envelope geometry.
@@ -173,6 +186,7 @@ export function computeBuildable(lot, district) {
  * computeBuildable, minus the rectangle-specific setback arithmetic.
  */
 export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, district) {
+  requireDistrictRules(district);
   const coveragePct = district.max_building_coverage_pct;
   const coverageCap = coveragePct != null ? lotAreaSqft * (coveragePct / 100) : Infinity;
   const footprint = Math.min(envelopeAreaSqft ?? 0, coverageCap);
