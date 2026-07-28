@@ -1102,3 +1102,51 @@ button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
 .cost-scope li { color: var(--muted); font-size: 0.72rem; line-height: 1.45; }
 .report-licenses { margin: 0.4rem 0 0; color: var(--muted); font-size: 0.66rem; }
 .adu-conditions { display: block; margin-top: 0.35rem; font-weight: 700; }
+
+/* ---------- Admin: destructive actions ---------- */
+.admin-muni-actions { display: grid; gap: 0.4rem; justify-items: start; }
+/* Deliberately quieter than the create button — destructive actions should be
+   reachable, not inviting. The confirm step carries the real weight. */
+.text-danger {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #8c1d18;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.text-danger:hover:not(:disabled) { text-decoration: underline; }
+.text-danger:disabled { color: var(--muted); cursor: not-allowed; }
+.danger-confirm {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.85rem;
+  border: 1px solid #f2b8b5;
+  border-radius: 10px;
+  background: #fdecec;
+  color: #8c1d18;
+}
+.danger-confirm strong { font-size: 0.85rem; }
+.danger-confirm ul { margin: 0; padding-left: 1.05rem; display: grid; gap: 0.2rem; font-size: 0.74rem; }
+.danger-confirm label { display: grid; gap: 0.25rem; font-size: 0.74rem; font-weight: 700; }
+.danger-confirm code { background: rgba(140, 29, 24, 0.09); padding: 0 0.25rem; border-radius: 4px; }
+.danger-confirm input {
+  border: 1px solid #e0a19d;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  background: #fff;
+  font-weight: 400;
+}
+.danger-confirm .admin-side-note { color: #8c1d18; }
+button.danger {
+  border: 1px solid #8c1d18;
+  border-radius: 9px;
+  background: #8c1d18;
+  color: #fff;
+  font-weight: 800;
+  cursor: pointer;
+}
+button.danger:hover:not(:disabled) { background: #731712; }
+button.danger:disabled { opacity: 0.5; cursor: not-allowed; }

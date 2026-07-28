@@ -149,6 +149,65 @@ export async function createMunicipality({ name, stateCode, county, slug, distri
   return municipalityId;
 }
 
+/**
+ * What deleting a municipality would take with it. Shown before the fact,
+ * because parcels are an NJGIN re-import rather than an undo.
+ */
+export async function municipalityImpact(municipalityId) {
+  const [districts, parcels, zoningAreas] = await Promise.all([
+    supabase.from("zoning_districts").select("id", { count: "exact", head: true })
+      .eq("municipality_id", municipalityId),
+    supabase.from("parcels").select("id", { count: "exact", head: true })
+      .eq("municipality_id", municipalityId),
+    supabase.from("zoning_areas").select("id", { count: "exact", head: true })
+      .eq("municipality_id", municipalityId),
+  ]);
+  for (const r of [districts, parcels, zoningAreas]) if (r.error) throw r.error;
+  return {
+    districts: districts.count ?? 0,
+    parcels: parcels.count ?? 0,
+    zoningAreas: zoningAreas.count ?? 0,
+  };
+}
+
+/**
+ * Delete a municipality and everything hanging off it.
+ *
+ * Parcels go first and explicitly: their foreign key has no ON DELETE CASCADE,
+ * so leaving them would fail the whole delete on a constraint violation.
+ * Districts, the cost model, its tiers and the zoning polygons all cascade.
+ */
+export async function deleteMunicipality(municipalityId) {
+  const { error: parcelError } = await supabase
+    .from("parcels")
+    .delete()
+    .eq("municipality_id", municipalityId);
+  if (parcelError) throw parcelError;
+
+  const { data, error } = await supabase
+    .from("municipalities")
+    .delete()
+    .eq("id", municipalityId)
+    .select("id");
+  if (error) throw error;
+  assertWritten(data, "municipality delete");
+}
+
+/**
+ * Delete one zoning district. Any zoning polygons pointing at it are set to
+ * NULL by the schema, which resolve_parcel_zoning reports as `rules_missing` —
+ * parcels there stop resolving rather than resolving to the wrong rules.
+ */
+export async function deleteDistrict(districtId) {
+  const { data, error } = await supabase
+    .from("zoning_districts")
+    .delete()
+    .eq("id", districtId)
+    .select("id");
+  if (error) throw error;
+  assertWritten(data, "district delete");
+}
+
 /** Add one district to an existing municipality. */
 export async function createDistrict(municipalityId, code, name) {
   const { data, error } = await supabase
