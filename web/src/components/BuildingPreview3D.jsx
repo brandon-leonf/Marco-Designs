@@ -52,6 +52,7 @@ export default function BuildingPreview3D({
   defaultFloorHeightFt = 10,
   lotAreaSqft,
   setbacks,
+  northAngleDeg,
 }) {
   const [view, setView] = useState({ yaw: -36, elevation: 34, zoom: 1 });
   const [isDragging, setIsDragging] = useState(false);
@@ -214,8 +215,24 @@ export default function BuildingPreview3D({
       };
     }
 
-    return { lot, faces, dimensions };
+    // North as a world-space direction, run through the same projection as the
+    // geometry. Reading the angle off the screen delta means the compass
+    // follows the orbit instead of pointing at a fixed corner of the canvas.
+    let northScreenAngle = null;
+    if (northAngleDeg != null) {
+      const radians = (northAngleDeg * Math.PI) / 180;
+      const from = project({ x: 0, y: 0, z: 0 });
+      const to = project({
+        x: Math.sin(radians) * lotDepth,
+        y: -Math.cos(radians) * lotDepth,
+        z: 0,
+      });
+      northScreenAngle = (Math.atan2(to.y - from.y, to.x - from.x) * 180) / Math.PI + 90;
+    }
+
+    return { lot, faces, dimensions, northScreenAngle };
   }, [
+    northAngleDeg,
     completeFloors,
     groundDepth,
     groundWidth,
@@ -352,6 +369,16 @@ export default function BuildingPreview3D({
           }}
         >
           <polygon className="massing-lot" points={points(scene.lot)} />
+          {scene.northScreenAngle != null && (
+            <g
+              className="massing-compass"
+              transform={`translate(${VIEW_WIDTH - 42} 42) rotate(${scene.northScreenAngle})`}
+            >
+              <circle r="18" />
+              <polygon points="0,-14 5,4 0,0 -5,4" />
+              <text y="-20" textAnchor="middle">N</text>
+            </g>
+          )}
           {scene.faces.map((face, index) => (
             <polygon
               className={`massing-face massing-face-${face.kind}`}
