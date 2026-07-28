@@ -1150,3 +1150,36 @@ button.danger {
 }
 button.danger:hover:not(:disabled) { background: #731712; }
 button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---------- Zoning map ---------- */
+.zoning-map { display: grid; gap: 0.6rem; }
+.zoning-map-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.zoning-map-head h3 { margin: 0.1rem 0 0; font-size: 1.05rem; }
+.zoning-map-canvas {
+  height: 340px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  /* Leaflet panes must not paint over the rounded corners. */
+  overflow: hidden;
+  background: var(--info-bg);
+}
+.zoning-map-canvas .leaflet-container { font: inherit; }
+.zoning-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+}
+.zoning-legend li { display: flex; align-items: center; gap: 0.4rem; font-size: 0.72rem; color: var(--muted); }
+.zoning-legend i {
+  width: 14px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1px solid rgba(43, 43, 43, 0.25);
+  flex-shrink: 0;
+}
+.zoning-legend em { font-style: normal; color: #8a6116; }
+.zoning-map-caveat { margin-top: 0; }
+.zoning-map-caveat a { color: var(--primary-fill); font-weight: 700; }

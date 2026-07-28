@@ -234,6 +234,8 @@ export function njginParcelFromFeature(feature, insetFt = 0) {
     lot_depth_ft: null,
     is_survey_confirmed: false,
     parcel_geojson: toLocalFeet(feature.geometry, origin),
+    // The service hands back EPSG:4326; the map wants it untouched.
+    parcel_geojson_wgs84: feature.geometry,
     envelope_geojson: envelopeArea > 0 ? toLocalFeet(envelopeGeometry, origin) : null,
     envelope_area_sqft: envelopeArea > 0 ? envelopeArea : null,
     raw: feature,

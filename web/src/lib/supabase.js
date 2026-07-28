@@ -80,3 +80,24 @@ export async function fetchParcelEnvelope(parcelId, insetFt) {
   if (error) throw error;
   return data?.[0] ?? null;
 }
+
+/**
+ * A municipality's zoning polygons as GeoJSON (EPSG:4326), for the map.
+ * PostGIS does the reprojection and simplification — see migration 0013.
+ */
+export async function fetchZoningGeojson(muniSlug) {
+  const { data, error } = await supabase.rpc("municipality_zoning_geojson", {
+    p_muni_slug: muniSlug,
+  });
+  if (error) throw error;
+  return data ?? [];
+}
+
+/** Where the zoning layer came from and what it does not cover. */
+export async function fetchZoningProvenance(muniSlug) {
+  const { data, error } = await supabase.rpc("municipality_zoning_provenance", {
+    p_muni_slug: muniSlug,
+  });
+  if (error) throw error;
+  return data?.[0] ?? null;
+}
