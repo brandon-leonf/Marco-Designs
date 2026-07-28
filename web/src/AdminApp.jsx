@@ -11,6 +11,9 @@ import {
   saveCostModel,
   createMunicipality,
   createDistrict,
+  municipalityImpact,
+  deleteMunicipality,
+  deleteDistrict,
 } from "./lib/adminApi.js";
 import Logo from "./components/Logo.jsx";
 import { computeBuildable } from "./lib/envelope.js";
@@ -225,6 +228,10 @@ function ConfigEditor({ adminEmail, ready }) {
   const [copied, setCopied] = useState(false);
   const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, district}
   const [newDistrict, setNewDistrict] = useState(null); // null | {code, name}
+  // Destructive actions confirm by typing the name back, and state their
+  // blast radius first — parcels are an NJGIN re-import, not an undo.
+  const [deleteMuni, setDeleteMuni] = useState(null); // null | {typed, impact|null}
+  const [deleteDist, setDeleteDist] = useState(null); // null | {id, code, typed}
   const [draftInfo, setDraftInfo] = useState(null); // {savedAt} when an unpublished local draft is loaded
   const [validation, setValidation] = useState(null); // {issues: [], ok: []}
   const [testLot, setTestLot] = useState({ width: 25, depth: 102, area: 2548 });
@@ -587,6 +594,62 @@ function ConfigEditor({ adminEmail, ready }) {
     }
   };
 
+  /** Open the municipality delete confirm and load what it would take with it. */
+  const startDeleteMuni = async () => {
+    setDeleteMuni({ typed: "", impact: null });
+    setSaveState(null);
+    try {
+      setDeleteMuni({ typed: "", impact: await municipalityImpact(muni.id) });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+      setDeleteMuni(null);
+    }
+  };
+
+  const submitDeleteMuni = async () => {
+    if (deleteMuni?.typed.trim() !== muni.name) return;
+    setSaving(true);
+    setSaveState(null);
+    try {
+      const removed = muni.name;
+      await deleteMunicipality(muni.id);
+      localStorage.removeItem(draftKey(districtId));
+      const data = await reload();
+      const next = data?.[0] ?? null;
+      setMuniId(next?.id ?? null);
+      setDistrictId(next?.zoning_districts[0]?.id ?? null);
+      setDeleteMuni(null);
+      setSaveState({ kind: "ok", text: `${removed} deleted. It no longer appears in the public app.` });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submitDeleteDistrict = async () => {
+    if (!deleteDist || deleteDist.typed.trim().toUpperCase() !== deleteDist.code) return;
+    setSaving(true);
+    setSaveState(null);
+    try {
+      const removed = deleteDist.code;
+      await deleteDistrict(deleteDist.id);
+      localStorage.removeItem(draftKey(deleteDist.id));
+      const data = await reload();
+      const nextMuni = data?.find((m) => m.id === muni.id);
+      setDistrictId(nextMuni?.zoning_districts[0]?.id ?? null);
+      setDeleteDist(null);
+      setSaveState({
+        kind: "ok",
+        text: `District ${removed} deleted. Any zoning polygons that pointed at it now resolve as “rules not loaded” rather than to other rules.`,
+      });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const submitNewDistrict = async () => {
     if (!newDistrict?.code.trim()) {
       setSaveState({ kind: "error", text: "A new district needs a code (e.g. R-2)." });
@@ -732,15 +795,65 @@ function ConfigEditor({ adminEmail, ready }) {
               </button>
             </div>
           </div>
+        ) : deleteMuni ? (
+          <div className="danger-confirm" role="group" aria-label="Delete municipality">
+            <strong>Delete {muni?.name}?</strong>
+            {deleteMuni.impact ? (
+              <ul>
+                <li>{deleteMuni.impact.districts} zoning district(s) and their rules</li>
+                <li>the cost model and all three tier rates</li>
+                <li>{deleteMuni.impact.zoningAreas} zoning polygon(s)</li>
+                <li>
+                  {deleteMuni.impact.parcels.toLocaleString()} imported parcel(s)
+                  {deleteMuni.impact.parcels > 0 && " — restoring these means re-running the NJGIN import"}
+                </li>
+              </ul>
+            ) : (
+              <p className="admin-side-note">Checking what this would remove…</p>
+            )}
+            <label>
+              <span>
+                Type <code>{muni?.name}</code> to confirm
+              </span>
+              <input
+                type="text"
+                value={deleteMuni.typed}
+                onChange={(e) => setDeleteMuni({ ...deleteMuni, typed: e.target.value })}
+              />
+            </label>
+            <div className="inline-create-actions">
+              <button type="button" className="secondary compact" onClick={() => setDeleteMuni(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger compact"
+                disabled={saving || deleteMuni.typed.trim() !== muni?.name}
+                onClick={submitDeleteMuni}
+              >
+                {saving ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </div>
         ) : (
-          <button
-            type="button"
-            className="secondary compact"
-            disabled={!ready}
-            onClick={() => setNewMuni({ name: "", state: "NJ", county: "", district: "R" })}
-          >
-            ＋ New municipality
-          </button>
+          <div className="admin-muni-actions">
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={!ready}
+              onClick={() => setNewMuni({ name: "", state: "NJ", county: "", district: "R" })}
+            >
+              ＋ New municipality
+            </button>
+            <button
+              type="button"
+              className="text-danger compact"
+              disabled={!ready || !muni}
+              onClick={startDeleteMuni}
+            >
+              Delete {muni?.name ?? "municipality"}
+            </button>
+          </div>
         )}
         <div className="admin-about">
           <strong>About this editor</strong>
@@ -820,15 +933,64 @@ function ConfigEditor({ adminEmail, ready }) {
               </button>
             </div>
           </div>
+        ) : deleteDist ? (
+          <div className="danger-confirm" role="group" aria-label="Delete district">
+            <strong>Delete district {deleteDist.code}?</strong>
+            <p className="admin-side-note">
+              Its rules and any draft are removed. Zoning polygons mapped to it stop resolving —
+              parcels there report “rules not loaded” instead of falling back to another district’s
+              rules.
+            </p>
+            <label>
+              <span>
+                Type <code>{deleteDist.code}</code> to confirm
+              </span>
+              <input
+                type="text"
+                value={deleteDist.typed}
+                onChange={(e) => setDeleteDist({ ...deleteDist, typed: e.target.value })}
+              />
+            </label>
+            <div className="inline-create-actions">
+              <button type="button" className="secondary compact" onClick={() => setDeleteDist(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger compact"
+                disabled={saving || deleteDist.typed.trim().toUpperCase() !== deleteDist.code}
+                onClick={submitDeleteDistrict}
+              >
+                {saving ? "Deleting…" : "Delete district"}
+              </button>
+            </div>
+          </div>
         ) : (
-          <button
-            type="button"
-            className="secondary compact"
-            disabled={!ready}
-            onClick={() => setNewDistrict({ code: "", name: "" })}
-          >
-            ＋ Add district
-          </button>
+          <div className="admin-muni-actions">
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={!ready}
+              onClick={() => setNewDistrict({ code: "", name: "" })}
+            >
+              ＋ Add district
+            </button>
+            {/* A municipality with no districts is the empty-shell state the
+                public app already refuses to calculate on. Keep the last one. */}
+            <button
+              type="button"
+              className="text-danger compact"
+              disabled={!ready || !district || (muni?.zoning_districts.length ?? 0) < 2}
+              title={
+                (muni?.zoning_districts.length ?? 0) < 2
+                  ? "A municipality needs at least one district — delete the municipality instead."
+                  : undefined
+              }
+              onClick={() => setDeleteDist({ id: district.id, code: district.code, typed: "" })}
+            >
+              Delete {district?.code ?? "district"}
+            </button>
+          </div>
         )}
       </aside>
 
