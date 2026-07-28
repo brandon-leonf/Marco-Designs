@@ -235,7 +235,9 @@ button { -webkit-tap-highlight-color: transparent; }
 
 .project-assumption,
 .existing-structure {
-  margin: -0.45rem 0 1.35rem;
+  /* Positive top margin: these blocks now follow the property-method links,
+     not a form grid. A negative one pulled the card up over the last link. */
+  margin: 1.35rem 0;
   padding: 0.95rem;
   border: 1px solid var(--info-line);
   border-radius: 11px;
@@ -266,7 +268,7 @@ button { -webkit-tap-highlight-color: transparent; }
 
 /* Optional planned-size input — same framing as the existing-structure block. */
 .planned-size {
-  margin: -0.45rem 0 1.35rem;
+  margin: 1.35rem 0;
   padding: 0.95rem;
   border: 1px solid var(--line);
   border-radius: 11px;
