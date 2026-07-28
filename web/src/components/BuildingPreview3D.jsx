@@ -74,6 +74,10 @@ export default function BuildingPreview3D({
   const groundWidth = completeFloors[0]?.widthFt ?? 0;
   const groundDepth = completeFloors[0]?.depthFt ?? 0;
   const totalHeight = completeFloors.reduce((sum, floor) => sum + floor.heightFt, 0);
+  const proposedAreaSqft = completeFloors.reduce(
+    (sum, floor) => sum + floor.widthFt * floor.depthFt,
+    0
+  );
 
   const scene = useMemo(() => {
     const yaw = (view.yaw * Math.PI) / 180;
@@ -275,6 +279,9 @@ export default function BuildingPreview3D({
             <span>House width <strong>{groundWidth}′</strong></span>
             <span>House depth <strong>{groundDepth}′</strong></span>
             <span>Total height <strong>{fmtNumber(totalHeight)}′</strong></span>
+            <span>
+              Proposed area <strong>{fmtArea(proposedAreaSqft)} sq ft</strong>
+            </span>
           </>
         ) : (
           <span className="building-preview-prompt">Enter the number of floors to preview the house.</span>
@@ -374,6 +381,10 @@ export default function BuildingPreview3D({
                 <span>{fmtArea(floor.widthFt * floor.depthFt)} sq ft</span>
               </li>
             ))}
+            <li className="massing-floor-total">
+              Total proposed build
+              <span>{fmtArea(proposedAreaSqft)} sq ft</span>
+            </li>
           </ol>
           <p className="massing-height-note">
             Total height is the sum of the floor heights entered above; new floors start at{" "}

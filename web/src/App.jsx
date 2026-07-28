@@ -1787,7 +1787,6 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
               }}
             />
           </section>
-          <EngineSteps result={result} district={district} projectType={project?.id} />
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
           {/* ComplianceNotes owns dimensional non-conformity and the height
               limit; the Zoning check card below owns capacity conflicts. Split
@@ -1945,102 +1944,6 @@ function AnswerSummary({ project, muni, parcel, entryMode, parcelSource, distric
  * `farLimited` come straight from the engine, so the UI never re-derives which
  * rule actually governed the answer.
  */
-function EngineSteps({ result, district, projectType }) {
-  const hasExistingHouse = projectType === "addition" || projectType === "adu";
-  const envelopeArea = envelopeAreaOf(result);
-  const coveragePct = district.max_building_coverage_pct;
-  const coverageCap = coveragePct != null ? result.lotArea * (coveragePct / 100) : null;
-
-  const steps = [
-    {
-      label: "Inset by setbacks",
-      value: `${fmt(envelopeArea)} sq ft`,
-      note: `The ${fmt(result.lotArea)} sq ft lot, less the front, side, and rear yards ${district.code} requires. What remains is the buildable envelope.`,
-    },
-    {
-      label: "Apply coverage cap",
-      value: `${fmt(result.footprint)} sq ft`,
-      note:
-        coverageCap == null
-          ? `${district.code} sets no building-coverage limit, so the setback envelope alone governs the footprint.`
-          : `The smaller of the ${fmt(envelopeArea)} sq ft envelope and ${fmt(coverageCap)} sq ft — ${coveragePct}% of the lot.`,
-      flag:
-        coverageCap == null
-          ? null
-          : result.binding === "coverage"
-            ? "Coverage limit binds first"
-            : "Setbacks bind first",
-    },
-    {
-      label: "Multiply by stories",
-      value: `${fmt(result.buildable)} sq ft`,
-      note: `${fmt(result.footprint)} sq ft footprint × ${result.stories} ${
-        Number(result.stories) === 1 ? "story" : "stories"
-      } allowed in ${district.code}${
-        district.max_far != null ? `, then capped by the ${district.max_far} floor-area ratio` : ""
-      }.`,
-      flag: result.heightLimited
-        ? "Height limit binds before the permitted story count"
-        : result.farLimited
-          ? `Floor-area ratio binds`
-          : null,
-      // resolveStories() converts the height limit into a story count using a
-      // fixed floor-to-floor assumption. That assumption is stated here rather
-      // than buried in the number, since a tall-ceiling design changes it.
-      caution:
-        district.max_height_ft != null
-          ? `${district.code} limits height to ${fmt(district.max_height_ft)} ft, which fits about ${
-              result.storiesByHeight
-            } floors at the ${FLOOR_TO_FLOOR_FT} ft floor-to-floor this tool assumes${
-              result.heightLimited
-                ? ` — fewer than the ${result.permittedStories} stories the district permits, so height is what governs above.`
-                : `. The permitted story count governs above. A tall-ceiling design could hit the height limit sooner.`
-            }`
-          : null,
-    },
-  ];
-
-  if (hasExistingHouse) {
-    const pending = result.availableBuildingArea == null;
-    steps.push({
-      label: "Subtract existing",
-      value: pending ? "—" : `${fmt(result.availableBuildingArea)} sq ft`,
-      pending,
-      note: pending
-        ? "Enter the existing number of stories or total floor area on the previous step to complete this calculation."
-        : `${fmt(result.buildable)} sq ft permitted, less ${fmt(result.existingArea)} sq ft of existing floor area${
-            result.existingAreaSource === "footprint_times_stories" ? " (estimated from footprint × stories)" : ""
-          }.`,
-      footprintNote: `Ground floor: ${fmt(result.footprint)} sq ft permitted − ${fmt(
-        result.existingFootprint
-      )} sq ft existing = ${fmt(result.availableFootprint)} sq ft of additional footprint.`,
-    });
-  }
-
-  return (
-    <>
-      <h4 className="engine-heading">How this number is calculated</h4>
-      <ol className="engine-steps">
-        {steps.map((item, index) => (
-          <li className={item.pending ? "engine-step pending" : "engine-step"} key={item.label}>
-            <span className="engine-step-num" aria-hidden="true">{index + 1}</span>
-            <div className="engine-step-body">
-              <div className="engine-step-head">
-                <strong>{item.label}</strong>
-                <b>{item.value}</b>
-              </div>
-              <span>{item.note}</span>
-              {item.footprintNote && <span>{item.footprintNote}</span>}
-              {item.caution && <span className="engine-caution">{item.caution}</span>}
-              {item.flag && <em className="engine-flag">{item.flag}</em>}
-            </div>
-          </li>
-        ))}
-      </ol>
-    </>
-  );
-}
-
 /**
  * Plain-language review of the lot against the district's loaded rules. Only
  * checks backed by fields that actually exist in the district record are

@@ -1508,3 +1508,11 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 .map-dialog-search ul.results { max-height: 18rem; background: #fff; }
 .map-dialog-apply { margin-top: 1rem; }
 .zoning-map.expanded .zoning-map-canvas { height: min(62vh, 680px); min-height: 460px; }
+
+/* Total closing the per-floor list — the figure the client came for. */
+.massing-floor-total {
+  font-weight: 800;
+  color: var(--nav);
+  border-top: 1px solid var(--line-strong) !important;
+}
+.massing-floor-total span { color: var(--nav); font-weight: 800; }
