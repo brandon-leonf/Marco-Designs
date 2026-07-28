@@ -11,6 +11,10 @@ import {
   computeBuildableFromAreas,
   conservativeInsetFt,
   recordedRectDims,
+  missingDistrictRules,
+  lotViolations,
+  aduRules,
+  FLOOR_TO_FLOOR_FT,
 } from "./lib/envelope.js";
 import {
   fetchNjginParcel,
@@ -171,6 +175,9 @@ export default function App() {
   // The live NJGIN feature, kept so changing the district re-insets the
   // envelope without another round trip to the service.
   const [njginFeature, setNjginFeature] = useState(null);
+  // Marco's guide calls Signature "our most popular level", so it starts
+  // selected. The client's choice drives the report and the contingency.
+  const [selectedTier, setSelectedTier] = useState("signature");
 
   useEffect(() => {
     if (!supabase) return;
@@ -318,8 +325,18 @@ export default function App() {
     setParcel(njginParcelFromFeature(njginFeature, district ? conservativeInsetFt(district) : 0));
   }, [district, njginFeature, parcelSource]);
 
+  // A district with unfilled rules cannot produce a trustworthy answer, so the
+  // calculation is refused rather than run against nulls (which would read as
+  // "no setbacks, no coverage limit" and report the whole lot as buildable).
+  const missingRules = useMemo(() => missingDistrictRules(district), [district]);
+  const rulesReady = Boolean(district) && missingRules.length === 0;
+  // A district that records ADUs as not permitted answers the client's
+  // question outright; pricing one would contradict the ordinance on file.
+  const adu = useMemo(() => aduRules(district), [district]);
+  const aduBlocked = projectType === "adu" && adu.known && !adu.allowed;
+
   const result = useMemo(() => {
-    if (!district) return null;
+    if (!district || missingRules.length > 0) return null;
     let zoningResult = null;
     if (entryMode === "search" && parcel) {
       const envelopeArea =
@@ -372,11 +389,23 @@ export default function App() {
     const availableFootprint = Math.max(0, zoningResult.footprint - existingFootprint);
     const availableBuildingArea = existingArea == null ? null : Math.max(0, zoningResult.buildable - existingArea);
 
+    // An ADU is capped by the district's own size limit, not just by what is
+    // left over on the lot. Without this the tool quotes the full remaining
+    // capacity for a unit the ordinance would not allow at that size.
+    const adu = aduRules(district);
+
     // The zoning ceilings this project is measured against. maxArea is null for
     // an addition/ADU whose existing floor area is not yet known.
-    const maxArea = hasExistingHouse ? availableBuildingArea : zoningResult.buildable;
+    let maxArea = hasExistingHouse ? availableBuildingArea : zoningResult.buildable;
+    let aduSizeCapped = false;
+    if (projectType === "adu" && adu.maxSizeSqft != null && maxArea != null && maxArea > adu.maxSizeSqft) {
+      maxArea = adu.maxSizeSqft;
+      aduSizeCapped = true;
+    }
     const maxFootprint = hasExistingHouse ? availableFootprint : zoningResult.footprint;
-    const maxFloors = district.max_stories ?? null;
+    // The effective story count, already capped by the height limit in
+    // resolveStories — not district.max_stories, which ignores height.
+    const maxFloors = zoningResult.stories ?? null;
 
     // The client's planned building, floor by floor, reduced to comparable
     // figures. When present, the total drives cost; otherwise the ceiling does.
@@ -411,8 +440,10 @@ export default function App() {
       fitsPlan,
       planDelta,
       estimateArea: planned ?? maxArea,
+      aduSizeCapped,
+      aduMaxSizeSqft: adu.maxSizeSqft,
     };
-  }, [district, entryMode, existingStructure, lot, parcel, plannedFloors, projectType]);
+  }, [district, missingRules, entryMode, existingStructure, lot, parcel, plannedFloors, projectType]);
 
   const project = PROJECT_TYPES.find((item) => item.id === projectType);
   const manualInputsValid =
@@ -445,9 +476,11 @@ export default function App() {
   // property, then the questions that depend on a resolved property. Each gate
   // below is also what unlocks the next section, so a user is never blocked by
   // a question they have not been shown yet.
-  const propertyReady = Boolean(projectType && district && locationReady);
+  // `rulesReady` refuses a district whose rules are only partly filled in, and
+  // `aduBlocked` refuses an ADU the district records as not permitted.
+  const propertyReady = Boolean(projectType && district && rulesReady && locationReady);
   const canCalculate = Boolean(
-    propertyReady && structureReady && existingInputsValid && result
+    propertyReady && structureReady && existingInputsValid && !aduBlocked && result
   );
 
   const goToStep = (next) => {
@@ -535,7 +568,7 @@ export default function App() {
       <Stepper step={step} maxStepReached={maxStepReached} onStep={goToStep} />
 
       {error && <div className="card error">Failed to load data: {error}</div>}
-      {!error && !munis && <div className="card loading-card">Loading Union City property data…</div>}
+      {!error && !munis && <div className="card loading-card">Loading property data…</div>}
 
       {munis && step === 1 && (
         <ProjectSetup
@@ -555,6 +588,9 @@ export default function App() {
           existingStructure={existingStructure}
           locationReady={locationReady}
           propertyReady={propertyReady}
+          missingRules={missingRules}
+          adu={adu}
+          aduBlocked={aduBlocked}
           canContinue={canCalculate}
           previewProps={previewProps}
           onProjectType={setProjectType}
@@ -609,6 +645,9 @@ export default function App() {
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
+          selectedTier={selectedTier}
+          onSelectTier={setSelectedTier}
+          adu={adu}
           onBack={() => goToStep(2)}
           onContinue={() => advance(4)}
         />
@@ -623,6 +662,7 @@ export default function App() {
           parcel={entryMode === "search" ? parcel : null}
           result={result}
           costModel={costModel}
+          selectedTier={selectedTier}
           onBack={() => goToStep(3)}
         />
       )}
@@ -716,6 +756,9 @@ function ProjectSetup({
   existingStructure,
   locationReady,
   propertyReady,
+  missingRules,
+  adu,
+  aduBlocked,
   canContinue,
   previewProps,
   onProjectType,
@@ -1031,6 +1074,9 @@ function ProjectSetup({
           </div>
         )}
 
+        <RulesMissingNotice missing={missingRules} muniName={muni?.name} districtCode={district?.code} />
+        <AduNotPermittedNotice show={aduBlocked} muniName={muni?.name} districtCode={district?.code} />
+
         <SurveyNotice />
 
         <button type="button" className="primary full" disabled={!canContinue} onClick={onContinue}>
@@ -1065,7 +1111,7 @@ function PropertyPreview({
   return (
     <aside className="card preview-card">
       <p className="eyebrow">Property preview</p>
-      <h2>{parcel?.address ?? parcelPick?.address ?? "Union City lot"}</h2>
+      <h2>{parcel?.address ?? parcelPick?.address ?? `${muni?.name ?? "Selected"} lot`}</h2>
       <p className="preview-note">Diagram is for reference only and is not a survey.</p>
       {parcel ? (
         <>
@@ -1186,7 +1232,7 @@ function ZoningCheckNotice({ check, live, muni, ready }) {
   }
 
   const messages = {
-    no_layer: "Union City’s machine-readable zoning polygons have not been loaded. Calculation is disabled rather than assuming a district.",
+    no_layer: `${muni?.name ?? "This municipality"}’s machine-readable zoning polygons have not been loaded. Calculation is disabled rather than assuming a district.`,
     unmapped: "This parcel does not intersect the loaded municipal zoning layer. Calculation is disabled pending review.",
     boundary_conflict: `This parcel intersects multiple districts${check.competing_codes?.length ? ` (${check.competing_codes.join(", ")})` : ""}. Municipal review is required.`,
     rules_missing: `The parcel is in district ${check.district_code ?? "unknown"}, but that district’s rules are not loaded yet.`,
@@ -1235,6 +1281,53 @@ function structureReadyFromInputs(projectType, existingStructure) {
   );
 }
 
+/**
+ * Refuses the calculation when a municipality's district is only partly
+ * filled in. Without this, null rules read as zeros and the tool reports the
+ * entire lot as buildable — a confident wrong answer is worse than none.
+ */
+function RulesMissingNotice({ missing, muniName, districtCode }) {
+  if (!missing || missing.length === 0) return null;
+  return (
+    <div className="zoning-check blocked" role="alert">
+      <strong>Zoning rules are not loaded for this municipality</strong>
+      <span>
+        {muniName ?? "This municipality"}
+        {districtCode ? ` district ${districtCode}` : ""} is missing its {listPhrase(missing)}.
+        Calculation is disabled until those rules are entered — an incomplete
+        configuration would report the whole lot as buildable.
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The district records ADUs as not permitted. That is the answer to the
+ * client's question — quoting a price for one would contradict the ordinance
+ * on file. A variance is possible, but that is the municipality's call.
+ */
+function AduNotPermittedNotice({ show, muniName, districtCode }) {
+  if (!show) return null;
+  return (
+    <div className="zoning-check blocked" role="alert">
+      <strong>ADUs are not a permitted use in this district</strong>
+      <span>
+        {muniName ?? "This municipality"}
+        {districtCode ? ` district ${districtCode}` : ""} records accessory dwelling units as not
+        permitted, so no ADU capacity or cost is calculated. If you believe a variance or a recent
+        ordinance change applies, confirm with {muniName ?? "the municipality"} — or choose Addition
+        to see what you can add to the existing house.
+      </span>
+    </div>
+  );
+}
+
+function listPhrase(items) {
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
 function SurveyNotice() {
   return (
     <div className="survey-notice" role="note">
@@ -1274,8 +1367,9 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
   };
   const plannedTotal = result.plannedArea;
   // Flag an over-limit floor count as soon as it is entered — before any floor
-  // sizes exist — so the user gets the error at the point of the mistake.
-  const maxFloors = district.max_stories ?? null;
+  // sizes exist — so the user gets the error at the point of the mistake. The
+  // engine's count, already capped by the height limit, is the real ceiling.
+  const maxFloors = result.maxFloors ?? null;
   const floorsExceeded = maxFloors != null && plannedFloors.length > maxFloors;
 
   return (
@@ -1297,11 +1391,15 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
               <strong>{fmt(footprintValue)} <em>sq ft</em></strong>
               <small>The ground area you can build on.</small>
             </div>
-            {district.max_stories != null && (
+            {maxFloors != null && (
               <div>
                 <span>Maximum floors</span>
-                <strong>{district.max_stories}</strong>
-                <small>Stories permitted in {district.code}.</small>
+                <strong>{maxFloors}</strong>
+                <small>
+                  {result.heightLimited
+                    ? `What the ${fmt(district.max_height_ft)} ft height limit fits in ${district.code}.`
+                    : `Stories permitted in ${district.code}.`}
+                </small>
               </div>
             )}
             <div>
@@ -1404,7 +1502,7 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
   );
 }
 
-function Results({ project, muni, district, lot, entryMode, parcelSource, parcel, result, costModel, onBack, onContinue }) {
+function Results({ project, muni, district, lot, entryMode, parcelSource, parcel, result, costModel, selectedTier, onSelectTier, adu, onBack, onContinue }) {
   return (
     <>
       <section className="results-heading">
@@ -1432,11 +1530,31 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
           <EngineSteps result={result} district={district} projectType={project?.id} />
           <PlanFeasibility result={result} projectType={project?.id} />
           <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
-          {/* The rectangular-fallback note has no equivalent below, so it stays
-              here. The capacity, ADU, and prevailing-setback warnings that came
-              with it do — zoningFindings and zoningCaveats already report all
-              three in the Zoning check card, and saying them twice in one
-              report reads as two separate problems. */}
+          {/* ComplianceNotes owns dimensional non-conformity and the height
+              limit; the Zoning check card below owns capacity conflicts. Split
+              that way so no finding is reported twice in one report — the
+              capacity warning that used to sit here is a zoningFindings entry. */}
+          <ComplianceNotes district={district} lot={lot} parcel={parcel} result={result} muniName={muni.name} />
+          {project?.id === "adu" && (
+            <div className="adu-result-note">
+              {result.aduSizeCapped ? (
+                <>
+                  Capped at district {district.code}’s {fmt(result.aduMaxSizeSqft)} sq ft ADU size
+                  limit — the lot itself could take{" "}
+                  {fmt(result.availableBuildingArea)} sq ft.
+                </>
+              ) : (
+                <>This is the property’s remaining zoning capacity—not confirmation that an ADU of this size is permitted.</>
+              )}
+              {adu?.known && adu.allowed && (
+                <span className="adu-conditions">
+                  {adu.detachedAllowed === false && " A detached ADU is not permitted here."}
+                  {adu.detachedAllowed === true && " Detached ADUs are permitted."}
+                  {adu.parkingRequired === true && " Off-street parking is required."}
+                </span>
+              )}
+            </div>
+          )}
           {result.approximation && (
             <p className="fine">
               The uniform polygon inset collapses on this narrow lot, so figures use the recorded{" "}
@@ -1446,7 +1564,13 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
           )}
         </div>
 
-        <CostCard result={result} costModel={costModel} projectType={project?.id} />
+        <CostCard
+          result={result}
+          costModel={costModel}
+          projectType={project?.id}
+          selectedTier={selectedTier}
+          onSelectTier={onSelectTier}
+        />
 
         <ZoningCheck
           result={result}
@@ -1593,19 +1717,26 @@ function EngineSteps({ result, district, projectType }) {
       value: `${fmt(result.buildable)} sq ft`,
       note: `${fmt(result.footprint)} sq ft footprint × ${result.stories} ${
         Number(result.stories) === 1 ? "story" : "stories"
-      } permitted in ${district.code}${
+      } allowed in ${district.code}${
         district.max_far != null ? `, then capped by the ${district.max_far} floor-area ratio` : ""
       }.`,
-      flag: result.farLimited ? `Floor-area ratio binds` : null,
-      // The diagram caps this step by height as well as FAR. The engine does
-      // not yet: converting a height limit into a story count needs a
-      // floor-to-floor assumption we have not been given, and inventing one
-      // would be exactly the false precision the brief warns against.
+      flag: result.heightLimited
+        ? "Height limit binds before the permitted story count"
+        : result.farLimited
+          ? `Floor-area ratio binds`
+          : null,
+      // resolveStories() converts the height limit into a story count using a
+      // fixed floor-to-floor assumption. That assumption is stated here rather
+      // than buried in the number, since a tall-ceiling design changes it.
       caution:
         district.max_height_ft != null
-          ? `${district.code} also limits height to ${fmt(
-              district.max_height_ft
-            )} ft. That limit is not applied here — the story count alone governs this figure. A tall-ceiling design could hit the height limit before the third story.`
+          ? `${district.code} limits height to ${fmt(district.max_height_ft)} ft, which fits about ${
+              result.storiesByHeight
+            } floors at the ${FLOOR_TO_FLOOR_FT} ft floor-to-floor this tool assumes${
+              result.heightLimited
+                ? ` — fewer than the ${result.permittedStories} stories the district permits, so height is what governs above.`
+                : `. The permitted story count governs above. A tall-ceiling design could hit the height limit sooner.`
+            }`
           : null,
     },
   ];
@@ -1669,38 +1800,9 @@ function zoningFindings({ result, district, lot, entryMode, projectType, muni })
     });
   }
 
-  if (district.min_lot_area_sqft != null && result.lotArea < Number(district.min_lot_area_sqft)) {
-    findings.push({
-      level: "warning",
-      title: "The lot is smaller than the district minimum",
-      detail: `This lot is ${fmt(result.lotArea)} sq ft, below the ${fmt(
-        district.min_lot_area_sqft
-      )} sq ft ${district.code} requires. It is most likely a pre-existing non-conforming lot, which can limit what may be built without a variance.`,
-    });
-  }
-
-  // Width and depth are only known when the dimensions were typed in. The
-  // parcel path works from a polygon, which has no single meaningful frontage.
-  if (entryMode === "manual") {
-    if (district.min_lot_width_ft != null && Number(lot.width_ft) < Number(district.min_lot_width_ft)) {
-      findings.push({
-        level: "warning",
-        title: "The lot is narrower than the district minimum",
-        detail: `The entered width of ${fmt(lot.width_ft)} ft is below the ${fmt(
-          district.min_lot_width_ft
-        )} ft minimum for ${district.code}. Narrow lots frequently need side-yard relief.`,
-      });
-    }
-    if (district.min_lot_depth_ft != null && Number(lot.depth_ft) < Number(district.min_lot_depth_ft)) {
-      findings.push({
-        level: "warning",
-        title: "The lot is shallower than the district minimum",
-        detail: `The entered depth of ${fmt(lot.depth_ft)} ft is below the ${fmt(
-          district.min_lot_depth_ft
-        )} ft minimum for ${district.code}.`,
-      });
-    }
-  }
+  // Lot area, width, and depth minimums are not checked here. ComplianceNotes
+  // reports them from lotViolations(), which covers the parcel path as well as
+  // manual entry — repeating them would read as two separate problems.
 
   if (hasExistingHouse && result.existingFootprint > 0 && result.availableFootprint === 0) {
     findings.push({
@@ -1759,9 +1861,9 @@ function ZoningCheck({ result, district, lot, entryMode, projectType, muni }) {
         <div className="finding clear">
           <strong>No conflicts found in the rules we check.</strong>
           <span>
-            Lot minimums, setbacks, coverage, story count, and floor-area ratio are all satisfied by the figures
-            above. This covers the loaded zoning rules only — not permitted uses, overlay or historic districts,
-            flood zones, easements, or deed restrictions.
+            Setbacks, coverage, story count, height, and floor-area ratio are all satisfied by the figures above;
+            lot minimums are reported with the property details. This covers the loaded zoning rules only — not
+            permitted uses, overlay or historic districts, flood zones, easements, or deed restrictions.
           </span>
         </div>
       ) : (
@@ -1782,6 +1884,54 @@ function ZoningCheck({ result, district, lot, entryMode, projectType, muni }) {
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * Plain-language compliance flags: dimensional non-conformities against the
+ * district minimums, and the height limit when it governs instead of the
+ * permitted story count.
+ */
+function ComplianceNotes({ district, lot, parcel, result, muniName }) {
+  const measured = parcel
+    ? {
+        areaSqft: Number(parcel.lot_area_sqft) || null,
+        widthFt: Number(parcel.lot_frontage_ft) || null,
+        depthFt: Number(parcel.lot_depth_ft) || null,
+      }
+    : { areaSqft: Number(lot.area_sqft) || null, widthFt: Number(lot.width_ft) || null, depthFt: Number(lot.depth_ft) || null };
+  const violations = lotViolations(district, measured);
+
+  if (violations.length === 0 && !result.heightLimited) return null;
+
+  return (
+    <div className="compliance-notes">
+      {violations.length > 0 && (
+        <div className="compliance-flag" role="note">
+          <strong>Non-conforming lot — {violations.length === 1 ? "1 minimum not met" : `${violations.length} minimums not met`}</strong>
+          <ul>
+            {violations.map((v) => (
+              <li key={v.label}>
+                {v.label} is {fmt(v.value)} {v.unit}; district {district.code} requires at least{" "}
+                {fmt(v.min)} {v.unit}.
+              </li>
+            ))}
+          </ul>
+          <span>
+            Undersized lots of record can often still be built on, but the allowance is{" "}
+            {muniName}’s determination — confirm before relying on these figures.
+          </span>
+        </div>
+      )}
+      {result.heightLimited && (
+        <p className="fine">
+          The {fmt(district.max_height_ft)} ft height limit governs: it fits about{" "}
+          {result.storiesByHeight} floor{result.storiesByHeight === 1 ? "" : "s"} at{" "}
+          {FLOOR_TO_FLOOR_FT} ft floor-to-floor, fewer than the {result.permittedStories} stories
+          the district permits. Figures use {result.stories}.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -1946,7 +2096,7 @@ function structureLocationLabel(location) {
   }[location] ?? "Not sure";
 }
 
-function CostCard({ result, costModel, projectType }) {
+function CostCard({ result, costModel, projectType, selectedTier, onSelectTier }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
   const usingPlanned = result.plannedArea != null;
   const maxLabel = projectType === "adu" ? "potential ADU capacity" : hasExistingHouse ? "remaining addition capacity" : "total allowable area";
@@ -1989,43 +2139,104 @@ function CostCard({ result, costModel, projectType }) {
         </div>
       )}
       {costModel && result.estimateArea != null && (
-        <div className="cost-tiers">
+        <>
+        <div className="cost-tiers" role="radiogroup" aria-label="Build level">
           {TIER_ORDER.map((tierName) => {
             const tier = costModel.build_cost_tiers.find((item) => item.tier === tierName);
             if (!tier) return null;
             const hasRange = tier.rate_per_sqft_max != null;
+            const selected = tierName === selectedTier;
             return (
-              <div className="cost-tier" key={tierName}>
-                <div>
-                  <strong>{TIER_LABELS[tierName]}</strong>
-                  <span className="tier-desc">{TIER_DESCRIPTIONS[tierName]}</span>
-                  <span className="tier-rate">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className={selected ? "cost-tier selected" : "cost-tier"}
+                onClick={() => onSelectTier?.(tierName)}
+                key={tierName}
+              >
+                <div className="cost-tier-head">
+                  <div>
+                    <strong>
+                      <span className="tier-mark" aria-hidden="true" />
+                      {TIER_LABELS[tierName]}
+                    </strong>
+                    <span className="tier-desc">{TIER_DESCRIPTIONS[tierName]}</span>
+                    <span className="tier-rate">
+                      {hasRange
+                        ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
+                        : `$${fmt(tier.rate_per_sqft, 2)} / sq ft`}
+                    </span>
+                  </div>
+                  <b>
                     {hasRange
-                      ? `$${fmt(tier.rate_per_sqft, 2)}–$${fmt(tier.rate_per_sqft_max, 2)} / sq ft`
-                      : `$${fmt(tier.rate_per_sqft, 2)} / sq ft`}
-                  </span>
-                  {tier.notes && <small className="tier-notes">{tier.notes}</small>}
+                      ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
+                      : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`}
+                  </b>
                 </div>
-                <b>
-                  {hasRange
-                    ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
-                    : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`}
-                </b>
-              </div>
+                {tier.notes && <p className="tier-notes">{tier.notes}</p>}
+              </button>
             );
           })}
         </div>
+        <p className="tier-hint">
+          Select a build level to carry it through to your report.
+        </p>
+        </>
       )}
       {costModel?.provenance === "estimated" && result.estimateArea != null && (
         <p className="fine">
           Based on a ${fmt(costModel.regional_baseline_per_sqft, 2)}/sq ft regional baseline × {costModel.local_cost_factor} local factor.
         </p>
       )}
+      <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} selectedTier={selectedTier} />
     </div>
   );
 }
 
-function Review({ project, muni, district, lot, parcel, result, costModel, onBack }) {
+/**
+ * The boundary around the number. A per-square-foot price covers the house
+ * itself; land, site work, design, permits and a contingency reserve are all
+ * separate. Without this the total reads as the whole project cost, which is
+ * the exact surprise the estimate exists to prevent.
+ */
+function CostScope({ scope, estimateArea, costModel, selectedTier }) {
+  if (!scope) return null;
+  const includes = scope.includes ?? [];
+  const excludes = scope.excludes ?? [];
+  const pct = scope.contingency_pct;
+
+  // Contingency is a share of construction cost, so it follows the build
+  // level the client selected.
+  const chosen = costModel?.build_cost_tiers?.find((t) => t.tier === selectedTier);
+  const base = chosen && estimateArea != null ? estimateArea * Number(chosen.rate_per_sqft) : null;
+
+  return (
+    <div className="cost-scope">
+      <div className="cost-scope-cols">
+        <div>
+          <strong>What this price includes</strong>
+          <ul>{includes.map((item) => <li key={item}>{item}</li>)}</ul>
+        </div>
+        <div>
+          <strong>Billed separately</strong>
+          <ul>
+            {excludes.map((item) => <li key={item}>{item}</li>)}
+            {pct && (
+              <li>
+                A contingency reserve — {pct.min}–{pct.max}% recommended
+                {base != null && ` (about $${fmt((base * pct.min) / 100)}–$${fmt((base * pct.max) / 100)})`}
+              </li>
+            )}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Review({ project, muni, district, lot, parcel, result, costModel, selectedTier, onBack }) {
+  const chosenTier = costModel?.build_cost_tiers.find((item) => item.tier === selectedTier);
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
   return (
     <>
@@ -2084,32 +2295,26 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
               </strong>
             </div>
           )}
-          {/* All three tiers, each carrying the range and the provenance flag:
+          {/* The client's selected build level, carrying the provenance flag:
               the printed report is where a reader is most likely to mistake a
-              projection for a quote, so the label travels with every price. */}
-          {TIER_ORDER.map((tierName) => {
-            const tier = costModel?.build_cost_tiers.find((item) => item.tier === tierName);
-            const hasRange = tier?.rate_per_sqft_max != null;
-            return (
-              <div key={tierName}>
-                <span>
-                  {TIER_LABELS[tierName]} estimate
-                  {costModel && (
-                    <span className={`provenance-flag inline ${costModel.provenance}`}>
-                      {costModel.provenance === "verified" ? "✓ Verified" : "✕ Estimated"}
-                    </span>
-                  )}
+              projection for a quote, so the label travels with the price. */}
+          <div>
+            <span>
+              {TIER_LABELS[selectedTier]} cost estimate
+              {costModel && (
+                <span className={`provenance-flag inline ${costModel.provenance}`}>
+                  {costModel.provenance === "verified" ? "✓ Verified" : "✕ Estimated"}
                 </span>
-                <strong>
-                  {tier && result.estimateArea != null
-                    ? hasRange
-                      ? `$${fmt(result.estimateArea * tier.rate_per_sqft)} – $${fmt(result.estimateArea * tier.rate_per_sqft_max)}`
-                      : `$${fmt(result.estimateArea * tier.rate_per_sqft)}`
-                    : "Needs floor-area input"}
-                </strong>
-              </div>
-            );
-          })}
+              )}
+            </span>
+            <strong>
+              {chosenTier && result.estimateArea != null
+                ? chosenTier.rate_per_sqft_max != null
+                  ? `$${fmt(result.estimateArea * chosenTier.rate_per_sqft)} – $${fmt(result.estimateArea * chosenTier.rate_per_sqft_max)}`
+                  : `$${fmt(result.estimateArea * chosenTier.rate_per_sqft)}`
+                : "Needs floor-area input"}
+            </strong>
+          </div>
           {parcel ? (
             <div><span>Block / Lot</span><strong>{parcel.block ?? "—"} / {parcel.lot ?? "—"}</strong></div>
           ) : (
@@ -2119,13 +2324,20 @@ function Review({ project, muni, district, lot, parcel, result, costModel, onBac
         <SurveyNotice />
         {project?.id === "adu" && (
           <p className="adu-review-note">
-            ADU capacity is preliminary. Union City must confirm that an ADU is permitted and determine applicable size,
+            ADU capacity is preliminary. {muni.name} must confirm that an ADU is permitted and determine applicable size,
             location, setback, parking, utility, and occupancy requirements.
           </p>
         )}
+        <CostScope scope={costModel?.cost_scope} estimateArea={result.estimateArea} costModel={costModel} selectedTier={selectedTier} />
         <p className="report-disclaimer">
           This report is for early planning only. It is not a zoning determination, site plan, survey, architectural drawing,
-          construction estimate, or approval to build. Confirm requirements with Union City and licensed professionals.
+          construction estimate, or approval to build. Confirm requirements with {muni.name} and licensed professionals.
+        </p>
+        <p className="report-licenses">
+          Figures are planning estimates for discussion purposes and are not a quote or contract. Final pricing is set
+          by your approved design and selections.
+          <br />
+          Marco Design LLC · NJ New Home Builder Lic. #0053907 · NJ Home Improvement Lic. #13VH12052000
         </p>
       </section>
       <div className="actions no-print">
