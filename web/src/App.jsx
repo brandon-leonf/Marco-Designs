@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
   supabase,
   fetchMunicipalities,
@@ -23,6 +23,9 @@ import {
 } from "./lib/njgin.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import ParcelPlan from "./components/ParcelPlan.jsx";
+// Leaflet is a large dependency for one panel, so the map is split out of
+// the main bundle and fetched when a municipality is actually shown.
+const ZoningMap = lazy(() => import("./components/ZoningMap.jsx"));
 import Logo from "./components/Logo.jsx";
 
 // Marketing names and copy for the build-quality levels. The ids are the
@@ -544,11 +547,14 @@ export default function App() {
   // the project type, so the opening question is never crowded by a diagram of
   // the default lot.
   const previewProps = {
+    // Once a municipality is chosen there is something worth showing — its
+    // zoning map — so the panel opens then rather than waiting for a parcel.
+    // The map is the orientation; the address narrows it.
     visible:
       !projectType
         ? false
         : entryMode === "search"
-          ? Boolean(parcelPick)
+          ? Boolean(muni)
           : Number(lot.width_ft) > 0 && Number(lot.depth_ft) > 0 && Number(lot.area_sqft) > 0,
     muni,
     district,
@@ -1115,6 +1121,16 @@ function PropertyPreview({
       <p className="eyebrow">Property preview</p>
       <h2>{parcel?.address ?? parcelPick?.address ?? `${muni?.name ?? "Selected"} lot`}</h2>
       <p className="preview-note">Diagram is for reference only and is not a survey.</p>
+      {muni?.slug && (
+        <Suspense fallback={<div className="preview-placeholder">Loading the zoning map…</div>}>
+          <ZoningMap
+            muniSlug={muni.slug}
+            muniName={muni.name}
+            parcelGeojson={parcel?.parcel_geojson_wgs84 ?? null}
+            parcelLabel={parcel?.address ?? parcelPick?.address}
+          />
+        </Suspense>
+      )}
       {parcel ? (
         <>
           <ParcelPlan parcelGeojson={parcel.parcel_geojson} envelopeGeojson={parcel.envelope_geojson} />
