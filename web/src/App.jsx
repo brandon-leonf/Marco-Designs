@@ -1787,12 +1787,6 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
               }}
             />
           </section>
-          <PropertyTable parcel={parcel} result={result} district={district} projectType={project?.id} />
-          {/* ComplianceNotes owns dimensional non-conformity and the height
-              limit; the Zoning check card below owns capacity conflicts. Split
-              that way so no finding is reported twice in one report — the
-              capacity warning that used to sit here is a zoningFindings entry. */}
-          <ComplianceNotes district={district} lot={lot} parcel={parcel} result={result} muniName={muni.name} />
           {project?.id === "adu" && (
             <div className="adu-result-note">
               {result.aduSizeCapped ? (
@@ -1813,13 +1807,6 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
               )}
             </div>
           )}
-          {result.approximation && (
-            <p className="fine">
-              The uniform polygon inset collapses on this narrow lot, so figures use the recorded{" "}
-              {fmt(result.approximation.widthFt)}′ × {fmt(result.approximation.depthFt)}′ lot
-              rectangle with per-edge setbacks. A survey must confirm the true envelope.
-            </p>
-          )}
         </div>
 
         <CostCard
@@ -1830,25 +1817,6 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
           onSelectTier={onSelectTier}
         />
 
-        <ZoningCheck
-          result={result}
-          district={district}
-          lot={lot}
-          entryMode={entryMode}
-          projectType={project?.id}
-          muni={muni}
-        />
-
-        <AnswerSummary
-          project={project}
-          muni={muni}
-          parcel={parcel}
-          entryMode={entryMode}
-          parcelSource={parcelSource}
-          district={district}
-          result={result}
-          costModel={costModel}
-        />
       </div>
 
       <SurveyNotice />
