@@ -1757,11 +1757,16 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
         <span className="preliminary-badge">Preliminary</span>
       </section>
 
-      {/* Order matches the flow diagram: the engine's four steps, then cost
-          across the three tiers, then the zoning check, then the answer. */}
-      <div className="results-flow">
+      {/* Two panels, matching step 2: the choice on the left, what the choice
+          applies to on the right. Prices are deliberately absent here — the
+          level is picked on what it is, and the figures follow in the report. */}
+      <section className="workspace-grid">
+        <BuildLevelPicker
+          costModel={costModel}
+          selectedTier={selectedTier}
+          onSelectTier={onSelectTier}
+        />
         <div className="card result-card">
-          <h3>{projectResultTitle(project?.id)}</h3>
           <section className="result-3d-preview" aria-label="3D property preview">
             <p className="eyebrow">3D property preview</p>
             <h3>{parcel?.address ?? `${muni.name}, ${muni.state_code}`}</h3>
@@ -1808,16 +1813,7 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
             </div>
           )}
         </div>
-
-        <CostCard
-          result={result}
-          costModel={costModel}
-          projectType={project?.id}
-          selectedTier={selectedTier}
-          onSelectTier={onSelectTier}
-        />
-
-      </div>
+      </section>
 
       <SurveyNotice />
       <div className="actions">
@@ -2170,6 +2166,82 @@ function structureLocationLabel(location) {
     rear: "Toward rear of lot",
     unsure: "Not sure",
   }[location] ?? "Not sure";
+}
+
+/**
+ * Step 3's left panel: pick a build level on what it is, not what it costs.
+ *
+ * Prices are deliberately withheld here so the choice is made on scope and
+ * finish — the figures follow in the report, against the level chosen. The
+ * inclusion list is shared across levels: it describes what a per-square-foot
+ * price covers at any level, which is exactly the boundary a client needs
+ * before comparing them.
+ */
+function BuildLevelPicker({ costModel, selectedTier, onSelectTier }) {
+  const scope = costModel?.cost_scope;
+  return (
+    <div className="card form-card build-level-picker">
+      <div className="section-heading">
+        <span className="section-icon" aria-hidden="true">$</span>
+        <div>
+          {/* No step eyebrow: the page heading above already says Step 3. */}
+          <h2>Choose your build level</h2>
+          <p>Pick the level of finish you have in mind. Costs follow in your report.</p>
+        </div>
+      </div>
+
+      <div className="level-options" role="radiogroup" aria-label="Build level">
+        {PACKAGES.map((pkg) => {
+          const tier = costModel?.build_cost_tiers?.find((item) => item.tier === pkg.id);
+          const selected = pkg.id === selectedTier;
+          return (
+            <button
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              className={selected ? "level-option selected" : "level-option"}
+              onClick={() => onSelectTier?.(pkg.id)}
+              key={pkg.id}
+            >
+              <span className="level-option-head">
+                <span className="tier-mark" aria-hidden="true" />
+                <strong>{pkg.label}</strong>
+              </span>
+              <span className="level-option-desc">{pkg.description}</span>
+              {tier?.notes && <span className="level-option-notes">{tier.notes}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {scope?.includes?.length > 0 && (
+        <div className="level-includes">
+          <strong>What every level includes</strong>
+          <ul>
+            {scope.includes.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {scope?.excludes?.length > 0 && (
+        <div className="level-includes">
+          <strong>Billed separately</strong>
+          <ul>
+            {scope.excludes.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+            {scope.contingency_pct && (
+              <li>
+                A contingency reserve — {scope.contingency_pct.min}–{scope.contingency_pct.max}%
+                recommended
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function CostCard({ result, costModel, projectType, selectedTier, onSelectTier }) {

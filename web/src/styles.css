@@ -1516,3 +1516,34 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   border-top: 1px solid var(--line-strong) !important;
 }
 .massing-floor-total span { color: var(--nav); font-weight: 800; }
+
+/* ---------- Step 3: build level picker ---------- */
+.level-options { display: grid; gap: 0.55rem; }
+.level-option {
+  display: grid;
+  gap: 0.3rem;
+  width: 100%;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fff;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.level-option:hover { border-color: var(--primary); }
+.level-option.selected {
+  border-color: var(--primary);
+  background: var(--active);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+.level-option:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.level-option-head { display: flex; align-items: center; gap: 0.45rem; }
+.level-option-head strong { font-size: 0.95rem; }
+.level-option-desc { color: var(--nav); font-size: 0.78rem; }
+.level-option-notes { color: var(--muted); font-size: 0.73rem; line-height: 1.5; }
+.level-includes { margin-top: 1.2rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.level-includes strong { display: block; font-size: 0.78rem; margin-bottom: 0.4rem; }
+.level-includes ul { margin: 0; padding-left: 1rem; display: grid; gap: 0.22rem; }
+.level-includes li { color: var(--muted); font-size: 0.73rem; line-height: 1.45; }
