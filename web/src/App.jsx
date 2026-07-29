@@ -22,6 +22,7 @@ import {
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
 import { northAngleFromParcel } from "./lib/orientation.js";
+import { matchParcelToRoad } from "./lib/roads.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import BuildingPreview3D from "./components/BuildingPreview3D.jsx";
 // Leaflet is a large dependency for one panel, so the map is split out of
@@ -71,6 +72,38 @@ const tierRate = (costModel, tierId) =>
 // The parcel path (PostGIS) reports `envelopeArea`; the rectangular manual path
 // reports a full `envelope` object. Callers should not have to know which.
 const envelopeAreaOf = (result) => result.envelopeArea ?? result.envelope?.areaSqft ?? 0;
+
+/**
+ * Put the matched street edge on the rectangle's width axis. MOD-IV frontage
+ * is normally already the street-facing dimension, but corner-lot records can
+ * use the other frontage. In that case the road match tells us to swap the
+ * axes before applying front/rear versus side setbacks.
+ */
+function streetOrientedLotDims(parcel, fallbackLot, streetEdge) {
+  const recorded = parcel ? recordedRectDims(parcel) : null;
+  let widthFt = Number(recorded?.width_ft ?? fallbackLot?.width_ft) || 25;
+  let depthFt = Number(recorded?.depth_ft ?? fallbackLot?.depth_ft) || 100;
+  const edgeLength = Number(streetEdge?.lengthFt);
+  if (
+    edgeLength > 0 &&
+    Math.abs(edgeLength - depthFt) + 1 < Math.abs(edgeLength - widthFt)
+  ) {
+    [widthFt, depthFt] = [depthFt, widthFt];
+  }
+  return { width_ft: widthFt, depth_ft: depthFt };
+}
+
+/** Recorded-address fallback while the live centerline match is unavailable. */
+function streetNameFor(parcel, streetEdge) {
+  if (streetEdge?.streetName) return streetEdge.streetName;
+  const address = String(parcel?.address ?? "").trim();
+  if (!address) return null;
+  const street = address
+    .replace(/^\d+[A-Z]?(?:\s*-\s*\d+[A-Z]?)?\s+/i, "")
+    .replace(/\s+(?:APT|UNIT|#)\s*.*$/i, "")
+    .trim();
+  return street || null;
+}
 
 /**
  * Reduce the per-floor plan to the three figures the zoning maximums are
@@ -185,6 +218,7 @@ export default function App() {
     stories: "",
     total_area_sqft: "",
     location: "unsure",
+    addition_location: "above",
   });
   // Optional: the building the client intends to build, floor by floor. Each
   // entry is one floor's size (sq ft). An empty array means "no plan — estimate
@@ -193,6 +227,7 @@ export default function App() {
   const [plannedFloors, setPlannedFloors] = useState([]);
   const [parcelPick, setParcelPick] = useState(null);
   const [parcel, setParcel] = useState(null);
+  const [streetEdge, setStreetEdge] = useState(null);
   const [parcelError, setParcelError] = useState(null);
   const [zoningCheck, setZoningCheck] = useState(null);
   // "unknown" until the parcels table has been checked for this municipality.
@@ -354,6 +389,24 @@ export default function App() {
     setParcel(njginParcelFromFeature(njginFeature, district ? conservativeInsetFt(district) : 0));
   }, [district, njginFeature, parcelSource]);
 
+  // Resolve the real front of the parcel from NJ road centerlines. The
+  // centerline service is an enhancement rather than a loading gate: on a
+  // network failure or an isolated lot, previews retain the parcel-axis
+  // orientation used before this feature.
+  useEffect(() => {
+    const geometry = parcel?.parcel_geojson_wgs84;
+    if (!geometry) {
+      setStreetEdge(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setStreetEdge(null);
+    matchParcelToRoad(geometry, controller.signal).then((match) => {
+      if (!controller.signal.aborted) setStreetEdge(match);
+    });
+    return () => controller.abort();
+  }, [parcel?.parcel_geojson_wgs84]);
+
   // A district with unfilled rules cannot produce a trustworthy answer, so the
   // calculation is refused rather than run against nulls (which would read as
   // "no setbacks, no coverage limit" and report the whole lot as buildable).
@@ -375,7 +428,11 @@ export default function App() {
       // rectangular dimensions, fall back to per-edge arithmetic on that
       // rectangle — the approximation the project doc calls for — instead of
       // reporting 0 sq ft.
-      const rectDims = envelopeArea > 0 ? null : recordedRectDims(parcel);
+      const recordedDims = recordedRectDims(parcel);
+      const rectDims =
+        envelopeArea > 0 || !recordedDims
+          ? null
+          : streetOrientedLotDims(parcel, lot, streetEdge);
       if (rectDims) {
         const rect = computeBuildable(
           { ...rectDims, area_sqft: Number(parcel.lot_area_sqft) },
@@ -417,6 +474,17 @@ export default function App() {
           : null;
     const availableFootprint = Math.max(0, zoningResult.footprint - existingFootprint);
     const availableBuildingArea = existingArea == null ? null : Math.max(0, zoningResult.buildable - existingArea);
+    const additionLocation = existingStructure.addition_location || "above";
+    const existingHeightEstimate =
+      enteredStories > 0
+        ? enteredStories * FLOOR_TO_FLOOR_FT
+        : existingArea != null && existingFootprint > 0
+          ? (existingArea / existingFootprint) * FLOOR_TO_FLOOR_FT
+          : FLOOR_TO_FLOOR_FT;
+    const heightAvailable =
+      Number(district.max_height_ft) > 0
+        ? Math.max(0, Number(district.max_height_ft) - existingHeightEstimate)
+        : null;
 
     // An ADU is capped by the district's own size limit, not just by what is
     // left over on the lot. Without this the tool quotes the full remaining
@@ -431,7 +499,12 @@ export default function App() {
       maxArea = adu.maxSizeSqft;
       aduSizeCapped = true;
     }
-    const maxFootprint = hasExistingHouse ? availableFootprint : zoningResult.footprint;
+    const maxFootprint =
+      projectType === "addition" && additionLocation === "above"
+        ? existingFootprint
+        : hasExistingHouse
+          ? availableFootprint
+          : zoningResult.footprint;
     // The effective story count, already capped by the height limit in
     // resolveStories — not district.max_stories, which ignores height.
     const maxFloors = zoningResult.stories ?? null;
@@ -448,13 +521,130 @@ export default function App() {
     const fitsArea = planned == null || maxArea == null ? null : planned <= maxArea;
     const fitsFootprint =
       plannedFootprint == null || maxFootprint == null ? null : plannedFootprint <= maxFootprint;
-    const fitsFloors = planned == null || maxFloors == null ? null : plannedFloorCount <= maxFloors;
-    const maxHeight = Number(district.max_height_ft) || null;
+    const existingFloorsForZoning =
+      enteredStories > 0
+        ? Math.ceil(enteredStories)
+        : existingArea != null && existingFootprint > 0
+          ? Math.ceil(existingArea / existingFootprint)
+          : hasExistingHouse
+            ? 1
+            : 0;
+    const floorsForZoning =
+      projectType === "addition" && additionLocation === "above"
+        ? existingFloorsForZoning + plannedFloorCount
+        : plannedFloorCount;
+    const fitsFloors = planned == null || maxFloors == null ? null : floorsForZoning <= maxFloors;
+    const maxHeight =
+      projectType === "addition" && additionLocation === "above"
+        ? heightAvailable
+        : Number(district.max_height_ft) || null;
     const fitsHeight =
       plannedHeight == null || maxHeight == null ? null : plannedHeight <= maxHeight;
+    let placementMaxWidthFt = null;
+    let placementMaxDepthFt = null;
+    let placementCapacitySqft = null;
+    if (
+      projectType === "addition" &&
+      ["side_left", "side_right", "front", "back"].includes(additionLocation)
+    ) {
+      const oriented = streetOrientedLotDims(parcel, lot, streetEdge);
+      const lotWidth = Number(oriented.width_ft);
+      const lotDepth = Number(oriented.depth_ft);
+      const scale =
+        lotWidth > 0 && lotDepth > 0 && existingFootprint > 0
+          ? Math.min(1, Math.sqrt(existingFootprint / (lotWidth * lotDepth)))
+          : 0;
+      const existingWidth = lotWidth * scale;
+      const existingDepth = lotDepth * scale;
+      const existingX0 = (lotWidth - existingWidth) / 2;
+      const existingY0 =
+        existingStructure.location === "front"
+          ? 0
+          : existingStructure.location === "rear"
+            ? lotDepth - existingDepth
+            : (lotDepth - existingDepth) / 2;
+      const side = district.side_yard_total_min_ft != null
+        ? Number(district.side_yard_total_min_ft) / 2
+        : Number(district.side_yard_one_min_ft) || 0;
+      const envelopeX0 = side;
+      const envelopeX1 = lotWidth - side;
+      const envelopeY0 = Number(district.front_yard_min_ft) || 0;
+      const envelopeY1 = lotDepth - (Number(district.rear_yard_min_ft) || 0);
+
+      if (additionLocation === "side_left" || additionLocation === "side_right") {
+        placementMaxWidthFt =
+          additionLocation === "side_left"
+            ? Math.max(0, existingX0 - envelopeX0)
+            : Math.max(0, envelopeX1 - (existingX0 + existingWidth));
+        placementMaxDepthFt = Math.max(
+          0,
+          Math.min(existingDepth, envelopeY1 - envelopeY0)
+        );
+      } else {
+        placementMaxWidthFt = Math.max(
+          0,
+          Math.min(existingWidth, envelopeX1 - envelopeX0)
+        );
+        placementMaxDepthFt =
+          additionLocation === "front"
+            ? Math.max(0, existingY0 - envelopeY0)
+            : Math.max(0, envelopeY1 - (existingY0 + existingDepth));
+      }
+      placementCapacitySqft = Math.min(
+        availableFootprint,
+        placementMaxWidthFt * placementMaxDepthFt
+      );
+    }
+    let fitsEnvelope = null;
+    if (
+      projectType === "addition" &&
+      ["side_left", "side_right", "front", "back"].includes(additionLocation) &&
+      plannedDimensions[0]
+    ) {
+      const oriented = streetOrientedLotDims(parcel, lot, streetEdge);
+      const lotWidth = Number(oriented.width_ft);
+      const lotDepth = Number(oriented.depth_ft);
+      const scale =
+        lotWidth > 0 && lotDepth > 0 && existingFootprint > 0
+          ? Math.min(1, Math.sqrt(existingFootprint / (lotWidth * lotDepth)))
+          : 0;
+      const existingWidth = lotWidth * scale;
+      const existingDepth = lotDepth * scale;
+      const existingX0 = (lotWidth - existingWidth) / 2;
+      const existingY0 =
+        existingStructure.location === "front"
+          ? 0
+          : existingStructure.location === "rear"
+            ? lotDepth - existingDepth
+            : (lotDepth - existingDepth) / 2;
+      const width = plannedDimensions[0].widthFt;
+      const depth = plannedDimensions[0].depthFt;
+      const x0 =
+        additionLocation === "side_right"
+          ? existingX0 + existingWidth
+          : additionLocation === "side_left"
+            ? existingX0 - width
+            : existingX0 + (existingWidth - width) / 2;
+      const y0 =
+        additionLocation === "back"
+          ? existingY0 + existingDepth
+          : additionLocation === "front"
+            ? existingY0 - depth
+            : existingY0 + (existingDepth - depth) / 2;
+      const side = district.side_yard_total_min_ft != null
+        ? Number(district.side_yard_total_min_ft) / 2
+        : Number(district.side_yard_one_min_ft) || 0;
+      fitsEnvelope =
+        x0 >= side &&
+        x0 + width <= lotWidth - side &&
+        y0 >= (Number(district.front_yard_min_ft) || 0) &&
+        y0 + depth <= lotDepth - (Number(district.rear_yard_min_ft) || 0);
+    }
     // Overall fit is a pass unless any applicable check explicitly fails.
     const fitsPlan =
-      planned == null ? null : ![fitsArea, fitsFootprint, fitsFloors, fitsHeight].includes(false);
+      planned == null
+        ? null
+        : ![fitsArea, fitsFootprint, fitsFloors, fitsHeight, fitsEnvelope].includes(false);
     const planDelta = planned == null || maxArea == null ? null : maxArea - planned;
 
     return {
@@ -464,6 +654,9 @@ export default function App() {
       existingArea,
       existingAreaSource,
       existingLocation: existingStructure.location,
+      additionLocation,
+      existingHeightEstimate,
+      heightAvailable,
       availableFootprint,
       availableBuildingArea,
       maxArea,
@@ -475,17 +668,21 @@ export default function App() {
       plannedHeight,
       plannedDimensions,
       maxHeight,
+      placementMaxWidthFt,
+      placementMaxDepthFt,
+      placementCapacitySqft,
       fitsArea,
       fitsFootprint,
       fitsFloors,
       fitsHeight,
+      fitsEnvelope,
       fitsPlan,
       planDelta,
       estimateArea: planned ?? maxArea,
       aduSizeCapped,
       aduMaxSizeSqft: adu.maxSizeSqft,
     };
-  }, [district, missingRules, entryMode, existingStructure, lot, parcel, plannedFloors, projectType]);
+  }, [district, missingRules, entryMode, existingStructure, lot, parcel, plannedFloors, projectType, streetEdge]);
 
   const project = PROJECT_TYPES.find((item) => item.id === projectType);
   const manualInputsValid =
@@ -678,8 +875,11 @@ export default function App() {
           lot={lot}
           entryMode={entryMode}
           parcel={entryMode === "search" ? parcel : null}
+          streetEdge={streetEdge}
           result={result}
+          existingStructure={existingStructure}
           plannedFloors={plannedFloors}
+          onExistingStructure={setExistingStructure}
           onPlannedFloors={setPlannedFloors}
           onBack={() => goToStep(1)}
           onContinue={() => advance(3)}
@@ -695,6 +895,7 @@ export default function App() {
           entryMode={entryMode}
           parcelSource={parcelSource}
           parcel={entryMode === "search" ? parcel : null}
+          streetEdge={streetEdge}
           result={result}
           costModel={costModel}
           selectedTier={selectedTier}
@@ -1394,7 +1595,12 @@ function NumberField({
   // (or not-yet-filled required) input doesn't shout on first render.
   const [touched, setTouched] = useState(false);
   const rule = fieldKey ? FIELD_RULES[fieldKey] : null;
-  const error = fieldKey ? validateField(fieldKey, value, { required }) : null;
+  const ruleError = fieldKey ? validateField(fieldKey, value, { required }) : null;
+  const maxError =
+    value !== "" && value != null && max != null && Number(value) > Number(max)
+      ? `${label} cannot exceed ${fmt(Number(max), 1)}.`
+      : null;
+  const error = ruleError || maxError;
   const showError = touched && Boolean(error);
   return (
     <label className={showError ? "field invalid" : "field"}>
@@ -1491,13 +1697,19 @@ function SurveyNotice() {
  * footprint, floors, total buildable — and only then ask what the client wants
  * to build, checking it against those maximums as they type.
  */
-function CapacityStep({ project, district, lot, entryMode, parcel, result, plannedFloors, onPlannedFloors, onBack, onContinue }) {
+function CapacityStep({ project, district, lot, entryMode, parcel, streetEdge, result, existingStructure, plannedFloors, onExistingStructure, onPlannedFloors, onBack, onContinue }) {
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
-  const footprintValue = hasExistingHouse ? result.availableFootprint : result.footprint;
+  const verticalAddition = project?.id === "addition" && result.additionLocation === "above";
+  const footprintValue =
+    project?.id === "addition" && !verticalAddition
+      ? result.placementCapacitySqft ?? result.availableFootprint
+      : hasExistingHouse
+        ? result.availableFootprint
+        : result.footprint;
   const footprintLabel = hasExistingHouse ? "Additional footprint available" : "Maximum building footprint";
-  const recordedLot = parcel ? recordedRectDims(parcel) : null;
-  const lotWidthFt = Number(recordedLot?.width_ft ?? lot.width_ft) || 25;
-  const lotDepthFt = Number(recordedLot?.depth_ft ?? lot.depth_ft) || 100;
+  const orientedLot = streetOrientedLotDims(parcel, lot, streetEdge);
+  const lotWidthFt = orientedLot.width_ft;
+  const lotDepthFt = orientedLot.depth_ft;
   const rectangularEnvelope = result.envelope;
   let maxHouseWidthFt =
     Number(rectangularEnvelope?.widthFt) > 0
@@ -1507,6 +1719,22 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
     Number(rectangularEnvelope?.depthFt) > 0
       ? Math.min(lotDepthFt, Number(rectangularEnvelope.depthFt))
       : lotDepthFt;
+  if (verticalAddition && Number(result.existingFootprint) > 0) {
+    const roofScale = Math.min(
+      1,
+      Math.sqrt(Number(result.existingFootprint) / (lotWidthFt * lotDepthFt))
+    );
+    maxHouseWidthFt = lotWidthFt * roofScale;
+    maxHouseDepthFt = lotDepthFt * roofScale;
+  }
+  if (!verticalAddition && project?.id === "addition") {
+    if (Number(result.placementMaxWidthFt) >= 0) {
+      maxHouseWidthFt = Number(result.placementMaxWidthFt);
+    }
+    if (Number(result.placementMaxDepthFt) >= 0) {
+      maxHouseDepthFt = Number(result.placementMaxDepthFt);
+    }
+  }
   const footprintCap = Number(result.maxFootprint);
   if (footprintCap > 0 && maxHouseWidthFt * maxHouseDepthFt > footprintCap) {
     const scale = Math.sqrt(footprintCap / (maxHouseWidthFt * maxHouseDepthFt));
@@ -1515,14 +1743,30 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
   }
   // Round down to the nearest half foot. Rounding either side up could make
   // the default rectangle fractionally larger than the calculated footprint.
-  maxHouseWidthFt = Math.max(1, Math.floor(maxHouseWidthFt * 2) / 2);
-  maxHouseDepthFt = Math.max(1, Math.floor(maxHouseDepthFt * 2) / 2);
+  maxHouseWidthFt = Math.max(0, Math.floor(maxHouseWidthFt * 2) / 2);
+  maxHouseDepthFt = Math.max(0, Math.floor(maxHouseDepthFt * 2) / 2);
+  const maxFloors = result.maxFloors ?? null;
+  const existingStoryCount =
+    verticalAddition
+      ? Math.ceil(
+          Number(result.existingStories) ||
+            (Number(result.existingArea) > 0 && Number(result.existingFootprint) > 0
+              ? Number(result.existingArea) / Number(result.existingFootprint)
+              : 1)
+        )
+      : 0;
+  const maxPlannedFloors =
+    maxFloors == null
+      ? 20
+      : verticalAddition
+        ? Math.max(0, maxFloors - existingStoryCount)
+        : maxFloors;
 
   // Resize the per-floor array while preserving values already typed. New
   // floors copy the floor below, producing an immediate 3D preview while
   // guaranteeing that an upper floor starts inside the lower footprint.
   const setFloorCount = (value) => {
-    const count = Math.max(0, Math.min(20, Math.floor(Number(value) || 0)));
+    const count = Math.max(0, Math.min(maxPlannedFloors, Math.floor(Number(value) || 0)));
     const next = plannedFloors.slice(0, count);
     while (next.length < count) {
       const lowerFloor = next[next.length - 1];
@@ -1545,39 +1789,46 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
   const setFloorDimension = (index, field, value) => {
     const next = plannedFloors.slice();
     const numeric = value === "" ? "" : Math.max(1, Number(value));
-    if (field === "height_ft") {
-      const heightLimit = Number(district.max_height_ft) || FIELD_RULES.planned_floor_height.max;
-      next[index] = {
-        ...next[index],
-        height_ft: numeric === "" ? "" : Math.min(numeric, heightLimit),
-      };
-      onPlannedFloors(next);
-      return;
-    }
-    const lowerLimit =
-      index === 0
-        ? field === "width_ft"
-          ? maxHouseWidthFt
-          : maxHouseDepthFt
-        : Number(next[index - 1]?.[field]) || Infinity;
-    const constrained = numeric === "" ? "" : Math.min(numeric, lowerLimit);
-    next[index] = { ...next[index], [field]: constrained };
-
-    // Shrinking a lower floor also shrinks every floor above it. This makes
-    // the no-overhang rule structural rather than a warning the user can miss.
-    for (let upper = index + 1; upper < next.length; upper += 1) {
-      if (Number(next[upper]?.[field]) > Number(constrained)) {
-        next[upper] = { ...next[upper], [field]: constrained };
-      }
-    }
+    next[index] = { ...next[index], [field]: numeric };
     onPlannedFloors(next);
   };
   const plannedTotal = result.plannedArea;
+  const groundAddition = project?.id === "addition" && !verticalAddition;
+  const remainingSetbackArea =
+    project?.id !== "addition"
+      ? null
+      : verticalAddition
+        ? result.availableBuildingArea == null || plannedTotal == null
+          ? result.availableBuildingArea
+          : Math.max(0, result.availableBuildingArea - plannedTotal)
+        : Math.max(
+            0,
+            Number(result.placementCapacitySqft ?? result.availableFootprint ?? 0) -
+              Number(result.plannedFootprint || 0)
+          );
+  const chooseAdditionLocation = (additionLocation) => {
+    onExistingStructure({ ...existingStructure, addition_location: additionLocation });
+    if (additionLocation !== "above") {
+      // A side/front/back choice describes one ground-level volume. Additional
+      // stories are only requested through the explicit vertical-addition path.
+      onPlannedFloors([
+        {
+          width_ft: "",
+          depth_ft: "",
+          height_ft: FLOOR_TO_FLOOR_FT,
+        },
+      ]);
+    }
+  };
   // Flag an over-limit floor count as soon as it is entered — before any floor
   // sizes exist — so the user gets the error at the point of the mistake. The
   // engine's count, already capped by the height limit, is the real ceiling.
-  const maxFloors = result.maxFloors ?? null;
-  const floorsExceeded = maxFloors != null && plannedFloors.length > maxFloors;
+  const floorsExceeded = plannedFloors.length > maxPlannedFloors;
+  useEffect(() => {
+    if (plannedFloors.length > maxPlannedFloors) {
+      onPlannedFloors(plannedFloors.slice(0, maxPlannedFloors));
+    }
+  }, [maxPlannedFloors, onPlannedFloors, plannedFloors]);
 
   return (
     <>
@@ -1593,31 +1844,57 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
       <section className="workspace-grid">
         <div className="card form-card">
           <div className="capacity-figures">
-            <div>
-              <span>{footprintLabel}</span>
-              <strong>{fmt(footprintValue)} <em>sq ft</em></strong>
-              <small>The ground area you can build on.</small>
-            </div>
-            {maxFloors != null && (
-              <div>
-                <span>Maximum floors</span>
-                <strong>{maxFloors}</strong>
-                <small>
-                  {result.heightLimited
-                    ? `What the ${fmt(district.max_height_ft)} ft height limit fits in ${district.code}.`
-                    : `Stories permitted in ${district.code}.`}
-                </small>
-              </div>
+            {verticalAddition ? (
+              <>
+                <div>
+                  <span>Existing building footprint</span>
+                  <strong>{fmt(result.existingFootprint)} <em>sq ft</em></strong>
+                  <small>Maximum roof area available for a vertical addition.</small>
+                </div>
+                <div>
+                  <span>Floor area available</span>
+                  <strong>{fmt(result.availableBuildingArea)} <em>sq ft</em></strong>
+                  <small>Remaining zoning capacity across the new floor.</small>
+                </div>
+                <div>
+                  <span>Height available</span>
+                  <strong>{fmt(result.heightAvailable, 1)} <em>ft estimated</em></strong>
+                  <small>District height limit minus the estimated existing height.</small>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <span>{footprintLabel}</span>
+                  <strong>{fmt(footprintValue)} <em>sq ft</em></strong>
+                  <small>
+                    {project?.id === "addition"
+                      ? "The ground area available at the selected side after applying setbacks."
+                      : "The additional ground area that may be occupied."}
+                  </small>
+                </div>
+                {maxFloors != null && (
+                  <div>
+                    <span>Maximum floors</span>
+                    <strong>{maxFloors}</strong>
+                    <small>
+                      {result.heightLimited
+                        ? `What the ${fmt(district.max_height_ft)} ft height limit fits in ${district.code}.`
+                        : `Stories permitted in ${district.code}.`}
+                    </small>
+                  </div>
+                )}
+                <div>
+                  <span>{projectResultTitle(project?.id)}</span>
+                  {result.maxArea == null ? (
+                    <strong className="answer-pending">Enter existing floor area</strong>
+                  ) : (
+                    <strong>{fmt(result.maxArea)} <em>sq ft</em></strong>
+                  )}
+                  <small>Floor area remaining under the district rules.</small>
+                </div>
+              </>
             )}
-            <div>
-              <span>{projectResultTitle(project?.id)}</span>
-              {result.maxArea == null ? (
-                <strong className="answer-pending">Enter existing floor area</strong>
-              ) : (
-                <strong>{fmt(result.maxArea)} <em>sq ft</em></strong>
-              )}
-              <small>Footprint across all floors.</small>
-            </div>
           </div>
 
           <div className="planned-size">
@@ -1632,35 +1909,60 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
               </div>
               <span className="data-tag">Optional</span>
             </div>
-            <div className="form-grid">
-              <label className={floorsExceeded ? "field invalid" : "field"}>
-                Number of floors you plan
-                <input
-                  type="number"
-                  min="0"
-                  max="20"
-                  step="1"
-                  value={plannedFloors.length || ""}
-                  onChange={(e) => setFloorCount(e.target.value)}
-                  aria-invalid={floorsExceeded || undefined}
-                />
-                {floorsExceeded ? (
-                  <small className="field-error">
-                    {district.code} allows a maximum of {maxFloors} {maxFloors === 1 ? "floor" : "floors"}. Reduce the
-                    count — building higher would require a variance.
-                  </small>
-                ) : (
-                  <small>
-                    Adds width, depth, and height fields for each floor.
-                    {maxFloors != null ? ` Up to ${maxFloors} allowed here.` : ""}
-                  </small>
-                )}
+            {project?.id === "addition" && (
+              <label className="addition-location-select">
+                <span>Where will the addition be located?</span>
+                <select
+                  value={existingStructure.addition_location}
+                  onChange={(event) => chooseAdditionLocation(event.target.value)}
+                >
+                  <option value="side_left">Side — left</option>
+                  <option value="side_right">Side — right</option>
+                  <option value="front">Front addition</option>
+                  <option value="back">Back addition</option>
+                  <option value="above">Above the existing house — new floor</option>
+                </select>
+                <small>Click to choose where the new construction will be placed.</small>
               </label>
-            </div>
+            )}
+            {(!groundAddition || project?.id !== "addition") && (
+              <div className="form-grid">
+                <label className={floorsExceeded ? "field invalid" : "field"}>
+                  {project?.id === "addition" ? "Number of new floors to add" : "Number of floors you plan"}
+                  <input
+                    type="number"
+                    min="0"
+                    max={maxPlannedFloors}
+                    step="1"
+                    value={plannedFloors.length || ""}
+                    onChange={(e) => setFloorCount(e.target.value)}
+                    aria-invalid={floorsExceeded || undefined}
+                  />
+                  {floorsExceeded ? (
+                    <small className="field-error">
+                      {verticalAddition
+                        ? `${district.code} allows ${maxFloors} total stories. With ${existingStoryCount} existing, only ${maxPlannedFloors} additional ${maxPlannedFloors === 1 ? "floor is" : "floors are"} available.`
+                        : `${district.code} allows a maximum of ${maxFloors} floors.`}
+                    </small>
+                  ) : (
+                    <small>
+                      Adds width, depth, and height fields for each floor.
+                      {maxFloors != null
+                        ? verticalAddition
+                          ? ` Up to ${maxPlannedFloors} additional ${maxPlannedFloors === 1 ? "floor" : "floors"} allowed (${maxFloors} total minus ${existingStoryCount} existing).`
+                          : ` Up to ${maxFloors} allowed here.`
+                        : ""}
+                    </small>
+                  )}
+                </label>
+              </div>
+            )}
             {plannedFloors.length > 0 && (
               <>
                 <div className="floor-fields">
                   {plannedFloors.map((floor, index) => {
+                    const displayFloorNumber =
+                      verticalAddition ? existingStoryCount + index + 1 : index + 1;
                     const widthMax =
                       index === 0
                         ? maxHouseWidthFt
@@ -1673,12 +1975,30 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
                       Number(floor?.width_ft) > 0 && Number(floor?.depth_ft) > 0
                         ? Number(floor.width_ft) * Number(floor.depth_ft)
                         : null;
+                    const heightMax =
+                      verticalAddition
+                        ? Number(result.heightAvailable) || FIELD_RULES.planned_floor_height.max
+                        : Number(district.max_height_ft) || FIELD_RULES.planned_floor_height.max;
+                    const floorValid =
+                      floorArea != null &&
+                      Number(floor.width_ft) <= Number(widthMax) &&
+                      Number(floor.depth_ft) <= Number(depthMax) &&
+                      Number(floor.height_ft) > 0 &&
+                      Number(floor.height_ft) <= heightMax &&
+                      (verticalAddition || result.fitsEnvelope !== false);
+                    const groundAddition = project?.id === "addition" && !verticalAddition;
+                    const displayFloorLabel =
+                      groundAddition && index === 0
+                        ? "New ground-floor addition"
+                        : groundAddition
+                          ? `Addition floor ${index + 1}`
+                          : `Floor ${displayFloorNumber}`;
                     return (
                       <fieldset className="floor-row" key={index}>
-                        <legend className="sr-only">Floor {index + 1}</legend>
+                        <legend className="sr-only">{displayFloorLabel}</legend>
                         <div className="floor-row-id" aria-hidden="true">
-                          <span className="floor-row-num">{index + 1}</span>
-                          <span className="floor-row-label">Floor {index + 1}</span>
+                          <span className="floor-row-num">{displayFloorNumber}</span>
+                          <span className="floor-row-label">{displayFloorLabel}</span>
                         </div>
                         <div className="floor-row-fields">
                           <NumberField
@@ -1700,13 +2020,17 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
                             help={`Maximum ${fmt(depthMax, 1)} ft${index > 0 ? " — cannot exceed the floor below." : "."}`}
                           />
                           <NumberField
-                            label="Height (ft)"
+                            label={
+                              project?.id === "addition"
+                                ? "Addition wall/level height (ft)"
+                                : "Height (ft)"
+                            }
                             value={floor?.height_ft ?? ""}
                             onChange={(value) => setFloorDimension(index, "height_ft", value)}
                             fieldKey="planned_floor_height"
-                            max={Number(district.max_height_ft) || FIELD_RULES.planned_floor_height.max}
+                            max={heightMax}
                             step="0.5"
-                            help={`Defaults to ${FLOOR_TO_FLOOR_FT} ft. Total height is checked against zoning.`}
+                            help={`Default ${FLOOR_TO_FLOOR_FT} ft · total checked against zoning.`}
                           />
                           {/* The maxima are not arbitrary: floor 1 is capped by
                               zoning, every floor above by the one beneath it. */}
@@ -1722,14 +2046,22 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
                             <LockGlyph />
                           </span>
                         </div>
-                        <div className={floorArea == null ? "floor-row-area" : "floor-row-area done"}>
+                        <div
+                          className={
+                            floorArea == null
+                              ? "floor-row-area"
+                              : floorValid
+                                ? "floor-row-area done"
+                                : "floor-row-area invalid"
+                          }
+                        >
                           <span>Floor area</span>
                           <strong>
                             {floorArea == null ? "—" : fmt(floorArea)}
                             {floorArea != null && <em> sq ft</em>}
                           </strong>
                           <span className="floor-row-status" aria-hidden="true">
-                            {floorArea == null ? "" : "✓"}
+                            {floorArea == null ? "" : floorValid ? "✓" : "!"}
                           </span>
                         </div>
                       </fieldset>
@@ -1743,6 +2075,16 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
                   )}
                   {result.plannedHeight != null && <> · height {fmt(result.plannedHeight, 1)} ft</>}
                 </p>
+                {project?.id === "addition" && (
+                  <p className="remaining-buildable-area" role="status">
+                    <span>
+                      {verticalAddition
+                        ? "Remaining floor area allowed"
+                        : "Remaining ground footprint within setback rules"}
+                    </span>
+                    <strong>{remainingSetbackArea == null ? "—" : fmt(remainingSetbackArea)} sq ft</strong>
+                  </p>
+                )}
               </>
             )}
           </div>
@@ -1766,7 +2108,28 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
             lotDepthFt={lotDepthFt}
             floors={result.plannedDimensions ?? []}
             defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
-            northAngleDeg={northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
+            northAngleDeg={streetEdge?.northAngleDeg ?? northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
+            streetName={streetNameFor(parcel, streetEdge)}
+            parcelGeojson={parcel?.parcel_geojson_wgs84}
+            existingBuilding={
+              project?.id === "addition"
+                ? {
+                    footprintSqft: result.existingFootprint,
+                    stories: result.existingStories,
+                    totalAreaSqft: result.existingArea,
+                    location: result.existingLocation,
+                    additionLocation: result.additionLocation,
+                  }
+                : null
+            }
+            setbacks={{
+              front: district.front_yard_min_ft,
+              side:
+                district.side_yard_total_min_ft != null
+                  ? district.side_yard_total_min_ft / 2
+                  : district.side_yard_one_min_ft,
+              rear: district.rear_yard_min_ft,
+            }}
           />
         </aside>
       </section>
@@ -1774,10 +2137,10 @@ function CapacityStep({ project, district, lot, entryMode, parcel, result, plann
   );
 }
 
-function Results({ project, muni, district, lot, entryMode, parcelSource, parcel, result, costModel, selectedTier, onSelectTier, adu, onBack, onContinue }) {
-  const recordedLot = parcel ? recordedRectDims(parcel) : null;
-  const lotWidthFt = Number(recordedLot?.width_ft ?? lot.width_ft) || 25;
-  const lotDepthFt = Number(recordedLot?.depth_ft ?? lot.depth_ft) || 100;
+function Results({ project, muni, district, lot, entryMode, parcelSource, parcel, streetEdge, result, costModel, selectedTier, onSelectTier, adu, onBack, onContinue }) {
+  const orientedLot = streetOrientedLotDims(parcel, lot, streetEdge);
+  const lotWidthFt = orientedLot.width_ft;
+  const lotDepthFt = orientedLot.depth_ft;
 
   return (
     <>
@@ -1815,7 +2178,20 @@ function Results({ project, muni, district, lot, entryMode, parcelSource, parcel
               floors={result.plannedDimensions ?? []}
               defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
               lotAreaSqft={result.lotArea}
-              northAngleDeg={northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
+              northAngleDeg={streetEdge?.northAngleDeg ?? northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
+              streetName={streetNameFor(parcel, streetEdge)}
+              parcelGeojson={parcel?.parcel_geojson_wgs84}
+              existingBuilding={
+                project?.id === "addition"
+                  ? {
+                      footprintSqft: result.existingFootprint,
+                      stories: result.existingStories,
+                      totalAreaSqft: result.existingArea,
+                      location: result.existingLocation,
+                      additionLocation: result.additionLocation,
+                    }
+                  : null
+              }
               setbacks={{
                 front: district.front_yard_min_ft,
                 // What the envelope actually insets per side: the combined
@@ -2423,6 +2799,34 @@ function CostScope({ scope, estimateArea, costModel, selectedTier }) {
 function Review({ project, muni, district, lot, parcel, result, costModel, selectedTier, onBack }) {
   const chosenTier = costModel?.build_cost_tiers.find((item) => item.tier === selectedTier);
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
+  const plannedFloors = result.plannedDimensions ?? [];
+  const reviewExistingStoryCount =
+    project?.id === "addition" && result.additionLocation === "above"
+      ? Math.ceil(
+          Number(result.existingStories) ||
+            (Number(result.existingArea) > 0 && Number(result.existingFootprint) > 0
+              ? Number(result.existingArea) / Number(result.existingFootprint)
+              : 1)
+        )
+      : 0;
+  const zoningRules = [
+    ["Minimum lot area", district.min_lot_area_sqft, "sq ft"],
+    ["Minimum lot width", district.min_lot_width_ft, "ft"],
+    ["Minimum lot depth", district.min_lot_depth_ft, "ft"],
+    ["Front setback", district.front_yard_min_ft, "ft"],
+    ["Rear setback", district.rear_yard_min_ft, "ft"],
+    [
+      "Side setback",
+      district.side_yard_one_min_ft ??
+        (district.side_yard_total_min_ft != null ? district.side_yard_total_min_ft / 2 : null),
+      "ft each",
+    ],
+    ["Total side yards", district.side_yard_total_min_ft, "ft"],
+    ["Maximum coverage", district.max_building_coverage_pct, "%"],
+    ["Maximum FAR", district.max_far, ""],
+    ["Maximum stories", district.max_stories, ""],
+    ["Maximum height", district.max_height_ft, "ft"],
+  ];
   return (
     <>
       <section className="results-heading">
@@ -2457,6 +2861,18 @@ function Review({ project, muni, district, lot, parcel, result, costModel, selec
                 </div>
               )}
               <div><span>Structure location</span><strong>{structureLocationLabel(result.existingLocation)}</strong></div>
+              {project?.id === "addition" && (
+                <div>
+                  <span>Addition location</span>
+                  <strong>{{
+                    side_left: "Left-side addition",
+                    side_right: "Right-side addition",
+                    front: "Front addition",
+                    back: "Back addition",
+                    above: "Above the existing house",
+                  }[result.additionLocation] ?? "Above the existing house"}</strong>
+                </div>
+              )}
               <div><span>Approx. additional footprint</span><strong>{fmt(result.availableFootprint)} sq ft</strong></div>
               {result.availableBuildingArea != null && (
                 <div><span>Additional floor area available</span><strong>{fmt(result.availableBuildingArea)} sq ft</strong></div>
@@ -2479,6 +2895,9 @@ function Review({ project, muni, district, lot, parcel, result, costModel, selec
                     : ` — ${fmt(Math.abs(result.planDelta))} over`)}
               </strong>
             </div>
+          )}
+          {result.plannedHeight != null && (
+            <div><span>Planned total height</span><strong>{fmt(result.plannedHeight, 1)} ft</strong></div>
           )}
           {/* The client's selected build level, carrying the provenance flag:
               the printed report is where a reader is most likely to mistake a
@@ -2506,6 +2925,73 @@ function Review({ project, muni, district, lot, parcel, result, costModel, selec
             <div><span>Manual dimensions</span><strong>{fmt(lot.width_ft)}′ × {fmt(lot.depth_ft)}′</strong></div>
           )}
         </div>
+
+        <section className="review-detail-section" aria-labelledby="zoning-rules-title">
+          <div className="review-detail-heading">
+            <div>
+              <p className="eyebrow">District standards</p>
+              <h3 id="zoning-rules-title">{district.code} zoning rules used</h3>
+            </div>
+            <span>{district.name}</span>
+          </div>
+          <dl className="review-rules">
+            {zoningRules.map(([label, value, unit]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value == null ? "Not specified" : `${fmt(value, 2)}${unit ? ` ${unit}` : ""}`}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section className="review-detail-section" aria-labelledby="floor-schedule-title">
+          <div className="review-detail-heading">
+            <div>
+              <p className="eyebrow">Planned building</p>
+              <h3 id="floor-schedule-title">Floor dimensions and area</h3>
+            </div>
+            <span>
+              Lot {fmt(result.lotArea)} sq ft · planned {fmt(result.plannedArea ?? 0)} sq ft ·{" "}
+              {fmt(result.plannedHeight ?? 0, 1)} ft high
+            </span>
+          </div>
+          {plannedFloors.length > 0 ? (
+            <div className="review-floor-table-wrap">
+              <table className="review-floor-table">
+                <thead>
+                  <tr>
+                    <th>Floor</th>
+                    <th>Width</th>
+                    <th>Depth</th>
+                    <th>Height</th>
+                    <th>Floor area</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {plannedFloors.map((floor, index) => (
+                    <tr key={index}>
+                      <th>Floor {reviewExistingStoryCount + index + 1}</th>
+                      <td>{fmt(floor.widthFt, 1)} ft</td>
+                      <td>{fmt(floor.depthFt, 1)} ft</td>
+                      <td>{fmt(floor.heightFt, 1)} ft</td>
+                      <td>{fmt(floor.areaSqft)} sq ft</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <th colSpan="3">Total planned building</th>
+                    <td>{fmt(result.plannedHeight, 1)} ft</td>
+                    <td>{fmt(result.plannedArea)} sq ft</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          ) : (
+            <p className="review-empty">No floor dimensions were entered; estimates use the maximum zoning capacity.</p>
+          )}
+        </section>
+
         <SurveyNotice />
         {project?.id === "adu" && (
           <p className="adu-review-note">
