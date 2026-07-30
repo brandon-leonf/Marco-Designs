@@ -50,7 +50,40 @@ export async function searchParcels(muniSlug, query, limit = 15) {
     p_limit: limit,
   });
   if (error) throw error;
-  return data;
+  // Tagged like the live sources so the picker can group results by how much
+  // is known about them — see lib/njgin.js and lib/geocode.js.
+  return (data ?? []).map((row) => ({ ...row, kind: "parcel", scope: "muni" }));
+}
+
+/**
+ * Connect a parcel discovered through the statewide NJGIN point query to a
+ * locally imported polygon when one exists. The local id unlocks the PostGIS
+ * parcel/zoning intersection; absence is a normal parcel-only result.
+ */
+export async function findImportedParcelByPin(municipalityId, pamsPin) {
+  if (!municipalityId || !pamsPin) return null;
+  const { data, error } = await supabase
+    .from("parcels")
+    .select("id, pams_pin, lot_area_sqft, lot_frontage_ft, lot_depth_ft, mod_iv")
+    .eq("municipality_id", municipalityId)
+    .eq("pams_pin", pamsPin)
+    .order("id")
+    .limit(1);
+  if (error) throw error;
+  const row = data?.[0];
+  if (!row) return null;
+  return {
+    parcel_id: row.id,
+    pams_pin: row.pams_pin,
+    address: row.mod_iv?.PROP_LOC ?? null,
+    block: row.mod_iv?.PCLBLOCK ?? null,
+    lot: row.mod_iv?.PCLLOT ?? null,
+    prop_class: row.mod_iv?.PROP_CLASS ?? null,
+    lot_area_sqft: row.lot_area_sqft,
+    land_desc: row.mod_iv?.LAND_DESC ?? null,
+    lot_frontage_ft: row.lot_frontage_ft,
+    lot_depth_ft: row.lot_depth_ft,
+  };
 }
 
 /**

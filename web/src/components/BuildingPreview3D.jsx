@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { fetchTerrainGrid, TERRAIN_SOURCE } from "../lib/terrain.js";
 
 // The massing is an orientation aid beside the numbers, not the report's
 // centrepiece — it was taking more vertical space than the figures it
@@ -53,9 +54,17 @@ export default function BuildingPreview3D({
   lotAreaSqft,
   setbacks,
   northAngleDeg,
+  streetName,
+  parcelGeojson,
+  existingBuilding,
+  // Each floor's rectangle in lot feet, as placed on the site plan. Entries
+  // may be null for floors without a size. Null/empty keeps the defaults.
+  plannedOriginsFt = null,
 }) {
   const [view, setView] = useState({ yaw: -36, elevation: 34, zoom: 1 });
   const [isDragging, setIsDragging] = useState(false);
+  const [terrain, setTerrain] = useState(null);
+  const [terrainStatus, setTerrainStatus] = useState("idle");
   const drag = useRef(null);
   const viewer = useRef(null);
   const lotWidth = Math.max(1, Number(lotWidthFt) || 25);
@@ -68,17 +77,71 @@ export default function BuildingPreview3D({
     }))
     .filter((floor) => floor.widthFt > 0 && floor.depthFt > 0 && floor.heightFt > 0)
     .map((floor) => ({
-      widthFt: Math.min(lotWidth, floor.widthFt),
-      depthFt: Math.min(lotDepth, floor.depthFt),
+      widthFt: floor.widthFt,
+      depthFt: floor.depthFt,
       heightFt: floor.heightFt,
     }));
   const groundWidth = completeFloors[0]?.widthFt ?? 0;
   const groundDepth = completeFloors[0]?.depthFt ?? 0;
-  const totalHeight = completeFloors.reduce((sum, floor) => sum + floor.heightFt, 0);
+  const plannedHeight = completeFloors.reduce((sum, floor) => sum + floor.heightFt, 0);
   const proposedAreaSqft = completeFloors.reduce(
     (sum, floor) => sum + floor.widthFt * floor.depthFt,
     0
   );
+  const existingFootprintSqft = Math.max(0, Number(existingBuilding?.footprintSqft) || 0);
+  const existingScale =
+    existingFootprintSqft > 0
+      ? Math.min(1, Math.sqrt(existingFootprintSqft / (lotWidth * lotDepth)))
+      : 0;
+  const existingWidth = lotWidth * existingScale;
+  const existingDepth = lotDepth * existingScale;
+  const existingStories =
+    Number(existingBuilding?.stories) > 0
+      ? Number(existingBuilding.stories)
+      : Number(existingBuilding?.totalAreaSqft) > 0 && existingFootprintSqft > 0
+        ? Number(existingBuilding.totalAreaSqft) / existingFootprintSqft
+        : 1;
+  const existingHeight =
+    existingFootprintSqft > 0
+      ? Math.max(defaultFloorHeightFt, existingStories * defaultFloorHeightFt)
+      : 0;
+  const verticalAddition =
+    existingBuilding?.placementMode != null
+      ? existingBuilding.placementMode === "vertical"
+      : existingBuilding?.additionLocation === "above";
+  const detachedAdu = existingBuilding?.placementMode === "adu";
+  const totalHeight = verticalAddition
+    ? existingHeight + plannedHeight
+    : Math.max(existingHeight, plannedHeight);
+  useEffect(() => {
+    if (!parcelGeojson || northAngleDeg == null) {
+      setTerrain(null);
+      setTerrainStatus("idle");
+      return undefined;
+    }
+    const controller = new AbortController();
+    setTerrainStatus("loading");
+    fetchTerrainGrid({
+      parcelGeojson,
+      lotWidthFt: lotWidth,
+      lotDepthFt: lotDepth,
+      northAngleDeg,
+      signal: controller.signal,
+    })
+      .then((result) => {
+        if (!controller.signal.aborted) {
+          setTerrain(result);
+          setTerrainStatus(result ? "ready" : "idle");
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setTerrain(null);
+          setTerrainStatus("unavailable");
+        }
+      });
+    return () => controller.abort();
+  }, [parcelGeojson, northAngleDeg, lotWidth, lotDepth]);
 
   const scene = useMemo(() => {
     const yaw = (view.yaw * Math.PI) / 180;
@@ -106,13 +169,140 @@ export default function BuildingPreview3D({
       { x: 0, y: lotDepth, z: 0 },
     ];
     const worldFaces = [];
+    const overflowWorldFaces = [];
     const boundsWorld = [...lotWorld];
+    const sideSetback = Math.max(0, Number(setbacks?.side) || 0);
+    const frontSetback = Math.max(0, Number(setbacks?.front) || 0);
+    const rearSetback = Math.max(0, Number(setbacks?.rear) || 0);
+    const envelopeBounds = {
+      x0: sideSetback,
+      x1: lotWidth - sideSetback,
+      y0: frontSetback,
+      y1: lotDepth - rearSetback,
+    };
+    const envelopeWorld =
+      envelopeBounds.x1 > envelopeBounds.x0 && envelopeBounds.y1 > envelopeBounds.y0
+        ? [
+            { x: envelopeBounds.x0, y: envelopeBounds.y0, z: 0.12 },
+            { x: envelopeBounds.x1, y: envelopeBounds.y0, z: 0.12 },
+            { x: envelopeBounds.x1, y: envelopeBounds.y1, z: 0.12 },
+            { x: envelopeBounds.x0, y: envelopeBounds.y1, z: 0.12 },
+          ]
+        : null;
+    if (envelopeWorld) boundsWorld.push(...envelopeWorld);
+    let existingBounds = null;
+    if (existingFootprintSqft > 0) {
+      const defaultX0 = (lotWidth - existingWidth) / 2;
+      const defaultY0 =
+        existingBuilding?.location === "front"
+          ? 0
+          : existingBuilding?.location === "rear"
+            ? lotDepth - existingDepth
+            : (lotDepth - existingDepth) / 2;
+      const positionedX0 = Number(existingBuilding?.position?.x0);
+      const positionedY0 = Number(existingBuilding?.position?.y0);
+      const x0 = Math.min(
+        Math.max(0, Number.isFinite(positionedX0) ? positionedX0 : defaultX0),
+        Math.max(0, lotWidth - existingWidth)
+      );
+      const y0 = Math.min(
+        Math.max(0, Number.isFinite(positionedY0) ? positionedY0 : defaultY0),
+        Math.max(0, lotDepth - existingDepth)
+      );
+      const x1 = x0 + existingWidth;
+      const y1 = y0 + existingDepth;
+      existingBounds = { x0, x1, y0, y1 };
+      const storyCount = Math.max(1, Math.ceil(existingStories));
+      for (let story = 0; story < storyCount; story += 1) {
+        const z0 = (existingHeight / storyCount) * story;
+        const z1 = (existingHeight / storyCount) * (story + 1);
+        const b00 = { x: x0, y: y0, z: z0 };
+        const b10 = { x: x1, y: y0, z: z0 };
+        const b11 = { x: x1, y: y1, z: z0 };
+        const b01 = { x: x0, y: y1, z: z0 };
+        const t00 = { x: x0, y: y0, z: z1 };
+        const t10 = { x: x1, y: y0, z: z1 };
+        const t11 = { x: x1, y: y1, z: z1 };
+        const t01 = { x: x0, y: y1, z: z1 };
+        boundsWorld.push(b00, b10, b11, b01, t00, t10, t11, t01);
+        worldFaces.push(
+          { floor: `existing-${story}`, kind: "existing-wall-a", world: [b00, b10, t10, t00] },
+          { floor: `existing-${story}`, kind: "existing-wall-b", world: [b10, b11, t11, t10] },
+          { floor: `existing-${story}`, kind: "existing-wall-a", world: [b11, b01, t01, t11] },
+          { floor: `existing-${story}`, kind: "existing-wall-b", world: [b01, b00, t00, t01] }
+        );
+        if (story === storyCount - 1) {
+          worldFaces.push({
+            floor: `existing-${story}`,
+            kind: "existing-top",
+            world: [t00, t10, t11, t01],
+          });
+        }
+      }
+    }
+
+    // Centring on the *envelope* rather than the lot: with asymmetric front
+    // and rear setbacks the lot's centre is not where a maximum-size house can
+    // actually go, and the site plan places it here too. The two views draw
+    // the same building.
+    let plannedCenterX = (envelopeBounds.x0 + envelopeBounds.x1) / 2;
+    let plannedCenterY = (envelopeBounds.y0 + envelopeBounds.y1) / 2;
     let baseHeight = 0;
+    if (existingBounds) {
+      if (verticalAddition) {
+        plannedCenterX = (existingBounds.x0 + existingBounds.x1) / 2;
+        plannedCenterY = (existingBounds.y0 + existingBounds.y1) / 2;
+        baseHeight = existingHeight;
+      } else {
+        const location = existingBuilding?.additionLocation;
+        if (location === "back") {
+          plannedCenterX = (existingBounds.x0 + existingBounds.x1) / 2;
+          plannedCenterY = existingBounds.y1 + groundDepth / 2;
+        } else if (location === "front") {
+          plannedCenterX = (existingBounds.x0 + existingBounds.x1) / 2;
+          plannedCenterY = existingBounds.y0 - groundDepth / 2;
+        } else if (location === "side_left") {
+          plannedCenterX = existingBounds.x0 - groundWidth / 2;
+          plannedCenterY = (existingBounds.y0 + existingBounds.y1) / 2;
+        } else {
+          plannedCenterX = existingBounds.x1 + groundWidth / 2;
+          plannedCenterY = (existingBounds.y0 + existingBounds.y1) / 2;
+        }
+      }
+    }
+    // The site plan's placement wins over every default above: the massing has
+    // to show the building where the client put it, floor by floor.
+    const placedFloors = plannedOriginsFt;
+    if (placedFloors?.[0]) {
+      plannedCenterX = Number(placedFloors[0].x0) + groundWidth / 2;
+      plannedCenterY = Number(placedFloors[0].y0) + groundDepth / 2;
+    }
+    const addOverflowBox = (rect, z0, z1, floor) => {
+      if (rect.x1 <= rect.x0 || rect.y1 <= rect.y0) return;
+      const b00 = { x: rect.x0, y: rect.y0, z: z0 };
+      const b10 = { x: rect.x1, y: rect.y0, z: z0 };
+      const b11 = { x: rect.x1, y: rect.y1, z: z0 };
+      const b01 = { x: rect.x0, y: rect.y1, z: z0 };
+      const t00 = { x: rect.x0, y: rect.y0, z: z1 };
+      const t10 = { x: rect.x1, y: rect.y0, z: z1 };
+      const t11 = { x: rect.x1, y: rect.y1, z: z1 };
+      const t01 = { x: rect.x0, y: rect.y1, z: z1 };
+      overflowWorldFaces.push(
+        { floor, kind: "overflow", world: [b00, b10, t10, t00] },
+        { floor, kind: "overflow", world: [b10, b11, t11, t10] },
+        { floor, kind: "overflow", world: [b11, b01, t01, t11] },
+        { floor, kind: "overflow", world: [b01, b00, t00, t01] },
+        { floor, kind: "overflow", world: [t00, t10, t11, t01] }
+      );
+    };
 
     completeFloors.forEach((floor, index) => {
-      const x0 = (lotWidth - floor.widthFt) / 2;
+      // Each floor sits where the site plan puts it; without a placement it
+      // stays concentric with the ground floor, as it always did.
+      const placed = placedFloors?.[index];
+      const x0 = placed ? Number(placed.x0) : plannedCenterX - floor.widthFt / 2;
       const x1 = x0 + floor.widthFt;
-      const y0 = (lotDepth - floor.depthFt) / 2;
+      const y0 = placed ? Number(placed.y0) : plannedCenterY - floor.depthFt / 2;
       const y1 = y0 + floor.depthFt;
       const z0 = baseHeight;
       const z1 = baseHeight + floor.heightFt;
@@ -132,8 +322,41 @@ export default function BuildingPreview3D({
         { floor: index, kind: "wall-b", world: [b01, b00, t00, t01] },
         { floor: index, kind: "top", world: [t00, t10, t11, t01] }
       );
+      const middleX0 = Math.max(x0, envelopeBounds.x0);
+      const middleX1 = Math.min(x1, envelopeBounds.x1);
+      addOverflowBox({ x0, x1: Math.min(x1, envelopeBounds.x0), y0, y1 }, z0, z1, index);
+      addOverflowBox({ x0: Math.max(x0, envelopeBounds.x1), x1, y0, y1 }, z0, z1, index);
+      addOverflowBox(
+        { x0: middleX0, x1: middleX1, y0, y1: Math.min(y1, envelopeBounds.y0) },
+        z0,
+        z1,
+        index
+      );
+      addOverflowBox(
+        { x0: middleX0, x1: middleX1, y0: Math.max(y0, envelopeBounds.y1), y1 },
+        z0,
+        z1,
+        index
+      );
       baseHeight = z1;
     });
+
+    const terrainWorldFaces = [];
+    if (terrain?.samples?.length === 9) {
+      for (let row = 0; row < 2; row += 1) {
+        for (let column = 0; column < 2; column += 1) {
+          const i = row * 3 + column;
+          const cell = [
+            terrain.samples[i],
+            terrain.samples[i + 1],
+            terrain.samples[i + 4],
+            terrain.samples[i + 3],
+          ].map((sample) => ({ x: sample.x, y: sample.y, z: sample.z }));
+          terrainWorldFaces.push(cell);
+          boundsWorld.push(...cell);
+        }
+      }
+    }
 
     const cameraBounds = boundsWorld.map(camera);
     const xs = cameraBounds.map((point) => point.x);
@@ -159,6 +382,8 @@ export default function BuildingPreview3D({
     };
 
     const lot = lotWorld.map(project);
+    const envelope = envelopeWorld?.map(project) ?? null;
+    const terrainFaces = terrainWorldFaces.map((face) => face.map(project));
     const faces = worldFaces
       .map((face) => {
         const projected = face.world.map(project);
@@ -169,18 +394,23 @@ export default function BuildingPreview3D({
         };
       })
       .sort((a, b) => a.depth - b.depth);
+    const overflowFaces = overflowWorldFaces.map((face) => ({
+      ...face,
+      projected: face.world.map(project),
+    }));
 
     let dimensions = null;
     if (completeFloors.length > 0) {
-      const x0 = (lotWidth - groundWidth) / 2;
+      const x0 = plannedCenterX - groundWidth / 2;
       const x1 = x0 + groundWidth;
-      const y0 = (lotDepth - groundDepth) / 2;
+      const y0 = plannedCenterY - groundDepth / 2;
       const y1 = y0 + groundDepth;
+      const additionBaseHeight = verticalAddition ? existingHeight : 0;
       const groundCorners = [
-        { x: x0, y: y0, z: 0 },
-        { x: x1, y: y0, z: 0 },
-        { x: x1, y: y1, z: 0 },
-        { x: x0, y: y1, z: 0 },
+        { x: x0, y: y0, z: additionBaseHeight },
+        { x: x1, y: y0, z: additionBaseHeight },
+        { x: x1, y: y1, z: additionBaseHeight },
+        { x: x0, y: y1, z: additionBaseHeight },
       ].map((world) => ({ world, screen: project(world) }));
       const front = groundCorners.reduce((current, candidate) =>
         candidate.screen.y > current.screen.y ? candidate : current
@@ -191,10 +421,14 @@ export default function BuildingPreview3D({
       const depthNeighbor = groundCorners.find(
         (corner) => corner.world.x === front.world.x && corner.world.y !== front.world.y
       );
-      const buildingCenter = project({ x: lotWidth / 2, y: lotDepth / 2, z: totalHeight / 2 });
+      const buildingCenter = project({
+        x: x0 + groundWidth / 2,
+        y: y0 + groundDepth / 2,
+        z: verticalAddition ? existingHeight + plannedHeight / 2 : plannedHeight / 2,
+      });
       const width = offsetMeasurement(front.screen, widthNeighbor.screen, buildingCenter);
       const depth = offsetMeasurement(front.screen, depthNeighbor.screen, buildingCenter);
-      const heightGround = front.screen;
+      const heightGround = project({ ...front.world, z: 0 });
       const heightTop = project({ ...front.world, z: totalHeight });
       const outwardX = heightGround.x - buildingCenter.x;
       const outwardY = heightGround.y - buildingCenter.y;
@@ -230,14 +464,28 @@ export default function BuildingPreview3D({
       northScreenAngle = (Math.atan2(to.y - from.y, to.x - from.x) * 180) / Math.PI + 90;
     }
 
-    return { lot, faces, dimensions, northScreenAngle };
+    return { lot, envelope, terrainFaces, faces, overflowFaces, dimensions, northScreenAngle };
   }, [
     northAngleDeg,
+    terrain,
     completeFloors,
+    existingBuilding?.location,
+    existingBuilding?.position?.x0,
+    existingBuilding?.position?.y0,
+    existingBuilding?.additionLocation,
+    plannedOriginsFt,
+    existingDepth,
+    existingFootprintSqft,
+    existingHeight,
+    existingWidth,
+    setbacks?.front,
+    setbacks?.rear,
+    setbacks?.side,
     groundDepth,
     groundWidth,
     lotDepth,
     lotWidth,
+    plannedHeight,
     totalHeight,
     view.elevation,
     view.yaw,
@@ -268,7 +516,7 @@ export default function BuildingPreview3D({
     }
   };
   const description = completeFloors.length
-    ? `${completeFloors.length}-story house, ${groundWidth} feet wide by ${groundDepth} feet deep and ${totalHeight} feet high, centered inside a ${lotWidth} by ${lotDepth} foot lot. Drag to rotate and scroll to zoom.`
+    ? `${completeFloors.length}-story ${detachedAdu ? "detached ADU" : "house"}, ${groundWidth} feet wide by ${groundDepth} feet deep and ${totalHeight} feet high, inside a ${lotWidth} by ${lotDepth} foot lot. Drag to rotate and scroll to zoom.`
     : `${lotWidth} by ${lotDepth} foot lot awaiting planned house dimensions.`;
 
   return (
@@ -291,11 +539,30 @@ export default function BuildingPreview3D({
         {setbacks?.rear != null && (
           <span>Rear setback <strong>{fmtNumber(setbacks.rear)}′</strong></span>
         )}
+        {streetName && (
+          <span>Street <strong>{streetName}</strong></span>
+        )}
+        {terrain && (
+          <span>
+            Elevation <strong>{fmtNumber(terrain.centerElevationFt)}′</strong>
+            {" · "}rise <strong>{fmtNumber(terrain.riseFt)}′</strong>
+            {" · "}slope <strong>{fmtNumber(terrain.slopePct)}%</strong>
+          </span>
+        )}
+        {existingFootprintSqft > 0 && (
+          <span>Existing footprint <strong>{fmtArea(existingFootprintSqft)} sq ft</strong></span>
+        )}
         {completeFloors.length > 0 ? (
           <>
-            <span>House width <strong>{groundWidth}′</strong></span>
-            <span>House depth <strong>{groundDepth}′</strong></span>
+            <span>{detachedAdu ? "ADU width" : "House width"} <strong>{groundWidth}′</strong></span>
+            <span>{detachedAdu ? "ADU depth" : "House depth"} <strong>{groundDepth}′</strong></span>
             <span>Total height <strong>{fmtNumber(totalHeight)}′</strong></span>
+            {existingFootprintSqft > 0 && (
+              <span>
+                {verticalAddition ? "New floor height" : detachedAdu ? "ADU height" : "Addition height"}{" "}
+                <strong>{fmtNumber(plannedHeight)}′</strong>
+              </span>
+            )}
             <span>
               Proposed area <strong>{fmtArea(proposedAreaSqft)} sq ft</strong>
             </span>
@@ -304,6 +571,16 @@ export default function BuildingPreview3D({
           <span className="building-preview-prompt">Enter the number of floors to preview the house.</span>
         )}
       </div>
+
+      {existingFootprintSqft > 0 && (
+        <div className="massing-legend" aria-label="3D preview legend">
+          <span><i className="existing" />Existing structure</span>
+          <span><i className="addition" />{detachedAdu ? "Proposed ADU" : "New addition"}</span>
+          {scene.overflowFaces.length > 0 && (
+            <span><i className="overflow" />Outside buildable envelope</span>
+          )}
+        </div>
+      )}
 
       <div className="building-viewer-stage" role="region" aria-label="Interactive 3D property viewer">
         <div className="building-viewer-tools">
@@ -368,7 +645,25 @@ export default function BuildingPreview3D({
             }
           }}
         >
+          {scene.terrainFaces.map((face, index) => (
+            <polygon
+              className={`massing-terrain massing-terrain-${index}`}
+              points={points(face)}
+              key={`terrain-${index}`}
+            />
+          ))}
           <polygon className="massing-lot" points={points(scene.lot)} />
+          {scene.envelope && <polygon className="massing-envelope" points={points(scene.envelope)} />}
+          {streetName && (
+            <text
+              className="massing-street-label"
+              x={(scene.lot[0].x + scene.lot[1].x) / 2}
+              y={(scene.lot[0].y + scene.lot[1].y) / 2 + 18}
+              textAnchor="middle"
+            >
+              {streetName} · front
+            </text>
+          )}
           {scene.northScreenAngle != null && (
             <g
               className="massing-compass"
@@ -386,6 +681,13 @@ export default function BuildingPreview3D({
               key={`${face.floor}-${face.kind}-${index}`}
             />
           ))}
+          {scene.overflowFaces.map((face, index) => (
+            <polygon
+              className="massing-face massing-face-overflow"
+              points={points(face.projected)}
+              key={`overflow-${face.floor}-${index}`}
+            />
+          ))}
           {scene.dimensions && (
             <g className="massing-dimensions" aria-hidden="true">
               <Measurement measure={scene.dimensions.width} label={`${groundWidth}′ width`} />
@@ -396,12 +698,32 @@ export default function BuildingPreview3D({
         </svg>
       </div>
 
+      {parcelGeojson && (
+        <p className="terrain-note">
+          {terrainStatus === "loading" && "Loading USGS 3DEP terrain…"}
+          {terrainStatus === "ready" && (
+            <>
+              {TERRAIN_SOURCE}: {fmtNumber(terrain.centerElevationFt)}′ at parcel center
+              {terrain.resolutionM && <> · {fmtNumber(terrain.resolutionM)} m source resolution</>}.
+            </>
+          )}
+          {terrainStatus === "unavailable" && "USGS 3DEP terrain is temporarily unavailable; showing a level lot."}
+          {terrainStatus === "idle" && "Terrain requires a resolved parcel and orientation."}
+        </p>
+      )}
+
       {completeFloors.length > 0 && (
         <>
           <ol className="massing-floor-list" aria-label="Planned floor dimensions">
             {completeFloors.map((floor, index) => (
               <li key={index}>
-                Floor {index + 1}:{" "}
+                {verticalAddition
+                  ? `Floor ${Math.ceil(existingStories) + index + 1}`
+                  : detachedAdu
+                    ? `ADU floor ${index + 1}`
+                  : index === 0
+                    ? "New ground-floor addition"
+                    : `Addition floor ${index + 1}`}:{" "}
                 <strong>
                   {floor.widthFt}′ × {floor.depthFt}′ × {fmtNumber(floor.heightFt)}′ high
                 </strong>
@@ -414,8 +736,18 @@ export default function BuildingPreview3D({
             </li>
           </ol>
           <p className="massing-height-note">
-            Total height is the sum of the floor heights entered above; new floors start at{" "}
-            {defaultFloorHeightFt} ft.
+            {verticalAddition
+              ? `The new floor begins above the estimated ${fmtNumber(existingHeight)} ft existing structure.`
+              : detachedAdu
+                ? "The proposed ADU is detached and remains at least 1 ft from the existing structure."
+              : `The ground addition is shown ${
+                  {
+                    side_left: "on the left side of",
+                    side_right: "on the right side of",
+                    front: "in front of",
+                    back: "behind",
+                  }[existingBuilding?.additionLocation] || "beside"
+                } the existing structure.`}
           </p>
         </>
       )}
