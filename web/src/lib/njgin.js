@@ -77,13 +77,16 @@ function muniWhere(muni) {
   return clauses.join(" AND ");
 }
 
-async function query(params) {
+async function query(params, signal) {
   const url = new URL(`${LAYER}/query`);
   Object.entries({ f: "geojson", ...params }).forEach(([key, value]) =>
     url.searchParams.set(key, String(value))
   );
 
-  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal,
+  });
   if (!response.ok) {
     throw new Error(`NJGIN parcel service returned ${response.status}.`);
   }
@@ -113,6 +116,16 @@ function lotAreaSqft(properties, feature) {
   return isFinite(acres) && acres > 0 ? Math.round(acres * SQFT_PER_ACRE) : null;
 }
 
+/** MOD-IV stores names in caps ("CARLSTADT BORO"); the UI reads them as prose. */
+const titleCase = (value) =>
+  value == null
+    ? null
+    : String(value)
+        .toLowerCase()
+        .replace(/\b[a-z]/g, (c) => c.toUpperCase());
+const municipalityName = (value) =>
+  titleCase(value)?.replace(/\s+(City|Twp|Town|Boro|Borough|Village)$/i, "") ?? null;
+
 function toRow(properties, feature) {
   return {
     // No database row exists for a live parcel; PAMS_PIN is the stable key.
@@ -123,6 +136,10 @@ function toRow(properties, feature) {
     lot: properties.PCLLOT || null,
     prop_class: properties.PROP_CLASS || null,
     lot_area_sqft: lotAreaSqft(properties, feature),
+    // Carried through so a statewide hit can say which town it is in, and so
+    // the app can switch to that municipality when it happens to be loaded.
+    muni_name: municipalityName(properties.MUN_NAME),
+    county: titleCase(properties.COUNTY) || null,
     source: "njgin",
   };
 }
@@ -145,7 +162,124 @@ export async function searchNjginParcels(muni, text, limit = 15) {
 
   return (body.features ?? [])
     .map((feature) => toRow(feature.properties ?? {}, null))
+    .filter((row) => row.pams_pin)
+    .map((row) => ({ ...row, kind: "parcel", scope: "muni" }));
+}
+
+/**
+ * The same address search with the municipality filter dropped, so a client can
+ * type any New Jersey address rather than only one inside the town this tool
+ * has zoning for. The boundary that comes back is as real as any other NJGIN
+ * parcel; what is missing is a zoning layer to intersect it with, which is why
+ * these rows are marked `scope: "statewide"` and flagged as unverified in the UI.
+ */
+export async function searchNjginParcelsAnywhere(text, limit = 10) {
+  const needle = sqlLiteral(text);
+  if (needle.length < 3) return [];
+
+  const body = await query({
+    where: `UPPER(PROP_LOC) LIKE '%${needle}%'`,
+    outFields: OUT_FIELDS,
+    orderByFields: "PROP_LOC",
+    returnGeometry: false,
+    resultRecordCount: Math.min(limit, 50),
+  });
+
+  return (body.features ?? [])
+    .map((feature) => toRow(feature.properties ?? {}, null))
+    .filter((row) => row.pams_pin)
+    .map((row) => ({ ...row, kind: "parcel", scope: "statewide" }));
+}
+
+/**
+ * Find the statewide parcel polygon containing a geocoded WGS84 point.
+ *
+ * This is the primary parcel lookup path: address -> Census coordinates ->
+ * ArcGIS point-in-polygon query. It avoids municipality-specific parcel
+ * searches entirely. A point on a condominium or tax-boundary seam can return
+ * more than one feature, so the smallest containing polygon is presented first.
+ */
+export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addressText = "") {
+  const y = Number(lat);
+  const x = Number(lon);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
+
+  const pointQuery = {
+      geometry: JSON.stringify({
+        x,
+        y,
+        spatialReference: { wkid: 4326 },
+      }),
+      geometryType: "esriGeometryPoint",
+      inSR: 4326,
+      spatialRel: "esriSpatialRelIntersects",
+      outFields: OUT_FIELDS,
+      returnGeometry: true,
+      outSR: 4326,
+      resultRecordCount: Math.min(limit, 20),
+    };
+  let body = await query(pointQuery, signal);
+  let features = body.features ?? [];
+
+  // Census address coordinates are interpolated along the street centerline.
+  // When that point falls in the right-of-way instead of inside a tax parcel,
+  // retain point-in-polygon as the first attempt, then make one tightly bounded
+  // proximity query and rank those parcels by the matched street address.
+  if (features.length === 0) {
+    body = await query(
+      {
+        ...pointQuery,
+        distance: 150,
+        units: "esriSRUnit_Foot",
+        resultRecordCount: 30,
+      },
+      signal
+    );
+    features = (body.features ?? []).sort(
+      (a, b) =>
+        addressMatchScore(b?.properties?.PROP_LOC, addressText) -
+          addressMatchScore(a?.properties?.PROP_LOC, addressText) ||
+        turf.area(a) - turf.area(b)
+    );
+    const bestScore = addressMatchScore(features[0]?.properties?.PROP_LOC, addressText);
+    if (bestScore >= 10) {
+      features = features.filter(
+        (feature) => addressMatchScore(feature?.properties?.PROP_LOC, addressText) === bestScore
+      );
+    }
+  } else {
+    features = features.sort((a, b) => turf.area(a) - turf.area(b));
+  }
+
+  return features
+    .filter((feature) => feature?.geometry)
+    .slice(0, Math.min(limit, 20))
+    .map((feature) => ({
+      ...toRow(feature.properties ?? {}, feature),
+      kind: "parcel",
+      scope: "statewide",
+      lat: y,
+      lon: x,
+    }))
     .filter((row) => row.pams_pin);
+}
+
+function addressMatchScore(parcelAddress, geocodedAddress) {
+  const parcel = String(parcelAddress ?? "").toUpperCase();
+  const geocoded = String(geocodedAddress ?? "").toUpperCase();
+  if (!parcel || !geocoded) return 0;
+  const number = geocoded.match(/^\s*(\d+)/)?.[1];
+  const streetWords = geocoded
+    .replace(/^\s*\d+\s*/, "")
+    .split(",")[0]
+    .split(/\s+/)
+    .filter((word) => word.length > 2);
+  let score = 0;
+  if (number && new RegExp(`(^|\\D)${number}(\\D|$)`).test(parcel)) score += 10;
+  for (const word of streetWords) {
+    if (parcel.includes(word)) score += 2;
+  }
+  return score;
 }
 
 /**
@@ -199,8 +333,12 @@ function toLocalFeet(geometry, origin) {
  * a different district without another network round trip.
  */
 export async function fetchNjginParcel(muni, pamsPin, insetFt = 0) {
+  // PAMS_PIN is district_block_lot — already unique statewide — so a null
+  // municipality is a legitimate "look this up wherever it is" lookup, which
+  // is what an out-of-town address search needs.
+  const scope = muni ? `${muniWhere(muni)} AND ` : "";
   const body = await query({
-    where: `${muniWhere(muni)} AND PAMS_PIN = '${pinLiteral(pamsPin)}'`,
+    where: `${scope}PAMS_PIN = '${pinLiteral(pamsPin)}'`,
     outFields: OUT_FIELDS,
     returnGeometry: true,
     outSR: 4326,

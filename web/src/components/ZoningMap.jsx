@@ -62,6 +62,13 @@ export default function ZoningMap({
   districts = [],
   parcelGeojson,
   parcelLabel,
+  // A lon/lat point for a property we could locate but have no parcel polygon
+  // for — a geocoded address. Drawn as a pin so the map can still answer
+  // "where is this", which is all the geocoder established.
+  focusPoint = null,
+  // The located property sits outside the zoning Marco Designs has imported,
+  // so no district applies to it. Raises the red flag above the legend.
+  unverified = false,
   headingLabel = "Property preview",
   note,
   onExpand,
@@ -71,6 +78,7 @@ export default function ZoningMap({
   const mapRef = useRef(null);
   const zoningLayerRef = useRef(null);
   const parcelLayerRef = useRef(null);
+  const pointLayerRef = useRef(null);
   const muniBoundsRef = useRef(null);
 
   const [zoning, setZoning] = useState(null);
@@ -175,30 +183,54 @@ export default function ZoningMap({
 
     zoningLayerRef.current = layer;
     muniBoundsRef.current = layer.getBounds();
-    if (!parcelGeojson) map.fitBounds(layer.getBounds(), { padding: [12, 12] });
+    if (!parcelGeojson && !focusPoint) map.fitBounds(layer.getBounds(), { padding: [12, 12] });
   }, [zoning, districts]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Zoom to the chosen parcel; fall back to the whole town when cleared.
+  // Zoom to the chosen property — its parcel polygon when one exists, otherwise
+  // the geocoded point — and fall back to the whole town when cleared.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     parcelLayerRef.current?.remove();
     parcelLayerRef.current = null;
+    pointLayerRef.current?.remove();
+    pointLayerRef.current = null;
 
-    if (!parcelGeojson) {
-      setZoomedToParcel(false);
-      if (muniBoundsRef.current) map.fitBounds(muniBoundsRef.current, { padding: [12, 12] });
+    // An out-of-coverage property is outlined in the same red as its flag, so
+    // the map and the warning under it read as one statement.
+    const outlineColor = unverified ? "#b3261e" : "#2b2b2b";
+
+    if (parcelGeojson) {
+      const layer = L.geoJSON(parcelGeojson, {
+        style: { color: outlineColor, weight: 2.5, fillColor: "#ffffff", fillOpacity: 0.55 },
+      }).addTo(map);
+      parcelLayerRef.current = layer;
+      map.fitBounds(layer.getBounds(), { padding: [40, 40], maxZoom: 19 });
+      setZoomedToParcel(true);
       return;
     }
 
-    const layer = L.geoJSON(parcelGeojson, {
-      style: { color: "#2b2b2b", weight: 2.5, fillColor: "#ffffff", fillOpacity: 0.55 },
-    }).addTo(map);
-    parcelLayerRef.current = layer;
-    map.fitBounds(layer.getBounds(), { padding: [40, 40], maxZoom: 19 });
-    setZoomedToParcel(true);
-  }, [parcelGeojson]);
+    if (focusPoint) {
+      // A circle marker rather than L.marker: no icon asset to resolve through
+      // the bundler, and a point is honestly a point, not a parcel.
+      const marker = L.circleMarker([focusPoint.lat, focusPoint.lon], {
+        radius: 9,
+        color: outlineColor,
+        weight: 3,
+        fillColor: outlineColor,
+        fillOpacity: 0.35,
+      }).addTo(map);
+      if (focusPoint.label) marker.bindPopup(escapeHtml(focusPoint.label));
+      pointLayerRef.current = marker;
+      map.setView([focusPoint.lat, focusPoint.lon], 18);
+      setZoomedToParcel(true);
+      return;
+    }
+
+    setZoomedToParcel(false);
+    if (muniBoundsRef.current) map.fitBounds(muniBoundsRef.current, { padding: [12, 12] });
+  }, [parcelGeojson, focusPoint, unverified]);
 
   // Union the polygon layer with the municipality's configured districts.
   // A configured district without geometry still belongs in the legend; it
@@ -271,8 +303,19 @@ export default function ZoningMap({
         </p>
       )}
 
+      {/* Sits with the legend deliberately: the legend is the claim that a
+          colour means a district, and this is where that claim stops holding. */}
+      {unverified && (
+        <p className="zoning-unverified" role="status">
+          <span className="unverified-flag" aria-hidden="true">
+            ⚑
+          </span>
+          <strong>Zoning district not verified</strong>
+        </p>
+      )}
+
       {legend.length > 0 && (
-        <ul className="zoning-legend">
+        <ul className={unverified ? "zoning-legend dimmed" : "zoning-legend"}>
           {legend.map((a) => (
             <li key={a.district_code}>
               <i style={{ background: districtColor(a.district_code) }} aria-hidden="true" />

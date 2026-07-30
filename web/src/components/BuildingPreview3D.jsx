@@ -57,6 +57,9 @@ export default function BuildingPreview3D({
   streetName,
   parcelGeojson,
   existingBuilding,
+  // Each floor's rectangle in lot feet, as placed on the site plan. Entries
+  // may be null for floors without a size. Null/empty keeps the defaults.
+  plannedOriginsFt = null,
 }) {
   const [view, setView] = useState({ yaw: -36, elevation: 34, zoom: 1 });
   const [isDragging, setIsDragging] = useState(false);
@@ -102,7 +105,11 @@ export default function BuildingPreview3D({
     existingFootprintSqft > 0
       ? Math.max(defaultFloorHeightFt, existingStories * defaultFloorHeightFt)
       : 0;
-  const verticalAddition = existingBuilding?.additionLocation === "above";
+  const verticalAddition =
+    existingBuilding?.placementMode != null
+      ? existingBuilding.placementMode === "vertical"
+      : existingBuilding?.additionLocation === "above";
+  const detachedAdu = existingBuilding?.placementMode === "adu";
   const totalHeight = verticalAddition
     ? existingHeight + plannedHeight
     : Math.max(existingHeight, plannedHeight);
@@ -185,13 +192,23 @@ export default function BuildingPreview3D({
     if (envelopeWorld) boundsWorld.push(...envelopeWorld);
     let existingBounds = null;
     if (existingFootprintSqft > 0) {
-      const x0 = (lotWidth - existingWidth) / 2;
-      const y0 =
+      const defaultX0 = (lotWidth - existingWidth) / 2;
+      const defaultY0 =
         existingBuilding?.location === "front"
           ? 0
           : existingBuilding?.location === "rear"
             ? lotDepth - existingDepth
             : (lotDepth - existingDepth) / 2;
+      const positionedX0 = Number(existingBuilding?.position?.x0);
+      const positionedY0 = Number(existingBuilding?.position?.y0);
+      const x0 = Math.min(
+        Math.max(0, Number.isFinite(positionedX0) ? positionedX0 : defaultX0),
+        Math.max(0, lotWidth - existingWidth)
+      );
+      const y0 = Math.min(
+        Math.max(0, Number.isFinite(positionedY0) ? positionedY0 : defaultY0),
+        Math.max(0, lotDepth - existingDepth)
+      );
       const x1 = x0 + existingWidth;
       const y1 = y0 + existingDepth;
       existingBounds = { x0, x1, y0, y1 };
@@ -224,8 +241,12 @@ export default function BuildingPreview3D({
       }
     }
 
-    let plannedCenterX = lotWidth / 2;
-    let plannedCenterY = lotDepth / 2;
+    // Centring on the *envelope* rather than the lot: with asymmetric front
+    // and rear setbacks the lot's centre is not where a maximum-size house can
+    // actually go, and the site plan places it here too. The two views draw
+    // the same building.
+    let plannedCenterX = (envelopeBounds.x0 + envelopeBounds.x1) / 2;
+    let plannedCenterY = (envelopeBounds.y0 + envelopeBounds.y1) / 2;
     let baseHeight = 0;
     if (existingBounds) {
       if (verticalAddition) {
@@ -249,6 +270,13 @@ export default function BuildingPreview3D({
         }
       }
     }
+    // The site plan's placement wins over every default above: the massing has
+    // to show the building where the client put it, floor by floor.
+    const placedFloors = plannedOriginsFt;
+    if (placedFloors?.[0]) {
+      plannedCenterX = Number(placedFloors[0].x0) + groundWidth / 2;
+      plannedCenterY = Number(placedFloors[0].y0) + groundDepth / 2;
+    }
     const addOverflowBox = (rect, z0, z1, floor) => {
       if (rect.x1 <= rect.x0 || rect.y1 <= rect.y0) return;
       const b00 = { x: rect.x0, y: rect.y0, z: z0 };
@@ -269,9 +297,12 @@ export default function BuildingPreview3D({
     };
 
     completeFloors.forEach((floor, index) => {
-      const x0 = plannedCenterX - floor.widthFt / 2;
+      // Each floor sits where the site plan puts it; without a placement it
+      // stays concentric with the ground floor, as it always did.
+      const placed = placedFloors?.[index];
+      const x0 = placed ? Number(placed.x0) : plannedCenterX - floor.widthFt / 2;
       const x1 = x0 + floor.widthFt;
-      const y0 = plannedCenterY - floor.depthFt / 2;
+      const y0 = placed ? Number(placed.y0) : plannedCenterY - floor.depthFt / 2;
       const y1 = y0 + floor.depthFt;
       const z0 = baseHeight;
       const z1 = baseHeight + floor.heightFt;
@@ -439,7 +470,10 @@ export default function BuildingPreview3D({
     terrain,
     completeFloors,
     existingBuilding?.location,
+    existingBuilding?.position?.x0,
+    existingBuilding?.position?.y0,
     existingBuilding?.additionLocation,
+    plannedOriginsFt,
     existingDepth,
     existingFootprintSqft,
     existingHeight,
@@ -482,7 +516,7 @@ export default function BuildingPreview3D({
     }
   };
   const description = completeFloors.length
-    ? `${completeFloors.length}-story house, ${groundWidth} feet wide by ${groundDepth} feet deep and ${totalHeight} feet high, centered inside a ${lotWidth} by ${lotDepth} foot lot. Drag to rotate and scroll to zoom.`
+    ? `${completeFloors.length}-story ${detachedAdu ? "detached ADU" : "house"}, ${groundWidth} feet wide by ${groundDepth} feet deep and ${totalHeight} feet high, inside a ${lotWidth} by ${lotDepth} foot lot. Drag to rotate and scroll to zoom.`
     : `${lotWidth} by ${lotDepth} foot lot awaiting planned house dimensions.`;
 
   return (
@@ -520,11 +554,14 @@ export default function BuildingPreview3D({
         )}
         {completeFloors.length > 0 ? (
           <>
-            <span>House width <strong>{groundWidth}′</strong></span>
-            <span>House depth <strong>{groundDepth}′</strong></span>
+            <span>{detachedAdu ? "ADU width" : "House width"} <strong>{groundWidth}′</strong></span>
+            <span>{detachedAdu ? "ADU depth" : "House depth"} <strong>{groundDepth}′</strong></span>
             <span>Total height <strong>{fmtNumber(totalHeight)}′</strong></span>
             {existingFootprintSqft > 0 && (
-              <span>{verticalAddition ? "New floor height" : "Addition height"} <strong>{fmtNumber(plannedHeight)}′</strong></span>
+              <span>
+                {verticalAddition ? "New floor height" : detachedAdu ? "ADU height" : "Addition height"}{" "}
+                <strong>{fmtNumber(plannedHeight)}′</strong>
+              </span>
             )}
             <span>
               Proposed area <strong>{fmtArea(proposedAreaSqft)} sq ft</strong>
@@ -538,7 +575,7 @@ export default function BuildingPreview3D({
       {existingFootprintSqft > 0 && (
         <div className="massing-legend" aria-label="3D preview legend">
           <span><i className="existing" />Existing structure</span>
-          <span><i className="addition" />New addition</span>
+          <span><i className="addition" />{detachedAdu ? "Proposed ADU" : "New addition"}</span>
           {scene.overflowFaces.length > 0 && (
             <span><i className="overflow" />Outside buildable envelope</span>
           )}
@@ -682,6 +719,8 @@ export default function BuildingPreview3D({
               <li key={index}>
                 {verticalAddition
                   ? `Floor ${Math.ceil(existingStories) + index + 1}`
+                  : detachedAdu
+                    ? `ADU floor ${index + 1}`
                   : index === 0
                     ? "New ground-floor addition"
                     : `Addition floor ${index + 1}`}:{" "}
@@ -699,6 +738,8 @@ export default function BuildingPreview3D({
           <p className="massing-height-note">
             {verticalAddition
               ? `The new floor begins above the estimated ${fmtNumber(existingHeight)} ft existing structure.`
+              : detachedAdu
+                ? "The proposed ADU is detached and remains at least 1 ft from the existing structure."
               : `The ground addition is shown ${
                   {
                     side_left: "on the left side of",

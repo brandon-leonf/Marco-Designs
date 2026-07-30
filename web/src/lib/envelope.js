@@ -210,16 +210,36 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
   };
 }
 
+/** Parse frontage × depth wherever MOD-IV LAND_DESC contains that pattern. */
+export function parseLandDescriptionDimensions(landDescription) {
+  const match = String(landDescription ?? "").match(
+    /(?:^|[^0-9.])(\d+(?:\.\d+)?)\s*(?:X|×)\s*(\d+(?:\.\d+)?)(?=$|[^0-9.])/i
+  );
+  if (!match) return null;
+  const width = Number(match[1]);
+  const depth = Number(match[2]);
+  return width > 0 && depth > 0
+    ? { width_ft: width, depth_ft: depth, source: "land_desc" }
+    : null;
+}
+
 /**
- * Recorded rectangular dimensions (MOD-IV "25X102") for a parcel, when the
- * import parsed them. This is the fallback the project doc calls for: when
- * the uniform polygon inset collapses a narrow lot to nothing, per-edge
- * arithmetic on the recorded rectangle is more faithful than reporting zero.
+ * Resolve parcel dimensions in the required order: parse LAND_DESC first,
+ * then use the frontage/depth fields populated by the imported MOD-IV record.
+ * A real parcel with neither source returns null; callers must never substitute
+ * the application's starter lot dimensions.
  */
 export function recordedRectDims(parcel) {
+  const fromDescription = parseLandDescriptionDimensions(
+    parcel?.land_desc ?? parcel?.LAND_DESC ?? parcel?.mod_iv?.LAND_DESC
+  );
+  if (fromDescription) return fromDescription;
+
   const width = Number(parcel?.lot_frontage_ft);
   const depth = Number(parcel?.lot_depth_ft);
-  return width > 0 && depth > 0 ? { width_ft: width, depth_ft: depth } : null;
+  return width > 0 && depth > 0
+    ? { width_ft: width, depth_ft: depth, source: "imported_mod_iv" }
+    : null;
 }
 
 /** Largest applicable setback → conservative uniform inset for previews. */

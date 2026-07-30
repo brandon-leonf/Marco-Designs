@@ -171,6 +171,24 @@ export async function municipalityImpact(municipalityId) {
 }
 
 /**
+ * How many zoning polygons each municipality has, keyed by id.
+ *
+ * The municipality list reports readiness, and "no zoning layer loaded" is the
+ * one gap that cannot be seen in the nested config query — a town can have
+ * districts and rules on file and still have nothing to intersect a parcel
+ * with. Ids only, counted in the database; the geometry stays where it is.
+ */
+export async function zoningAreaCounts() {
+  const { data, error } = await supabase.from("zoning_areas").select("municipality_id");
+  if (error) throw error;
+  const counts = new Map();
+  for (const row of data ?? []) {
+    counts.set(row.municipality_id, (counts.get(row.municipality_id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
  * Delete a municipality and everything hanging off it.
  *
  * Parcels go first and explicitly: their foreign key has no ON DELETE CASCADE,

@@ -14,9 +14,10 @@ import {
   municipalityImpact,
   deleteMunicipality,
   deleteDistrict,
+  zoningAreaCounts,
 } from "./lib/adminApi.js";
 import Logo from "./components/Logo.jsx";
-import { computeBuildable } from "./lib/envelope.js";
+import { computeBuildable, missingDistrictRules } from "./lib/envelope.js";
 
 // Drafts live in this browser only (localStorage, keyed by district). Nothing
 // touches the live database until Publish.
@@ -109,6 +110,229 @@ export default function AdminApp() {
         )}
       </main>
     </>
+  );
+}
+
+/**
+ * What still has to happen before a municipality can answer a real enquiry.
+ *
+ * Derived, never stored: every one of these is a fact about the configuration
+ * as it stands, so a town cannot be marked "Active" in the database while the
+ * public calculator would refuse to run on it. The first unmet condition is
+ * the one reported — it is the next thing to do.
+ */
+function municipalityStatus(muni, zoningAreas) {
+  const districts = muni?.zoning_districts ?? [];
+  const rawCostModel = muni?.build_cost_models;
+  const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
+  const tiers = costModel?.build_cost_tiers ?? [];
+  const hasPricing = tiers.some((tier) => Number(tier?.rate_per_sqft) > 0);
+
+  if (districts.length === 0) return { key: "districts", label: "Needs districts" };
+  // null means the count could not be read. Unknown is not the same as zero,
+  // and reporting a missing layer on a failed query would be a lie.
+  if (zoningAreas === 0) return { key: "zoning", label: "Needs zoning layer" };
+  if (!hasPricing) return { key: "pricing", label: "Needs pricing" };
+  if (districts.some((district) => missingDistrictRules(district).length > 0)) {
+    return { key: "draft", label: "Draft" };
+  }
+  return { key: "active", label: "Active" };
+}
+
+/** "UC" for Union City — the list's avatar, from the name we already have. */
+function initialsFor(name) {
+  const words = String(name ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return "—";
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return (words[0][0] + words[1][0]).toUpperCase();
+}
+
+// The rule groups, as tabs. Setbacks opens first because it is the section a
+// district cannot be calculated without; Pricing is here rather than in its own
+// nav section because it is edited in the same draft-and-publish cycle.
+const RULE_TABS = [
+  { id: "setbacks", label: "Setbacks & limits" },
+  { id: "adu", label: "ADU" },
+  { id: "pricing", label: "Pricing" },
+  { id: "import", label: "Import PDF" },
+  { id: "review", label: "Review & test" },
+];
+
+// Districts, rules and pricing are all reached by drilling into a town, so
+// they are not listed here. A top-level "District Rules" would jump to
+// whichever municipality happened to be selected — skipping the choice the
+// whole section depends on.
+const NAV_ITEMS = [
+  { id: "dashboard", label: "Dashboard", icon: HomeIcon },
+  { id: "municipalities", label: "Municipalities", icon: BuildingIcon },
+];
+
+function AdminSidebar({ view, onView, adminEmail }) {
+  return (
+    <nav className="admin-sidebar" aria-label="Admin sections">
+      <p className="admin-sidebar-heading">Main</p>
+      <ul>
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          return (
+            <li key={item.id}>
+              <button
+                type="button"
+                className={view === item.id ? "admin-nav-item active" : "admin-nav-item"}
+                onClick={() => onView(item.id)}
+                aria-current={view === item.id ? "page" : undefined}
+              >
+                <Icon />
+                {item.label}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="admin-side-note admin-signed-in">
+        Signed in as <strong>{adminEmail}</strong>
+      </p>
+    </nav>
+  );
+}
+
+/**
+ * The municipality list: search, readiness at a glance, and the way into a
+ * town's configuration. Selecting one loads it and moves to its district rules.
+ */
+function MunicipalitiesPanel({
+  munis,
+  muniId,
+  zoningCounts,
+  ready,
+  query,
+  onQuery,
+  onSelect,
+  onNew,
+  children,
+}) {
+  const needle = query.trim().toLowerCase();
+  const matches = needle
+    ? munis.filter((item) =>
+        `${item.name} ${item.state_code} ${item.county ?? ""}`.toLowerCase().includes(needle)
+      )
+    : munis;
+
+  return (
+    <div className="card admin-municipalities">
+      <div className="admin-panel-head">
+        <h2>Municipalities</h2>
+        <button type="button" className="primary compact" disabled={!ready} onClick={onNew}>
+          ＋ New municipality
+        </button>
+      </div>
+
+      <div className="admin-search">
+        <span className="admin-search-icon" aria-hidden="true">
+          <SearchIcon />
+        </span>
+        <input
+          type="search"
+          value={query}
+          placeholder="Search municipalities…"
+          aria-label="Search municipalities"
+          onChange={(event) => onQuery(event.target.value)}
+        />
+      </div>
+
+      {children}
+
+      <ul className="muni-list">
+        {matches.map((item) => {
+          const status = municipalityStatus(
+            item,
+            zoningCounts ? zoningCounts.get(item.id) ?? 0 : null
+          );
+          return (
+            <li key={item.id}>
+              <button
+                type="button"
+                className={item.id === muniId ? "muni-card selected" : "muni-card"}
+                onClick={() => onSelect(item.id)}
+              >
+                <span className="muni-avatar" aria-hidden="true">
+                  {initialsFor(item.name)}
+                </span>
+                <span className="muni-card-body">
+                  <span className="muni-card-title">
+                    <strong>
+                      {item.name}, {item.state_code}
+                    </strong>
+                    <em className={`muni-status ${status.key}`}>{status.label}</em>
+                  </span>
+                  <span className="muni-card-meta">
+                    {item.zoning_districts.length}{" "}
+                    {item.zoning_districts.length === 1 ? "district" : "districts"} · Updated{" "}
+                    {formatUpdated(item.last_updated)}
+                  </span>
+                </span>
+                <span className="muni-card-chevron" aria-hidden="true">
+                  ›
+                </span>
+              </button>
+            </li>
+          );
+        })}
+        {matches.length === 0 && (
+          <li className="admin-side-note">No municipality matches “{query.trim()}”.</li>
+        )}
+      </ul>
+
+      <p className="admin-list-footer">
+        Showing {matches.length} of {munis.length}
+      </p>
+    </div>
+  );
+}
+
+function formatUpdated(value) {
+  if (!value) return "—";
+  // `last_updated` is a calendar date, not an instant. `new Date("2026-07-26")`
+  // reads it as UTC midnight, which renders as the 25th anywhere west of
+  // Greenwich — so build the date in local time from its parts instead.
+  const parts = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const date = parts
+    ? new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]))
+    : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function HomeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 10.5 12 3l9 7.5" />
+      <path d="M5.5 9.5V20h13V9.5" />
+    </svg>
+  );
+}
+
+function BuildingIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="4" y="3" width="16" height="18" rx="1.5" />
+      <path d="M8 7h2M14 7h2M8 11h2M14 11h2M8 15h2M14 15h2" />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+         strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16 16 4.5 4.5" />
+    </svg>
   );
 }
 
@@ -240,6 +464,11 @@ function ConfigEditor({ adminEmail, ready }) {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfProgress, setPdfProgress] = useState("");
   const [pdfImportedKeys, setPdfImportedKeys] = useState([]);
+  // Which sidebar section is showing. The list opens first: picking the town
+  // is the decision every other section depends on.
+  const [view, setView] = useState("municipalities");
+  const [muniQuery, setMuniQuery] = useState("");
+  const [zoningCounts, setZoningCounts] = useState(null);
 
   const reload = () =>
     fetchMunicipalities()
@@ -258,6 +487,44 @@ function ConfigEditor({ adminEmail, ready }) {
       }
     });
   }, []);
+
+  // Readiness for the list. A failure here must not block the editor, so an
+  // unavailable count is simply left unknown rather than reported as zero —
+  // "Needs zoning layer" has to mean the layer is missing, not the query is.
+  useEffect(() => {
+    let stale = false;
+    zoningAreaCounts()
+      .then((counts) => !stale && setZoningCounts(counts))
+      .catch(() => !stale && setZoningCounts(null));
+    return () => {
+      stale = true;
+    };
+  }, [munis]);
+
+  // Which group of rules the district editor is showing. Reset on every
+  // district change so a new district always opens on its setbacks.
+  const [ruleTab, setRuleTab] = useState("setbacks");
+
+  /**
+   * Pick a town and show its districts. Deliberately no district is selected:
+   * the drill-down is municipality → district → rules, and auto-opening one
+   * district would hide that the town has others.
+   */
+  const openMunicipality = (id) => {
+    setMuniId(id);
+    setDistrictId(null);
+    setView("districts");
+  };
+
+  const openDistrict = (id) => {
+    setDistrictId(id);
+    setRuleTab("setbacks");
+    setView("rules");
+  };
+
+  // Districts, rules and pricing are all inside the Municipalities section, so
+  // the rail stays lit on Municipalities however deep the drill-down goes.
+  const activeNav = view === "dashboard" ? "dashboard" : "municipalities";
 
   const muni = munis?.find((m) => m.id === muniId) ?? null;
   const district = muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
@@ -758,8 +1025,11 @@ function ConfigEditor({ adminEmail, ready }) {
   };
 
   if (loadError) return <div className="card error">Failed to load data: {loadError}</div>;
-  if (!munis || !draft || !costDraft)
-    return <div className="card loading-card">Loading configuration…</div>;
+  // Only the municipality list is needed to render the shell. The drafts are
+  // seeded from the selected district, and no district is selected until the
+  // user drills into one — requiring them here would leave the municipality
+  // and district screens stuck on "Loading". The rules view guards its own.
+  if (!munis) return <div className="card loading-card">Loading configuration…</div>;
 
   const setField = (key) => (value) => {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -795,166 +1065,150 @@ function ConfigEditor({ adminEmail, ready }) {
     setSaveState(null);
   };
 
-  return (
-    <section className="admin-grid">
-      <aside className="card admin-side">
-        <label>
-          Municipality
-          <select value={muniId ?? ""} onChange={(e) => {
-            const id = Number(e.target.value);
-            setMuniId(id);
-            const next = munis.find((item) => item.id === id);
-            setDistrictId(next?.zoning_districts[0]?.id ?? null);
-          }}>
-            {munis.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}, {item.state_code}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="admin-badge">
-          <i aria-hidden="true">✓</i> Active municipality
-        </span>
-        <p className="admin-side-note">This editor loads municipal zoning and pricing configuration.</p>
-        {newMuni ? (
-          <div className="inline-create" role="group" aria-label="New municipality">
+  // The create and delete flows are the same wherever a municipality is
+  // managed from, so they are held as an element rather than a component —
+  // a component redeclared each render would remount and drop input focus.
+  const muniForms = (
+      newMuni ? (
+        <div className="inline-create" role="group" aria-label="New municipality">
+          <label>
+            Town name
+            <input
+              type="text"
+              value={newMuni.name}
+              placeholder="e.g. Hoboken"
+              onChange={(e) => setNewMuni({ ...newMuni, name: e.target.value })}
+            />
+          </label>
+          <div className="inline-create-row">
             <label>
-              Town name
+              State
               <input
                 type="text"
-                value={newMuni.name}
-                placeholder="e.g. Hoboken"
-                onChange={(e) => setNewMuni({ ...newMuni, name: e.target.value })}
+                maxLength={2}
+                value={newMuni.state}
+                onChange={(e) => setNewMuni({ ...newMuni, state: e.target.value.toUpperCase() })}
               />
             </label>
-            <div className="inline-create-row">
-              <label>
-                State
-                <input
-                  type="text"
-                  maxLength={2}
-                  value={newMuni.state}
-                  onChange={(e) => setNewMuni({ ...newMuni, state: e.target.value.toUpperCase() })}
-                />
-              </label>
-              <label>
-                County
-                <input
-                  type="text"
-                  value={newMuni.county}
-                  placeholder="optional"
-                  onChange={(e) => setNewMuni({ ...newMuni, county: e.target.value })}
-                />
-              </label>
-            </div>
             <label>
-              First district code
+              County
               <input
                 type="text"
-                value={newMuni.district}
-                placeholder="e.g. R"
-                onChange={(e) => setNewMuni({ ...newMuni, district: e.target.value })}
+                value={newMuni.county}
+                placeholder="optional"
+                onChange={(e) => setNewMuni({ ...newMuni, county: e.target.value })}
               />
             </label>
-            {newMuni.name.trim() && newMuni.state.trim().length === 2 && (
-              <p className="admin-side-note">
-                Config id: <code>{slugFor(newMuni.name, newMuni.state)}</code>
-              </p>
-            )}
-            <div className="inline-create-actions">
-              <button type="button" className="secondary compact" onClick={() => setNewMuni(null)}>
-                Cancel
-              </button>
-              <button type="button" className="primary compact" disabled={saving} onClick={submitNewMuni}>
-                Create
-              </button>
-            </div>
           </div>
-        ) : deleteMuni ? (
-          <div className="danger-confirm" role="group" aria-label="Delete municipality">
-            <strong>Delete {muni?.name}?</strong>
-            {deleteMuni.impact ? (
-              <ul>
-                <li>{deleteMuni.impact.districts} zoning district(s) and their rules</li>
-                <li>the cost model and all three tier rates</li>
-                <li>{deleteMuni.impact.zoningAreas} zoning polygon(s)</li>
-                <li>
-                  {deleteMuni.impact.parcels.toLocaleString()} imported parcel(s)
-                  {deleteMuni.impact.parcels > 0 && " — restoring these means re-running the NJGIN import"}
-                </li>
-              </ul>
-            ) : (
-              <p className="admin-side-note">Checking what this would remove…</p>
-            )}
-            <label>
-              <span>
-                Type <code>{muni?.name}</code> to confirm
-              </span>
-              <input
-                type="text"
-                value={deleteMuni.typed}
-                onChange={(e) => setDeleteMuni({ ...deleteMuni, typed: e.target.value })}
-              />
-            </label>
-            <div className="inline-create-actions">
-              <button type="button" className="secondary compact" onClick={() => setDeleteMuni(null)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger compact"
-                disabled={saving || deleteMuni.typed.trim() !== muni?.name}
-                onClick={submitDeleteMuni}
-              >
-                {saving ? "Deleting…" : "Delete permanently"}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="admin-muni-actions">
-            <button
-              type="button"
-              className="secondary compact"
-              disabled={!ready}
-              onClick={() => setNewMuni({ name: "", state: "NJ", county: "", district: "R" })}
-            >
-              ＋ New municipality
+          <label>
+            First district code
+            <input
+              type="text"
+              value={newMuni.district}
+              placeholder="e.g. R"
+              onChange={(e) => setNewMuni({ ...newMuni, district: e.target.value })}
+            />
+          </label>
+          {newMuni.name.trim() && newMuni.state.trim().length === 2 && (
+            <p className="admin-side-note">
+              Config id: <code>{slugFor(newMuni.name, newMuni.state)}</code>
+            </p>
+          )}
+          <div className="inline-create-actions">
+            <button type="button" className="secondary compact" onClick={() => setNewMuni(null)}>
+              Cancel
             </button>
-            <button
-              type="button"
-              className="text-danger compact"
-              disabled={!ready || !muni}
-              onClick={startDeleteMuni}
-            >
-              Delete {muni?.name ?? "municipality"}
+            <button type="button" className="primary compact" disabled={saving} onClick={submitNewMuni}>
+              Create
             </button>
           </div>
-        )}
-        <div className="admin-about">
-          <strong>About this editor</strong>
-          <p>
-            Update zoning rules, dimensional standards, ADU policies, and cost model assumptions for
-            the selected municipality.
-          </p>
-          <p>
-            <strong>Save draft</strong> keeps changes in this browser only. Nothing reaches the live
-            database used by the public calculator until you <strong>Publish configuration</strong>.
-          </p>
-          <p>
-            After publishing, run <code>scripts/export_town.py</code> and commit the diff — the
-            config file stays the source of truth, and the next town load would otherwise revert
-            what you changed here.
-          </p>
         </div>
-        <p className="admin-side-note admin-signed-in">
-          Signed in as <strong>{adminEmail}</strong>
-        </p>
-      </aside>
+      ) : deleteMuni ? (
+        <div className="danger-confirm" role="group" aria-label="Delete municipality">
+          <strong>Delete {muni?.name}?</strong>
+          {deleteMuni.impact ? (
+            <ul>
+              <li>{deleteMuni.impact.districts} zoning district(s) and their rules</li>
+              <li>the cost model and all three tier rates</li>
+              <li>{deleteMuni.impact.zoningAreas} zoning polygon(s)</li>
+              <li>
+                {deleteMuni.impact.parcels.toLocaleString()} imported parcel(s)
+                {deleteMuni.impact.parcels > 0 && " — restoring these means re-running the NJGIN import"}
+              </li>
+            </ul>
+          ) : (
+            <p className="admin-side-note">Checking what this would remove…</p>
+          )}
+          <label>
+            <span>
+              Type <code>{muni?.name}</code> to confirm
+            </span>
+            <input
+              type="text"
+              value={deleteMuni.typed}
+              onChange={(e) => setDeleteMuni({ ...deleteMuni, typed: e.target.value })}
+            />
+          </label>
+          <div className="inline-create-actions">
+            <button type="button" className="secondary compact" onClick={() => setDeleteMuni(null)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger compact"
+              disabled={saving || deleteMuni.typed.trim() !== muni?.name}
+              onClick={submitDeleteMuni}
+            >
+              {saving ? "Deleting…" : "Delete permanently"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        // Idle: nothing. Creating is the panel header's button and deleting
+        // belongs inside the municipality you are looking at, so an idle
+        // action row here would only duplicate both.
+        null
+      )
+  );
 
-      <aside className="card admin-districts">
-        <h3>Zoning Districts</h3>
-        <p className="admin-side-note">Select a district to load and edit its config file.</p>
+  return (
+    <section className="admin-shell">
+      <AdminSidebar view={activeNav} onView={setView} adminEmail={adminEmail} />
+
+      {view === "municipalities" ? (
+        <MunicipalitiesPanel
+          munis={munis}
+          muniId={muniId}
+          zoningCounts={zoningCounts}
+          ready={ready}
+          query={muniQuery}
+          onQuery={setMuniQuery}
+          onSelect={openMunicipality}
+          onNew={() => setNewMuni({ name: "", state: "NJ", county: "", district: "R" })}
+        >
+          {muniForms}
+        </MunicipalitiesPanel>
+      ) : view === "dashboard" ? (
+        <AdminDashboard
+          munis={munis}
+          zoningCounts={zoningCounts}
+          onOpen={openMunicipality}
+          onView={setView}
+        />
+      ) : view === "districts" ? (
+        <div className="card admin-districts wide">
+          <div className="admin-panel-head">
+            <div>
+              <h2>Zoning Districts</h2>
+              <p className="admin-side-note">
+                {muni?.name}, {muni?.state_code} — select a district to edit its rules.
+              </p>
+            </div>
+            <button type="button" className="secondary compact" onClick={() => setView("municipalities")}>
+              ← All municipalities
+            </button>
+          </div>
+        {muniForms}
         <input
           type="search"
           placeholder="Filter districts…"
@@ -967,11 +1221,11 @@ function ConfigEditor({ adminEmail, ready }) {
               <button
                 type="button"
                 className={item.id === districtId ? "district-item selected" : "district-item"}
-                onClick={() => setDistrictId(item.id)}
+                onClick={() => openDistrict(item.id)}
               >
                 <span className="district-code">{item.code}</span>
                 <span className="district-name">{item.name ?? "—"}</span>
-                {item.id === districtId && <span className="district-check">✓</span>}
+                <span className="district-check" aria-hidden="true">›</span>
               </button>
             </li>
           ))}
@@ -1051,31 +1305,44 @@ function ConfigEditor({ adminEmail, ready }) {
             >
               ＋ Add district
             </button>
-            {/* A municipality with no districts is the empty-shell state the
-                public app already refuses to calculate on. Keep the last one. */}
             <button
               type="button"
               className="text-danger compact"
-              disabled={!ready || !district || (muni?.zoning_districts.length ?? 0) < 2}
-              title={
-                (muni?.zoning_districts.length ?? 0) < 2
-                  ? "A municipality needs at least one district — delete the municipality instead."
-                  : undefined
-              }
-              onClick={() => setDeleteDist({ id: district.id, code: district.code, typed: "" })}
+              disabled={!ready || !muni}
+              onClick={startDeleteMuni}
             >
-              Delete {district?.code ?? "district"}
+              Delete {muni?.name ?? "municipality"}
             </button>
           </div>
         )}
-      </aside>
-
+        </div>
+      ) : !district || !draft || !costDraft ? (
+        <div className="card admin-editor">
+          <p className="admin-side-note">
+            No district is selected.{" "}
+            <button type="button" className="text-button compact" onClick={() => setView("districts")}>
+              Choose one
+            </button>{" "}
+            to edit its rules.
+          </p>
+        </div>
+      ) : (
+        <div className="admin-grid solo">
       <div className="card admin-editor">
         <div className="admin-editor-head">
           <div>
-            <h2>Edit Config File</h2>
+            <p className="admin-crumbs">
+              <button type="button" className="text-button compact" onClick={() => setView("municipalities")}>
+                {muni?.name}, {muni?.state_code}
+              </button>
+              <span aria-hidden="true">›</span>
+              <button type="button" className="text-button compact" onClick={() => setView("districts")}>
+                Zoning Districts
+              </button>
+            </p>
+            <h2>District Rules</h2>
             <p>
-              {muni?.name}, {muni?.state_code} · {district?.code} — {district?.name ?? "District"}
+              {district?.code} — {district?.name ?? "District"}
             </p>
           </div>
           <span className="admin-updated">
@@ -1088,6 +1355,23 @@ function ConfigEditor({ adminEmail, ready }) {
           )}
         </div>
 
+        <div className="rule-tabs" role="tablist" aria-label="Rule groups">
+          {RULE_TABS.map((tab) => (
+            <button
+              type="button"
+              role="tab"
+              key={tab.id}
+              className={ruleTab === tab.id ? "rule-tab active" : "rule-tab"}
+              aria-selected={ruleTab === tab.id}
+              onClick={() => setRuleTab(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {ruleTab === "import" && (
+        <>
         <fieldset className="admin-section pdf-import-section" disabled={!ready || saving}>
           <legend>
             <span className="admin-section-icon" aria-hidden="true">PDF</span> Import zoning PDF
@@ -1179,7 +1463,11 @@ function ConfigEditor({ adminEmail, ready }) {
             </div>
           )}
         </fieldset>
+        </>
+        )}
 
+        {ruleTab === "setbacks" && (
+        <>
         <fieldset className="admin-section" disabled={!ready || saving}>
           <legend>
             <span className="admin-section-icon" aria-hidden="true">📏</span> A. Setbacks &amp; Dimensional Rules
@@ -1214,6 +1502,11 @@ function ConfigEditor({ adminEmail, ready }) {
           </div>
         </fieldset>
 
+        </>
+        )}
+
+        {ruleTab === "adu" && (
+        <>
         <fieldset className="admin-section" disabled={!ready || saving}>
           <legend>
             <span className="admin-section-icon" aria-hidden="true">🏠</span> C. ADU Rules
@@ -1229,7 +1522,11 @@ function ConfigEditor({ adminEmail, ready }) {
             calculator’s ADU math does not consume them yet.
           </p>
         </fieldset>
+        </>
+        )}
 
+        {ruleTab === "pricing" && (
+        <>
         <fieldset className="admin-section" disabled={!ready || saving}>
           <legend>
             <span className="admin-section-icon" aria-hidden="true">$</span> D. Cost Model
@@ -1329,7 +1626,11 @@ function ConfigEditor({ adminEmail, ready }) {
             uses.
           </p>
         </fieldset>
+        </>
+        )}
 
+        {ruleTab === "review" && (
+        <>
         <fieldset className="admin-section" disabled={!ready}>
           <legend>
             <span className="admin-section-icon" aria-hidden="true">&lt;/&gt;</span> E. Notes / JSON Summary
@@ -1370,6 +1671,8 @@ function ConfigEditor({ adminEmail, ready }) {
             </>
           )}
         </fieldset>
+        </>
+        )}
 
         {validation && (
           <div
@@ -1429,7 +1732,92 @@ function ConfigEditor({ adminEmail, ready }) {
           </button>
         </div>
       </div>
+        </div>
+      )}
     </section>
+  );
+}
+
+/**
+ * Landing view: where every configured town stands, and the shortest route to
+ * whatever is still missing.
+ */
+function AdminDashboard({ munis, zoningCounts, onOpen, onView }) {
+  const rows = munis.map((item) => ({
+    muni: item,
+    status: municipalityStatus(item, zoningCounts ? zoningCounts.get(item.id) ?? 0 : null),
+  }));
+  const ready = rows.filter((row) => row.status.key === "active");
+  const pending = rows.filter((row) => row.status.key !== "active");
+
+  return (
+    <div className="card admin-dashboard">
+      <div className="admin-panel-head">
+        <h2>Dashboard</h2>
+        <button type="button" className="secondary compact" onClick={() => onView("municipalities")}>
+          All municipalities
+        </button>
+      </div>
+
+      <div className="admin-stats">
+        <div>
+          <span>Municipalities</span>
+          <strong>{munis.length}</strong>
+        </div>
+        <div>
+          <span>Live for clients</span>
+          <strong>{ready.length}</strong>
+        </div>
+        <div>
+          <span>Districts configured</span>
+          <strong>{munis.reduce((sum, item) => sum + item.zoning_districts.length, 0)}</strong>
+        </div>
+      </div>
+
+      <h3>Needs attention</h3>
+      {pending.length === 0 ? (
+        <p className="admin-side-note">
+          Every municipality has districts, a zoning layer, published rules, and pricing.
+        </p>
+      ) : (
+        <ul className="muni-list">
+          {pending.map(({ muni: item, status }) => (
+            <li key={item.id}>
+              <button type="button" className="muni-card" onClick={() => onOpen(item.id)}>
+                <span className="muni-avatar" aria-hidden="true">{initialsFor(item.name)}</span>
+                <span className="muni-card-body">
+                  <span className="muni-card-title">
+                    <strong>{item.name}, {item.state_code}</strong>
+                    <em className={`muni-status ${status.key}`}>{status.label}</em>
+                  </span>
+                  <span className="muni-card-meta">
+                    Updated {formatUpdated(item.last_updated)}
+                  </span>
+                </span>
+                <span className="muni-card-chevron" aria-hidden="true">›</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="admin-about">
+        <strong>About this editor</strong>
+        <p>
+          Update zoning rules, dimensional standards, ADU policies, and cost model assumptions for
+          the selected municipality.
+        </p>
+        <p>
+          <strong>Save draft</strong> keeps changes in this browser only. Nothing reaches the live
+          database used by the public calculator until you <strong>Publish configuration</strong>.
+        </p>
+        <p>
+          After publishing, run <code>scripts/export_town.py</code> and commit the diff — the
+          config file stays the source of truth, and the next town load would otherwise revert
+          what you changed here.
+        </p>
+      </div>
+    </div>
   );
 }
 

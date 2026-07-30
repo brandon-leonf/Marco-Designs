@@ -1,57 +1,74 @@
 import { useEffect, useRef, useState } from "react";
-import { searchParcels } from "../lib/supabase.js";
-import { searchNjginParcels } from "../lib/njgin.js";
+import { geocodeAddress } from "../lib/geocode.js";
+import {
+  findNjginParcelAtPoint,
+  searchNjginParcelsAnywhere,
+} from "../lib/njgin.js";
 
 const fmt = (n) =>
   n == null ? "—" : Number(n).toLocaleString("en-US", { maximumFractionDigits: 0 });
 
 /**
- * Address search over NJGIN parcels for one municipality. `source` picks where
- * the records come from: "db" for the local import (PostGIS geometry, zoning
- * verifiable) or "njgin" for the live statewide service. Both return the same
- * row shape. Debounced; calls onSelect(parcelRow) when a result is picked.
+ * Address-first property lookup with no municipality prerequisite.
+ *
+ * 1. Census geocodes the entered address and reports its jurisdiction.
+ * 2. For a New Jersey point, NJGIN finds the containing statewide parcel.
+ * 3. The selected row travels to App, which independently checks whether that
+ *    municipality has local zoning rules and pricing.
+ *
+ * A statewide NJGIN address-text search is retained only as a last resort when
+ * Census cannot match an otherwise valid New Jersey property address.
  */
-export default function ParcelSearch({ muni, source = "db", selected, onSelect, onClear }) {
+export default function ParcelSearch({ selected, onSelect, onClear }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
   const [searching, setSearching] = useState(false);
+  const [stage, setStage] = useState("geocode");
   const [error, setError] = useState(null);
-  const timer = useRef(null);
-  const live = source === "njgin";
+  const controllerRef = useRef(null);
 
-  useEffect(() => {
-    setQuery("");
-    setResults(null);
-    setError(null);
-  }, [muni?.slug, source]);
-
-  useEffect(() => {
-    clearTimeout(timer.current);
-    const q = query.trim();
-    if (q.length < 3) {
-      setResults(null);
-      setSearching(false);
-      return;
-    }
-    setSearching(true);
-    timer.current = setTimeout(() => {
-      const request = live ? searchNjginParcels(muni, q) : searchParcels(muni.slug, q);
-      request
-        .then((rows) => {
-          setResults(rows);
-          setError(null);
-        })
-        .catch((e) => setError(e.message ?? String(e)))
-        .finally(() => setSearching(false));
-    }, 300);
-    return () => clearTimeout(timer.current);
-  }, [query, muni, live]);
+  useEffect(
+    () => () => {
+      controllerRef.current?.abort();
+    },
+    []
+  );
 
   const clearSelection = () => {
+    controllerRef.current?.abort();
     setQuery("");
     setResults(null);
     setError(null);
     onClear();
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    const address = query.trim();
+    if (address.length < 5 || searching) return;
+
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setSearching(true);
+    setStage("geocode");
+    setError(null);
+    setResults(null);
+
+    try {
+      const rows = await lookupAddress(
+        address,
+        (next) => !controller.signal.aborted && setStage(next),
+        controller.signal
+      );
+      if (!controller.signal.aborted) setResults(rows);
+    } catch (lookupError) {
+      if (!controller.signal.aborted) {
+        setError(lookupError.message ?? String(lookupError));
+      }
+    } finally {
+      if (!controller.signal.aborted) setSearching(false);
+    }
   };
 
   if (selected) {
@@ -64,44 +81,145 @@ export default function ParcelSearch({ muni, source = "db", selected, onSelect, 
     );
   }
 
+  const parcelRows = (results ?? []).filter((row) => row.kind === "parcel");
+  const addressRows = (results ?? []).filter((row) => row.kind === "place");
+
   return (
-    <div className="parcel-search">
-      <div className="row">
-        <label style={{ flex: 1 }}>
-          Property address ({live ? "live NJGIN parcel service" : "imported NJGIN parcel data"})
+    <div className="parcel-search address-first-search">
+      <form className="address-search-form" onSubmit={submit}>
+        <label>
+          Property address
           <input
             type="search"
-            placeholder="e.g. 3901 PALISADE"
+            placeholder="Street, city, state, ZIP"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(event) => setQuery(event.target.value)}
+            autoComplete="street-address"
           />
         </label>
-      </div>
+        <button
+          type="submit"
+          className="primary"
+          disabled={query.trim().length < 5 || searching}
+        >
+          {searching ? "Finding property…" : "Find property"}
+        </button>
+      </form>
+      <p className="fine search-scope-hint">
+        Enter the address directly—no municipality selection is required. New Jersey parcel
+        boundaries are matched statewide after the address is geocoded.
+      </p>
 
-      {error && <p className="fine">Search failed: {error}</p>}
-      {searching && <p className="fine">Searching…</p>}
-      {results && !searching && results.length === 0 && (
-        <p className="fine">No parcels match “{query.trim()}”.</p>
+      {error && <p className="fine error-text">Property lookup failed: {error}</p>}
+      {searching && (
+        <p className="lookup-progress" role="status">
+          <span className={stage === "geocode" ? "active" : "done"}>1. Geocoding address</span>
+          <span className={stage === "fallback" ? "done" : stage === "parcel" ? "active" : ""}>
+            2. Finding New Jersey parcel
+          </span>
+          <span className={stage === "fallback" ? "active" : ""}>
+            3. Checking statewide address records
+          </span>
+        </p>
       )}
-      {results && results.length > 0 && (
-        <ul className="results">
-          {results.map((r) => (
-            <li key={r.pams_pin}>
-              <button
-                type="button"
-                className={selected?.pams_pin === r.pams_pin ? "hit active" : "hit"}
-                onClick={() => onSelect(r)}
-              >
-                <strong>{r.address ?? "(no address)"}</strong>
-                <span>
-                  Block {r.block ?? "—"} / Lot {r.lot ?? "—"} ·{" "}
-                  {fmt(r.lot_area_sqft)} sq ft
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
+      {results && !searching && results.length === 0 && (
+        <p className="fine">
+          No address or New Jersey parcel matches “{query.trim()}”. Include the city, state, and ZIP
+          and try again.
+        </p>
+      )}
+
+      {parcelRows.length > 0 && (
+        <div className="result-group">
+          <p className="result-group-head parcel">
+            <span aria-hidden="true">✓</span> Parcel boundary found · municipality identified
+            automatically
+          </p>
+          <ResultList rows={parcelRows} selected={selected} onSelect={onSelect} />
+        </div>
+      )}
+
+      {addressRows.length > 0 && (
+        <div className="result-group">
+          <p className="result-group-head geocode">
+            <span aria-hidden="true">⚑</span> Address located · no New Jersey parcel polygon found
+          </p>
+          <ResultList rows={addressRows} selected={selected} onSelect={onSelect} />
+        </div>
       )}
     </div>
   );
+}
+
+function ResultList({ rows, selected, onSelect }) {
+  return (
+    <ul className="results">
+      {rows.map((row) => (
+        <li key={`${row.kind}:${row.pams_pin}`}>
+          <button
+            type="button"
+            className={selected?.pams_pin === row.pams_pin ? "hit active" : "hit"}
+            onClick={() => onSelect(row)}
+          >
+            <strong>{row.matched_address ?? row.full_label ?? row.address ?? "(no address)"}</strong>
+            <span>{resultDetail(row)}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function resultDetail(row) {
+  const where = [row.muni_name, row.county ? `${row.county} County` : null]
+    .filter(Boolean)
+    .join(", ");
+  if (row.kind === "place") {
+    return [where, row.in_new_jersey ? "Location only" : "Outside New Jersey"]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  return `${where ? `${where} · ` : ""}Block ${row.block ?? "—"} / Lot ${row.lot ?? "—"} · ${fmt(row.lot_area_sqft)} sq ft`;
+}
+
+async function lookupAddress(address, onStage, signal) {
+  const places = await geocodeAddress(address, 5, signal);
+  if (places.length > 0) {
+    onStage("parcel");
+    const resolved = await Promise.all(
+      places.map(async (place) => {
+        if (!place.in_new_jersey) return [place];
+        const parcels = await findNjginParcelAtPoint(
+          place.lat,
+          place.lon,
+          5,
+          signal,
+          place.matched_address
+        );
+        if (parcels.length === 0) return [place];
+        return parcels.map((parcel) => ({
+          ...place,
+          ...parcel,
+          kind: "parcel",
+          scope: "statewide",
+          matched_address: place.matched_address,
+          full_label: place.full_label,
+          muni_name: parcel.muni_name ?? place.muni_name,
+          county: parcel.county ?? place.county,
+          state_code: place.state_code,
+          state_fips: place.state_fips,
+          in_new_jersey: true,
+          lat: place.lat,
+          lon: place.lon,
+        }));
+      })
+    );
+    return resolved.flat();
+  }
+
+  // Census sometimes misses locally formatted MOD-IV property locations.
+  // Preserve statewide access with a text search, but only after the requested
+  // coordinate-first path has returned no address match.
+  onStage("fallback");
+  return searchNjginParcelsAnywhere(address, 10);
 }
