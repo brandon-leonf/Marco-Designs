@@ -18,6 +18,7 @@ import {
 } from "./lib/envelope.js";
 import {
   fetchNjginParcel,
+  findNjginParcelAtPoint,
   njginParcelFromFeature,
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
@@ -274,6 +275,11 @@ export default function App() {
   // centred on the floor below — so nothing moves until they move it.
   const [floorPositions, setFloorPositions] = useState([]);
   const [parcelPick, setParcelPick] = useState(null);
+  // Click-to-identify on the zoning map. One lookup at a time: a second click
+  // aborts the first rather than racing it to set the selection.
+  const [picking, setPicking] = useState(false);
+  const [pickError, setPickError] = useState(null);
+  const pickAbortRef = useRef(null);
   const [parcel, setParcel] = useState(null);
   const [streetEdge, setStreetEdge] = useState(null);
   const [parcelError, setParcelError] = useState(null);
@@ -1101,6 +1107,40 @@ export default function App() {
     setParcelPick(resolvedPick);
   };
 
+  /**
+   * Identify the property under a click on the zoning map.
+   *
+   * The same NJGIN point-in-polygon query the address path already uses, only
+   * the coordinates come from the cursor instead of the geocoder — so the
+   * address it reports is the parcel record's own PROP_LOC, not a guess about
+   * what the client meant to click. Overlapping records (condominiums, tax
+   * seams) come back smallest-first, and the smallest containing parcel is the
+   * one taken.
+   */
+  const pickParcelAtPoint = async (lat, lon) => {
+    pickAbortRef.current?.abort();
+    const controller = new AbortController();
+    pickAbortRef.current = controller;
+    setPicking(true);
+    setPickError(null);
+    try {
+      const found = await findNjginParcelAtPoint(lat, lon, 5, controller.signal);
+      if (controller.signal.aborted) return;
+      if (found.length === 0) {
+        setPickError(
+          "No parcel record covers that point. Streets, water and public rights-of-way are not parcels — try clicking inside a lot."
+        );
+        return;
+      }
+      await selectParcel(found[0]);
+    } catch (e) {
+      if (controller.signal.aborted || e?.name === "AbortError") return;
+      setPickError(`Could not identify that property: ${e.message ?? String(e)}`);
+    } finally {
+      if (!controller.signal.aborted) setPicking(false);
+    }
+  };
+
   const goToStep = (next) => {
     if (next > maxStepReached) return;
     setStep(next);
@@ -1145,6 +1185,9 @@ export default function App() {
     project,
     outsideCoverage,
     placePoint,
+    picking,
+    pickError,
+    onPickPoint: pickParcelAtPoint,
     onParcel: selectParcel,
   };
 
@@ -1699,6 +1742,9 @@ function PropertyPreview({
   zoningCheck,
   outsideCoverage,
   placePoint,
+  picking,
+  pickError,
+  onPickPoint,
   onParcel,
 }) {
   const [mapOpen, setMapOpen] = useState(false);
@@ -1722,6 +1768,9 @@ function PropertyPreview({
           parcelLabel={propertyLabel}
           focusPoint={placePoint}
           unverified={unverified}
+          onPickPoint={onPickPoint}
+          picking={picking}
+          pickError={pickError}
           headingLabel="Property preview"
           note="Parcel boundaries and zoning are separate data layers. Diagram is not a survey."
           onExpand={() => setMapOpen(true)}
@@ -1737,6 +1786,9 @@ function PropertyPreview({
           propertyLabel={propertyLabel}
           outsideCoverage={outsideCoverage}
           placePoint={placePoint}
+          picking={picking}
+          pickError={pickError}
+          onPickPoint={onPickPoint}
           onParcel={onParcel}
           onClose={() => setMapOpen(false)}
         />
@@ -1754,6 +1806,9 @@ function ExpandedMapDialog({
   propertyLabel,
   outsideCoverage,
   placePoint,
+  picking,
+  pickError,
+  onPickPoint,
   onParcel,
   onClose,
 }) {
@@ -1852,6 +1907,9 @@ function ExpandedMapDialog({
               parcelLabel={propertyLabel}
               focusPoint={placePoint}
               unverified={unverified}
+              onPickPoint={onPickPoint}
+              picking={picking}
+              pickError={pickError}
               headingLabel="Property preview"
               note="Public parcel boundaries are preliminary and are not a survey."
               expanded

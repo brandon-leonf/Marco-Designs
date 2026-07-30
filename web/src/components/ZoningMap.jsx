@@ -69,6 +69,13 @@ export default function ZoningMap({
   // The located property sits outside the zoning Marco Designs has imported,
   // so no district applies to it. Raises the red flag above the legend.
   unverified = false,
+  // Click-to-identify. Given a handler, clicking anywhere on the map reports
+  // the clicked lat/lon so the caller can look up whatever parcel is there.
+  onPickPoint = null,
+  // True while that lookup is in flight, so the map can say so and refuse to
+  // stack a second query on top of the first.
+  picking = false,
+  pickError = null,
   headingLabel = "Property preview",
   note,
   onExpand,
@@ -80,6 +87,11 @@ export default function ZoningMap({
   const parcelLayerRef = useRef(null);
   const pointLayerRef = useRef(null);
   const muniBoundsRef = useRef(null);
+  const pickMarkerRef = useRef(null);
+  // The map is built once, so its click handler would capture the first render's
+  // props forever. Route the click through a ref that every render refreshes.
+  const pickRef = useRef({ onPickPoint, picking });
+  pickRef.current = { onPickPoint, picking };
 
   const [zoning, setZoning] = useState(null);
   const [provenance, setProvenance] = useState(null);
@@ -108,9 +120,38 @@ export default function ZoningMap({
     }).addTo(map);
     map.on("click", () => map.scrollWheelZoom.enable());
     map.on("mouseout", () => map.scrollWheelZoom.disable());
+
+    // Click-to-identify listens on the container, not on the map's own `click`.
+    // Leaflet delivers a click to the topmost interactive layer and only falls
+    // back to the map when nothing was hit — so with zoning polygons covering
+    // the town, `map.on("click")` never fires where it matters most.
+    const container = map.getContainer();
+    const onContainerClick = (event) => {
+      // Zoom buttons, attribution links and popup chrome are controls, not lots.
+      if (event.target?.closest?.(".leaflet-control, .leaflet-popup")) return;
+      // A pan ends in a click event; choosing a property does not.
+      if (map.dragging?.moved()) return;
+      const { onPickPoint: pick, picking: busy } = pickRef.current;
+      if (!pick || busy) return;
+      const { lat, lng } = map.mouseEventToLatLng(event);
+      // Mark the spot straight away. The lookup takes a second or two, and the
+      // click should be acknowledged where it landed, not after the answer.
+      pickMarkerRef.current?.remove();
+      pickMarkerRef.current = L.circleMarker([lat, lng], {
+        radius: 6,
+        color: "#8a6d1f",
+        weight: 2,
+        fillColor: "#ffffff",
+        fillOpacity: 0.9,
+        interactive: false,
+      }).addTo(map);
+      pick(lat, lng);
+    };
+    container.addEventListener("click", onContainerClick);
     map.setView([40.7795, -74.0246], 13); // Union City, until bounds arrive
     mapRef.current = map;
     return () => {
+      container.removeEventListener("click", onContainerClick);
       map.remove();
       mapRef.current = null;
     };
@@ -164,6 +205,11 @@ export default function ZoningMap({
           };
         },
         onEachFeature: (feature, lyr) => {
+          // With click-to-identify armed, a click means "what property is
+          // this?" — a district popup would open over the parcel it just
+          // selected, and the district is already named in the panel and the
+          // legend. Leave the click to the lookup.
+          if (pickRef.current.onPickPoint) return;
           const p = feature.properties;
           // A newly-created district may exist before an older polygon has
           // been backfilled with its district_id. Match by normalized code as
@@ -293,7 +339,33 @@ export default function ZoningMap({
         </div>
       </div>
 
-      <div ref={containerRef} className="zoning-map-canvas" role="application" aria-label="Municipal zoning map" />
+      <div
+        ref={containerRef}
+        className={`zoning-map-canvas${onPickPoint ? " pickable" : ""}${picking ? " picking" : ""}`}
+        role="application"
+        aria-label={
+          onPickPoint
+            ? "Municipal zoning map — click a property to identify its address"
+            : "Municipal zoning map"
+        }
+      />
+
+      {onPickPoint && (
+        <p className={picking ? "map-pick-hint busy" : "map-pick-hint"} role="status">
+          {picking ? (
+            <>
+              <span className="map-pick-spinner" aria-hidden="true" />
+              Identifying the property you clicked…
+            </>
+          ) : (
+            <>
+              <span aria-hidden="true">✛</span>
+              Click any property on the map to look up its address.
+            </>
+          )}
+        </p>
+      )}
+      {pickError && !picking && <p className="status-line error-text">{pickError}</p>}
 
       {error && <p className="status-line error-text">Zoning layer failed to load: {error}</p>}
       {zoning && visibleZoning.length === 0 && (

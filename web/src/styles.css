@@ -2321,6 +2321,38 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   background: var(--info-bg);
 }
 .zoning-map-canvas .leaflet-container { font: inherit; }
+/* Click-to-identify: the crosshair is the only thing telling the client the
+   map is an input and not just a picture, so it covers the whole canvas. */
+.zoning-map-canvas.pickable .leaflet-container,
+.zoning-map-canvas.pickable .leaflet-interactive { cursor: crosshair; }
+.zoning-map-canvas.picking .leaflet-container,
+.zoning-map-canvas.picking .leaflet-interactive { cursor: progress; }
+/* Leaflet's own controls stay clickable affordances, not pick targets. */
+.zoning-map-canvas.pickable .leaflet-control a,
+.zoning-map-canvas.picking .leaflet-control a { cursor: pointer; }
+
+.map-pick-hint {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.map-pick-hint.busy { color: var(--primary-fill); }
+.map-pick-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--active-line);
+  border-top-color: var(--primary-fill);
+  border-radius: 50%;
+  animation: map-pick-spin 0.7s linear infinite;
+}
+@keyframes map-pick-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .map-pick-spinner { animation-duration: 2.4s; }
+}
 .zoning-legend {
   list-style: none;
   margin: 0;
