@@ -69,6 +69,9 @@ export default function ZoningMap({
   // The located property sits outside the zoning Marco Designs has imported,
   // so no district applies to it. Raises the red flag above the legend.
   unverified = false,
+  // The published outline of the building standing on the parcel, drawn inside
+  // it so the client can see what the detected footprint was measured from.
+  buildingGeojson = null,
   // Click-to-identify. Given a handler, clicking anywhere on the map reports
   // the clicked lat/lon so the caller can look up whatever parcel is there.
   onPickPoint = null,
@@ -86,6 +89,7 @@ export default function ZoningMap({
   const zoningLayerRef = useRef(null);
   const parcelLayerRef = useRef(null);
   const pointLayerRef = useRef(null);
+  const buildingLayerRef = useRef(null);
   const muniBoundsRef = useRef(null);
   const pickMarkerRef = useRef(null);
   // The map is built once, so its click handler would capture the first render's
@@ -257,6 +261,9 @@ export default function ZoningMap({
       return;
     }
 
+    // The detected building is drawn by its own effect below, since it can
+    // appear and disappear without the parcel changing.
+
     if (focusPoint) {
       // A circle marker rather than L.marker: no icon asset to resolve through
       // the bundler, and a point is honestly a point, not a parcel.
@@ -277,6 +284,27 @@ export default function ZoningMap({
     setZoomedToParcel(false);
     if (muniBoundsRef.current) map.fitBounds(muniBoundsRef.current, { padding: [12, 12] });
   }, [parcelGeojson, focusPoint, unverified]);
+
+  // The detected building footprint, drawn over the parcel. Hatched rather
+  // than solid: it is a published outline, not a surveyed one, and should not
+  // read with the same authority as the parcel boundary.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    buildingLayerRef.current?.remove();
+    buildingLayerRef.current = null;
+    if (!buildingGeojson) return;
+    buildingLayerRef.current = L.geoJSON(buildingGeojson, {
+      interactive: false,
+      style: {
+        color: "#8a6d1f",
+        weight: 2,
+        dashArray: "4 3",
+        fillColor: "#c8a94a",
+        fillOpacity: 0.42,
+      },
+    }).addTo(map);
+  }, [buildingGeojson]);
 
   // Union the polygon layer with the municipality's configured districts.
   // A configured district without geometry still belongs in the legend; it

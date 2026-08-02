@@ -339,6 +339,9 @@ select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed;
 .field-error { color: #c0392b; font-weight: 600; }
 
 .property-method { margin-top: 1.45rem; padding-top: 1.35rem; border-top: 1px solid var(--line); }
+/* The project-type fieldset opens a new block after the lookup panel, so it
+   takes the same gap the card uses between its other major sections. */
+.property-method + .field-group { margin-top: 1.5rem; }
 .method-title { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
 .method-title h3, .result-card h3 { margin: 0; font-size: 1rem; font-weight: 800; }
 .method-title p, .card-intro { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.78rem; line-height: 1.45; }
@@ -399,7 +402,11 @@ select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed;
 .parcel-search.selected-mode { display: flex; justify-content: flex-end; }
 /* Chosen state: the property and the button that replaces it share one row,
    the card taking the slack so the button stays hard right. */
-.property-picker.chosen { display: flex; align-items: center; gap: 0.65rem; }
+/* The gap under "Find the property" belongs to the picker itself, so it stays
+   the same whether the search field or the chosen property is sitting there. */
+.property-picker { margin-top: 0.8rem; }
+.property-picker > .parcel-search { margin-top: 0; }
+.property-picker.chosen { display: flex; align-items: stretch; gap: 0.65rem; }
 .property-picker.chosen .selected-property { flex: 1; min-width: 0; margin-top: 0; }
 .property-picker.chosen .parcel-search { flex: 0 0 auto; margin-top: 0; }
 .status-line { margin: 0.6rem 0 0; color: var(--muted); font-size: 0.76rem; }
@@ -1228,6 +1235,13 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .capacity-figures strong em { color: var(--muted); font-size: 0.8rem; font-weight: 700; font-style: normal; }
 .capacity-figures strong.answer-pending { color: var(--muted); font-size: 0.9rem; font-weight: 600; font-style: italic; }
 .capacity-figures small { color: var(--muted); font-size: 0.63rem; line-height: 1.4; }
+.capacity-figures > div.invalid,
+.remaining-buildable-area.invalid {
+  border-color: #f0b7b1;
+  background: #fdf1f0;
+}
+.capacity-figures > div.invalid strong,
+.remaining-buildable-area.invalid strong { color: #8c1d18; }
 .lot-dimension-status {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1832,13 +1846,24 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .admin-crumbs {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  margin: 0 0 0.2rem;
-  color: var(--muted);
+  flex-wrap: wrap;
+  margin: 0 0 0.3rem;
   font-size: 0.72rem;
   font-weight: 700;
 }
-.admin-crumbs .text-button { font-size: 0.72rem; }
+.admin-crumbs > span { display: inline-flex; align-items: center; }
+.admin-crumb-sep { margin: 0 0.4rem; color: var(--line-strong); }
+.admin-crumb {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary-fill);
+  font: inherit;
+  cursor: pointer;
+}
+.admin-crumb:hover { color: var(--primary); text-decoration: underline; }
+/* Where you are, not somewhere to go. */
+.admin-crumb.current { color: var(--muted); cursor: default; }
 
 .rule-tabs {
   display: flex;
@@ -2292,12 +2317,15 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 .zoning-map-note { margin: 0.15rem 0 0; color: var(--muted); font-size: 0.73rem; }
 .zoning-map-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 0.8rem;
-  padding-top: 0.15rem;
 }
+/* "View all …" reads as a counterpart to the eyebrow across the row, so it sits
+   on that first line. button.compact's padding would otherwise push it down
+   between the eyebrow and the address heading. */
+.zoning-map-actions .text-button.compact { padding: 0; line-height: 1.2; }
 .map-expand-button {
   display: inline-flex;
   align-items: center;
@@ -2330,6 +2358,61 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Leaflet's own controls stay clickable affordances, not pick targets. */
 .zoning-map-canvas.pickable .leaflet-control a,
 .zoning-map-canvas.picking .leaflet-control a { cursor: pointer; }
+
+/* ---------- Detected existing building ---------- */
+.footprint-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+.footprint-note.busy { color: var(--primary-fill); font-weight: 700; }
+.footprint-note.manual { color: var(--info-ink); }
+.footprint-spinner {
+  flex-shrink: 0;
+  width: 11px;
+  height: 11px;
+  margin-top: 0.2rem;
+  border: 2px solid var(--active-line);
+  border-top-color: var(--primary-fill);
+  border-radius: 50%;
+  animation: map-pick-spin 0.7s linear infinite;
+}
+.footprint-detected {
+  margin-bottom: 0.9rem;
+  padding: 0.8rem;
+  border: 1px solid var(--active-line);
+  border-left: 4px solid var(--primary-fill);
+  border-radius: 11px;
+  background: var(--info-bg);
+}
+.footprint-detected.adjusting { border-left-color: var(--green); }
+.footprint-detected-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.footprint-detected-head strong { color: var(--nav); font-size: 0.85rem; }
+.footprint-area { color: var(--primary-fill); font-size: 1rem; font-weight: 850; }
+.footprint-source {
+  margin: 0.3rem 0 0;
+  color: var(--info-ink);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+.footprint-source a { color: var(--primary-fill); font-weight: 700; }
+.footprint-detected .fine { margin: 0.35rem 0 0; }
+.footprint-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
 
 .map-pick-hint {
   display: flex;
@@ -2484,6 +2567,9 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 0.75rem;
   line-height: 1.5;
 }
+.map-dialog-search .address-search-form { grid-template-columns: minmax(0, 1fr); }
+.map-dialog-search .address-search-form .primary { width: 100%; }
+.map-dialog-search .result-group { margin-top: 0.8rem; }
 .map-dialog-search .data-tag { margin-top: 0.8rem; }
 .map-dialog-search ul.results { max-height: 18rem; background: #fff; }
 .map-dialog-apply { margin-top: 1rem; }

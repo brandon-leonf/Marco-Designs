@@ -139,6 +139,42 @@ function municipalityStatus(muni, zoningAreas) {
   return { key: "active", label: "Active" };
 }
 
+/**
+ * The trail through the Municipalities section, shown on every screen in it.
+ *
+ * Each crumb is labelled with its subject rather than its screen — "Union City,
+ * NJ" rather than "Zoning Districts" — because the subject is what the user is
+ * tracking; the heading underneath already says what kind of screen it is. The
+ * last crumb is where you are and is not a link.
+ */
+function AdminCrumbs({ items }) {
+  return (
+    <nav className="admin-crumbs" aria-label="Breadcrumb">
+      {items.map((item, index) => {
+        const last = index === items.length - 1;
+        return (
+          <span key={`${item.label}-${index}`}>
+            {index > 0 && (
+              <span className="admin-crumb-sep" aria-hidden="true">
+                ›
+              </span>
+            )}
+            {last || !item.onClick ? (
+              <span className="admin-crumb current" aria-current={last ? "page" : undefined}>
+                {item.label}
+              </span>
+            ) : (
+              <button type="button" className="admin-crumb" onClick={item.onClick}>
+                {item.label}
+              </button>
+            )}
+          </span>
+        );
+      })}
+    </nav>
+  );
+}
+
 /** "UC" for Union City — the list's avatar, from the name we already have. */
 function initialsFor(name) {
   const words = String(name ?? "")
@@ -224,7 +260,10 @@ function MunicipalitiesPanel({
   return (
     <div className="card admin-municipalities">
       <div className="admin-panel-head">
-        <h2>Municipalities</h2>
+        <div>
+          <AdminCrumbs items={[{ label: "Municipalities" }]} />
+          <h2>Municipalities</h2>
+        </div>
         <button type="button" className="primary compact" disabled={!ready} onClick={onNew}>
           ＋ New municipality
         </button>
@@ -1199,14 +1238,17 @@ function ConfigEditor({ adminEmail, ready }) {
         <div className="card admin-districts wide">
           <div className="admin-panel-head">
             <div>
+              {/* The trail replaces the old "All municipalities" button — it
+                  goes to the same place and says where you are as well. */}
+              <AdminCrumbs
+                items={[
+                  { label: "Municipalities", onClick: () => setView("municipalities") },
+                  { label: `${muni?.name ?? "Municipality"}, ${muni?.state_code ?? ""}`.trim() },
+                ]}
+              />
               <h2>Zoning Districts</h2>
-              <p className="admin-side-note">
-                {muni?.name}, {muni?.state_code} — select a district to edit its rules.
-              </p>
+              <p className="admin-side-note">Select a district to edit its rules.</p>
             </div>
-            <button type="button" className="secondary compact" onClick={() => setView("municipalities")}>
-              ← All municipalities
-            </button>
           </div>
         {muniForms}
         <input
@@ -1331,15 +1373,16 @@ function ConfigEditor({ adminEmail, ready }) {
       <div className="card admin-editor">
         <div className="admin-editor-head">
           <div>
-            <p className="admin-crumbs">
-              <button type="button" className="text-button compact" onClick={() => setView("municipalities")}>
-                {muni?.name}, {muni?.state_code}
-              </button>
-              <span aria-hidden="true">›</span>
-              <button type="button" className="text-button compact" onClick={() => setView("districts")}>
-                Zoning Districts
-              </button>
-            </p>
+            <AdminCrumbs
+              items={[
+                { label: "Municipalities", onClick: () => setView("municipalities") },
+                {
+                  label: `${muni?.name ?? "Municipality"}, ${muni?.state_code ?? ""}`.trim(),
+                  onClick: () => setView("districts"),
+                },
+                { label: district?.code ?? "District" },
+              ]}
+            />
             <h2>District Rules</h2>
             <p>
               {district?.code} — {district?.name ?? "District"}

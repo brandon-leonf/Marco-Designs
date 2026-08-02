@@ -22,6 +22,7 @@ import {
   njginParcelFromFeature,
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
+import { detectExistingBuilding } from "./lib/buildings.js";
 import { resolveMunicipalGisZoning } from "./lib/municipalGis.js";
 import { northAngleFromParcel } from "./lib/orientation.js";
 import {
@@ -280,6 +281,12 @@ export default function App() {
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState(null);
   const pickAbortRef = useRef(null);
+  // The published building footprint standing on the parcel, when a source has
+  // one. `footprintChoice` records what the client did with it, so the offer is
+  // not re-made after they have chosen manual entry.
+  const [detectedBuilding, setDetectedBuilding] = useState(null);
+  const [detectingBuilding, setDetectingBuilding] = useState(false);
+  const [footprintChoice, setFootprintChoice] = useState(null); // null | "detected" | "adjust" | "manual"
   const [parcel, setParcel] = useState(null);
   const [streetEdge, setStreetEdge] = useState(null);
   const [parcelError, setParcelError] = useState(null);
@@ -456,6 +463,54 @@ export default function App() {
     });
     return () => controller.abort();
   }, [parcel?.parcel_geojson_wgs84]);
+
+  /**
+   * Look for a published building footprint on the parcel — but only for the
+   * projects that need one. A new house does not care what is standing there
+   * now, so the query is not made.
+   *
+   * Only the footprint is offered. Storeys and total finished area are left
+   * alone deliberately: a footprint layer is an outline seen from above and
+   * knows nothing about what is under the roof, so filling those from it would
+   * be inventing figures the source does not hold.
+   */
+  useEffect(() => {
+    const geometry = parcel?.parcel_geojson_wgs84;
+    const wantsExisting = projectType === "addition" || projectType === "adu";
+    if (!geometry || !wantsExisting) {
+      setDetectedBuilding(null);
+      setDetectingBuilding(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    setDetectingBuilding(true);
+    setDetectedBuilding(null);
+    detectExistingBuilding(geometry, controller.signal)
+      .then((found) => {
+        if (controller.signal.aborted) return;
+        setDetectedBuilding(found);
+        // Fill the footprint as soon as it is known, unless the client has
+        // already taken the field over by hand.
+        setFootprintChoice((choice) => {
+          if (choice === "manual" || choice === "adjust") return choice;
+          if (found) {
+            setExistingStructure((current) => ({
+              ...current,
+              footprint_sqft: found.areaSqft,
+            }));
+            return "detected";
+          }
+          return choice;
+        });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setDetectedBuilding(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDetectingBuilding(false);
+      });
+    return () => controller.abort();
+  }, [parcel?.parcel_geojson_wgs84, projectType]);
 
   // Level B only starts after Level A has either been ruled out or completed
   // without a verified Marco district. The municipality's own GIS can identify
@@ -1069,6 +1124,10 @@ export default function App() {
     setPlannedFloors([]);
     setFloorPositions([]);
     setExistingStructure((current) => ({ ...current, position: null }));
+    // A detected footprint belongs to the parcel it was found on, and so does
+    // the choice the client made about it.
+    setDetectedBuilding(null);
+    setFootprintChoice(null);
 
     if (!picked) {
       setParcelPick(null);
@@ -1141,6 +1200,28 @@ export default function App() {
     }
   };
 
+  /** Take the detected figure — the initial state, and the way back to it. */
+  const useDetectedBuilding = () => {
+    if (!detectedBuilding) return;
+    setExistingStructure((current) => ({
+      ...current,
+      footprint_sqft: detectedBuilding.areaSqft,
+    }));
+    setFootprintChoice("detected");
+  };
+
+  /**
+   * Keep the detected outline on the map but hand the number to the client.
+   * The drawing is what they are adjusting against, so it stays.
+   */
+  const adjustOutline = () => setFootprintChoice("adjust");
+
+  /** Start from nothing: clear the figure and take the outline off the map. */
+  const enterFootprintManually = () => {
+    setExistingStructure((current) => ({ ...current, footprint_sqft: "" }));
+    setFootprintChoice("manual");
+  };
+
   const goToStep = (next) => {
     if (next > maxStepReached) return;
     setStep(next);
@@ -1187,6 +1268,9 @@ export default function App() {
     placePoint,
     picking,
     pickError,
+    // Withdrawn once the client chooses to type their own figure: the drawing
+    // would otherwise keep asserting a measurement they have set aside.
+    buildingGeojson: footprintChoice === "manual" ? null : detectedBuilding?.geometry ?? null,
     onPickPoint: pickParcelAtPoint,
     onParcel: selectParcel,
   };
@@ -1225,6 +1309,12 @@ export default function App() {
           previewProps={previewProps}
           onProjectType={setProjectType}
           onExistingStructure={setExistingStructure}
+          detectedBuilding={detectedBuilding}
+          detectingBuilding={detectingBuilding}
+          footprintChoice={footprintChoice}
+          onUseDetectedBuilding={useDetectedBuilding}
+          onAdjustOutline={adjustOutline}
+          onEnterFootprintManually={enterFootprintManually}
           onParcel={selectParcel}
           onContinue={() => advance(2)}
         />
@@ -1379,6 +1469,12 @@ function ProjectSetup({
   previewProps,
   onProjectType,
   onExistingStructure,
+  detectedBuilding,
+  detectingBuilding,
+  footprintChoice,
+  onUseDetectedBuilding,
+  onAdjustOutline,
+  onEnterFootprintManually,
   onParcel,
   onContinue,
 }) {
@@ -1393,7 +1489,7 @@ function ProjectSetup({
           <div>
             <p className="eyebrow">Step 1</p>
             <h2>Enter the property address</h2>
-            <p>We’ll identify the municipality, parcel, zoning coverage, and pricing automatically.</p>
+            <p>Start with an address. We’ll handle the property records, zoning, and pricing.</p>
           </div>
         </div>
 
@@ -1535,13 +1631,27 @@ function ProjectSetup({
                   </div>
                   <span className="data-tag">Footprint required</span>
                 </div>
+
+                <DetectedBuildingNotice
+                  detecting={detectingBuilding}
+                  detected={detectedBuilding}
+                  choice={footprintChoice}
+                  onUseDetected={onUseDetectedBuilding}
+                  onAdjustOutline={onAdjustOutline}
+                  onEnterManually={onEnterFootprintManually}
+                />
+
                 <div className="form-grid existing-fields">
                   <NumberField
                     label="Existing building footprint (sq ft) *"
                     value={existingStructure.footprint_sqft}
-                    onChange={(value) =>
-                      onExistingStructure({ ...existingStructure, footprint_sqft: value })
-                    }
+                    onChange={(value) => {
+                      // Typing over a detected figure makes it the client's
+                      // number, not the source's — the note must stop crediting
+                      // NJDEP or OSM for a value they did not produce.
+                      if (footprintChoice === "detected") onAdjustOutline();
+                      onExistingStructure({ ...existingStructure, footprint_sqft: value });
+                    }}
                     help="Required. Ground area occupied by the current structure."
                     fieldKey="footprint_sqft"
                     required
@@ -1650,7 +1760,7 @@ function LookupLayerStatus({
   }[mode] ?? ["Property lookup", "waiting"];
   const rows = [
     {
-      label: "Address & municipality",
+      label: "Municipality & State",
       ready: Boolean(parcelPick),
       value: muni
         ? `${muni.name}, ${muni.state_code}`
@@ -1675,7 +1785,7 @@ function LookupLayerStatus({
           ? "identified"
           : "unavailable",
       value: zoningAvailable
-        ? `${district.code}${district.name ? ` — ${district.name}` : ""} · Zoning verified from Marco Designs`
+        ? "Zoning verified"
         : municipalGisCheck?.status === "matched"
           ? municipalGisDistrictLabel(municipalGisCheck)
           : municipalGisStatusLabel(municipalGisCheck, zoningCheck),
@@ -1744,6 +1854,7 @@ function PropertyPreview({
   placePoint,
   picking,
   pickError,
+  buildingGeojson,
   onPickPoint,
   onParcel,
 }) {
@@ -1768,6 +1879,7 @@ function PropertyPreview({
           parcelLabel={propertyLabel}
           focusPoint={placePoint}
           unverified={unverified}
+          buildingGeojson={buildingGeojson}
           onPickPoint={onPickPoint}
           picking={picking}
           pickError={pickError}
@@ -1788,6 +1900,7 @@ function PropertyPreview({
           placePoint={placePoint}
           picking={picking}
           pickError={pickError}
+          buildingGeojson={buildingGeojson}
           onPickPoint={onPickPoint}
           onParcel={onParcel}
           onClose={() => setMapOpen(false)}
@@ -1808,6 +1921,7 @@ function ExpandedMapDialog({
   placePoint,
   picking,
   pickError,
+  buildingGeojson,
   onPickPoint,
   onParcel,
   onClose,
@@ -1863,14 +1977,12 @@ function ExpandedMapDialog({
         <div className="map-dialog-body">
           <div className="map-dialog-search">
             <h3>Select a property address</h3>
-            <p>
-              Enter any address. We identify the municipality, find the New Jersey parcel when one
-              exists, then check zoning and pricing availability independently.
-            </p>
             <ParcelSearch
               selected={parcelPick}
               onSelect={onParcel}
               onClear={() => onParcel(null)}
+              alwaysShowForm
+              showScopeHint={false}
             />
             <span className="data-tag live">Census + statewide NJGIN</span>
             {parcelPick && (
@@ -1907,6 +2019,7 @@ function ExpandedMapDialog({
               parcelLabel={propertyLabel}
               focusPoint={placePoint}
               unverified={unverified}
+              buildingGeojson={buildingGeojson}
               onPickPoint={onPickPoint}
               picking={picking}
               pickError={pickError}
@@ -1917,6 +2030,108 @@ function ExpandedMapDialog({
           </Suspense>
         </div>
       </section>
+    </div>
+  );
+}
+
+/**
+ * What was found standing on the parcel, where it came from, and what the
+ * client can do about it.
+ *
+ * The source is always named. A footprint layer is published data of varying
+ * age and completeness, not a survey, and the difference between "the State
+ * measured this" and "a mapper drew this" is exactly the sort of thing a
+ * client should be told rather than left to assume.
+ */
+function DetectedBuildingNotice({
+  detecting,
+  detected,
+  choice,
+  onUseDetected,
+  onAdjustOutline,
+  onEnterManually,
+}) {
+  if (choice === "manual") {
+    return (
+      <p className="footprint-note manual" role="status">
+        <span aria-hidden="true">✎</span>
+        <span>
+          Footprint entered by hand.
+          {detected && (
+            <>
+              {" "}
+              <button type="button" className="text-button compact" onClick={onUseDetected}>
+                Use the detected building ({fmt(detected.areaSqft)} sq ft) instead
+              </button>
+            </>
+          )}
+        </span>
+      </p>
+    );
+  }
+
+  if (detecting) {
+    return (
+      <p className="footprint-note busy" role="status">
+        <span className="footprint-spinner" aria-hidden="true" />
+        Looking for a published building footprint on this parcel…
+      </p>
+    );
+  }
+
+  if (!detected) {
+    return (
+      <p className="footprint-note" role="status">
+        <span aria-hidden="true">○</span>
+        <span>
+          No published building footprint covers this parcel, so there is nothing to measure
+          automatically. Enter the footprint below.
+        </span>
+      </p>
+    );
+  }
+
+  const adjusting = choice === "adjust";
+  return (
+    <div className={adjusting ? "footprint-detected adjusting" : "footprint-detected"} role="status">
+      <div className="footprint-detected-head">
+        <strong>
+          {adjusting ? "Adjusting the detected outline" : "Existing building detected"}
+        </strong>
+        <span className="footprint-area">{fmt(detected.areaSqft)} sq ft</span>
+      </div>
+      <p className="footprint-source">
+        Measured from <strong>{detected.source.name}</strong> — {detected.source.detail}.{" "}
+        <a href={detected.source.url} target="_blank" rel="noreferrer">
+          Source →
+        </a>
+      </p>
+      {detected.clipped && (
+        <p className="fine">
+          The outline crosses this lot's boundary. The {fmt(detected.areaSqft)} sq ft above is the
+          part standing on this parcel, out of {fmt(detected.fullAreaSqft)} sq ft in total — an
+          attached row house is normally drawn as one shape across several lots.
+        </p>
+      )}
+      <p className="fine">
+        Outlines are published data of varying age and accuracy, not a survey. Storeys and total
+        finished area are not filled in: a footprint is an outline seen from above and says nothing
+        about what is under the roof.
+      </p>
+      <div className="footprint-actions">
+        {adjusting ? (
+          <button type="button" className="secondary compact" onClick={onUseDetected}>
+            Restore detected size
+          </button>
+        ) : (
+          <button type="button" className="secondary compact" onClick={onAdjustOutline}>
+            Adjust outline
+          </button>
+        )}
+        <button type="button" className="text-button compact" onClick={onEnterManually}>
+          Enter manually
+        </button>
+      </div>
     </div>
   );
 }
@@ -2349,6 +2564,12 @@ function CapacityStep({
   const selectedFloorMaxDepthFt =
     Number(plannedFloors[selectedFloor - 1]?.depth_ft) || maxHouseDepthFt || null;
   const plannedTotal = result.plannedArea;
+  const heightCeiling = Number(result.maxHeight) > 0 ? Number(result.maxHeight) : null;
+  const heightUsed = result.plannedHeight == null ? null : Number(result.plannedHeight);
+  const heightRemaining =
+    heightCeiling == null || heightUsed == null ? null : Math.max(0, heightCeiling - heightUsed);
+  const heightExceededBy =
+    heightCeiling == null || heightUsed == null ? 0 : Math.max(0, heightUsed - heightCeiling);
   // The footprint figure counts down as the plan takes ground: the ceiling is
   // fixed, what the client wants to know is how much of it is still free. When
   // the ceiling itself is zero there is nothing to count down — saying "0 left
@@ -2503,7 +2724,11 @@ function CapacityStep({
                   </small>
                 </div>
                 {maxFloors != null && (
-                  <div className={result.plannedFloorCount > 0 ? "capacity-figure spent" : "capacity-figure"}>
+                  <div
+                    className={`capacity-figure${result.plannedFloorCount > 0 ? " spent" : ""}${
+                      result.fitsHeight === false ? " invalid" : ""
+                    }`}
+                  >
                     <span>{result.plannedFloorCount > 0 ? "Floors left" : "Maximum floors"}</span>
                     <strong>{Math.max(0, maxFloors - result.plannedFloorCount)}</strong>
                     <small>
@@ -2518,11 +2743,19 @@ function CapacityStep({
                       ) : (
                         `Stories permitted in ${district.code}.`
                       )}
+                      {heightCeiling != null && heightUsed != null && (
+                        <>
+                          {" "}
+                          {heightExceededBy > 0
+                            ? `The planned height exceeds the ${fmt(heightCeiling, 1)} ft limit by ${fmt(heightExceededBy, 1)} ft.`
+                            : `${fmt(heightUsed, 1)} of ${fmt(heightCeiling, 1)} ft used; ${fmt(heightRemaining, 1)} ft left.`}
+                        </>
+                      )}
                     </small>
                   </div>
                 )}
                 <div className={capacityUsed > 0 ? "capacity-figure spent" : "capacity-figure"}>
-                  <span>Total square-foot allowance left</span>
+                  <span>Total floor-area allowance left</span>
                   {result.maxArea == null ? (
                     <strong className="answer-pending">Enter existing floor area</strong>
                   ) : (
@@ -2635,16 +2868,22 @@ function CapacityStep({
                       Number(floor?.width_ft) > 0 && Number(floor?.depth_ft) > 0
                         ? Number(floor.width_ft) * Number(floor.depth_ft)
                         : null;
+                    const otherFloorHeight = plannedFloors.reduce((sum, item, itemIndex) => {
+                      if (itemIndex === index) return sum;
+                      const itemHeight = Number(item?.height_ft);
+                      return itemHeight > 0 ? sum + itemHeight : sum;
+                    }, 0);
                     const heightMax =
-                      verticalAddition
-                        ? Number(result.heightAvailable) || FIELD_RULES.planned_floor_height.max
-                        : Number(district.max_height_ft) || FIELD_RULES.planned_floor_height.max;
+                      heightCeiling == null
+                        ? FIELD_RULES.planned_floor_height.max
+                        : Math.max(0, heightCeiling - otherFloorHeight);
                     const floorValid =
                       floorArea != null &&
                       (widthMax == null || Number(floor.width_ft) <= Number(widthMax)) &&
                       (depthMax == null || Number(floor.depth_ft) <= Number(depthMax)) &&
                       Number(floor.height_ft) > 0 &&
                       Number(floor.height_ft) <= heightMax &&
+                      result.fitsHeight !== false &&
                       (verticalAddition || result.fitsEnvelope !== false) &&
                       (!groundAddition || result.fitsAttachment !== false) &&
                       (project?.id !== "adu" || result.fitsSeparation !== false);
@@ -2717,7 +2956,9 @@ function CapacityStep({
                             step="0.5"
                             help={
                               zoningVerified
-                                ? `Default ${FLOOR_TO_FLOOR_FT} ft · total checked against zoning.`
+                                ? heightCeiling == null
+                                  ? `Default ${FLOOR_TO_FLOOR_FT} ft · no district height limit is loaded.`
+                                  : `Maximum ${fmt(heightMax, 1)} ft for this floor · combined height checked against the ${fmt(heightCeiling, 1)} ft zoning limit.`
                                 : `Default ${FLOOR_TO_FLOOR_FT} ft · zoning height is not checked.`
                             }
                           />
@@ -2770,6 +3011,21 @@ function CapacityStep({
                   )}
                   {result.plannedHeight != null && <> · height {fmt(result.plannedHeight, 1)} ft</>}
                 </p>
+                {zoningVerified && heightCeiling != null && heightUsed != null && (
+                  <p
+                    className={`remaining-buildable-area height-allowance${
+                      result.fitsHeight === false ? " invalid" : ""
+                    }`}
+                    role={result.fitsHeight === false ? "alert" : "status"}
+                  >
+                    <span>Height allowance left</span>
+                    <strong>
+                      {heightExceededBy > 0
+                        ? `${fmt(heightExceededBy, 1)} ft over`
+                        : `${fmt(heightRemaining, 1)} ft`}
+                    </strong>
+                  </p>
+                )}
                 {zoningVerified && project?.id === "addition" && (
                   <p className="remaining-buildable-area" role="status">
                     <span>
