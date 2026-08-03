@@ -167,6 +167,30 @@ calculate against.
 
 Rate cards are deliberately not exported — they are proprietary and git-ignored.
 
+## Adding a zoning district and testing it
+
+In the config editor: **Municipalities → the town → ＋ Add district**, give it a
+code (and optional name), and it opens on its own rules. Fill in at least the
+front and rear setbacks, one of the side-yard figures, maximum building
+coverage, and maximum stories — the calculator refuses to run without them —
+then **Publish configuration**.
+
+A district with no zoning polygons cannot be reached by the public app's address
+lookup, so **Review & test** offers two ways to exercise it:
+
+- **F. Test This Configuration** runs the envelope math on the *draft* values
+  against a lot you type in, and prints every step of the calculation.
+- **G. Test on the public app** opens the client-facing calculator at
+  `#/?preview_district=<id>` with the district's *published* rules applied to
+  whatever address you search — the real four-step flow, real parcel geometry,
+  real pricing.
+
+The test drive overrides the zoning-verification step, so it says so
+everywhere: a banner on every step, and a zoning layer that reports "test
+drive", never "verified". Once the municipality's zoning polygons are imported
+(`scripts/import_zoning.py`), `resolve_parcel_zoning` reaches the district on
+its own and the override is no longer needed.
+
 ## Adding a new municipality
 
 1. Copy an existing file in `config/towns/` to `config/towns/<slug>.json`.
@@ -180,6 +204,17 @@ Rate cards are deliberately not exported — they are proprietary and git-ignore
 4. `python scripts/load_town.py <slug>`.
 
 No code changes. That's the point.
+
+Or create it in the config editor: **Municipalities → ＋ New municipality**. It
+takes the town name, 2-letter state, county, the ordinance **source URL**, the
+date the zoning was **last verified**, and a first district code, then opens on
+that district's rules. The slug is derived from the name and state.
+
+Both provenance fields are entered by hand and can be edited later on the
+town's district list (**Municipality details**). `last_updated` means *when
+someone last checked these rules against the ordinance* — publishing a rule
+change deliberately does not move it, because a publish date is not a
+verification date.
 
 ## Updating the rate card
 
