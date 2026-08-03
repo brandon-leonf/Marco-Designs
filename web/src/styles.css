@@ -2361,6 +2361,9 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 }
 .structured-condition > strong { display: block; margin-bottom: 0.55rem; font-size: 0.8rem; }
 .structured-rule-issues { margin: 0.65rem 0 0; color: var(--danger); font-size: 0.75rem; }
+/* Muted, not red: an unfinished rule is a normal state of work, and colouring
+   it like a defect is what made these read as blockers. */
+.structured-rule-notes { margin: 0.65rem 0 0; color: var(--muted); font-size: 0.75rem; }
 @media (max-width: 720px) {
   .structured-rules-intro { flex-direction: column; }
 }
@@ -2572,6 +2575,9 @@ button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
 .validate-panel li { list-style: none; }
 .validate-panel.bad li { color: var(--green); }
 .validate-panel.bad li.validate-bad { color: #8c1d18; font-weight: 700; }
+/* Notes sit in either panel and never take the panel's error colour — they do
+   not block publishing and must not read as though they do. */
+.validate-panel li.validate-note { color: var(--muted); font-weight: 500; }
 .test-summary {
   display: flex;
   flex-wrap: wrap;

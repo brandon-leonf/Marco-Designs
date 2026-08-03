@@ -309,6 +309,11 @@ export function evaluateZoningRules(rules, context = {}, options = {}) {
   const values = new Map();
   const applied = [];
   for (const rule of applicable) {
+    // A rule with neither a value nor a formula says nothing, so it does
+    // nothing. Without this it would fall through as `Number(null)` — a blank
+    // setback would publish as a 0 ft setback, which is the opposite of blank.
+    // Same principle the FAR field states: blank is never treated as 0.
+    if (rule.calculation.value == null && !rule.calculation.formula) continue;
     let value = rule.calculation.value;
     if (rule.calculation.formula) {
       try {
@@ -366,6 +371,26 @@ export function applyZoningRules(district, context = {}, options = {}) {
   };
 }
 
+/**
+ * Things worth saying about a rule that are not reasons to stop publishing.
+ *
+ * A blank rule and a rule with no cited section are both ordinary states of
+ * work in progress — a district is often entered before every section has been
+ * looked up. Neither can produce a wrong answer: an incomplete rule is skipped
+ * outright by `evaluateZoningRules`, and a missing citation is documentation.
+ * They are reported rather than enforced so the rest of the district can go
+ * live without waiting on them.
+ */
+export function zoningRuleNotes(rule) {
+  const item = normalizeZoningRule(rule);
+  const notes = [];
+  if (item.calculation.value == null && !item.calculation.formula) {
+    notes.push("No value or formula yet — this rule is skipped until one is entered.");
+  }
+  if (!item.sourceSection.trim()) notes.push("No source section cited.");
+  return notes;
+}
+
 export function validateZoningRule(rule) {
   const item = normalizeZoningRule(rule);
   const issues = [];
@@ -376,7 +401,6 @@ export function validateZoningRule(rule) {
   if (item.category === "SETBACK" && !RULE_SIDES.includes(item.side)) issues.push("Setback rules need a side.");
   if (!RULE_TYPES.includes(item.ruleType)) issues.push("Choose a valid rule type.");
   if (!RULE_UNITS.includes(item.calculation.unit)) issues.push("Choose a valid calculation unit.");
-  if (item.calculation.value == null && !item.calculation.formula) issues.push("Enter a value or formula.");
   if (item.ruleType === "FORMULA" && !item.calculation.formula) issues.push("Formula rules need a formula.");
   if (item.calculation.formula) {
     try {
@@ -391,7 +415,6 @@ export function validateZoningRule(rule) {
   if (item.condition?.operator === "BETWEEN" && item.condition.secondValue == null) {
     issues.push("BETWEEN conditions need a second value.");
   }
-  if (!item.sourceSection.trim()) issues.push("Source section is required.");
   if (!Number.isInteger(item.priority)) issues.push("Priority must be a whole number.");
   if (item.effectiveDate && item.expirationDate && item.expirationDate < item.effectiveDate) {
     issues.push("Expiration date cannot be before the effective date.");

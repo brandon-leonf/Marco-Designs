@@ -46,6 +46,7 @@ import {
   normalizeZoningRule,
   synchronizeBaselineRules,
   validateZoningRule,
+  zoningRuleNotes,
 } from "./lib/zoningRules.js";
 
 // Drafts live in this browser only (localStorage, keyed by district). Nothing
@@ -57,6 +58,31 @@ function loadLocalDraft(districtId) {
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The state last worked in, remembered across visits.
+ *
+ * Configuration is done a state at a time over many sittings, so opening the
+ * Municipalities section on the state picker every visit would be one click of
+ * nothing on the way to the same place. Stored per browser like the drafts are,
+ * and treated as a hint: it is verified against the states that actually exist
+ * before it is used.
+ */
+const LAST_STATE_KEY = "demarco-config-last-state";
+function loadLastState() {
+  try {
+    return localStorage.getItem(LAST_STATE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+function rememberLastState(code) {
+  try {
+    if (code) localStorage.setItem(LAST_STATE_KEY, code);
+  } catch {
+    // A browser refusing storage is not a reason to fail navigation.
   }
 }
 
@@ -525,7 +551,7 @@ function StatesPanel({ states, stateCode, ready, newState, onNewState, onSelect,
     <div className="card admin-municipalities">
       <div className="admin-panel-head">
         <div>
-          <AdminCrumbs items={[{ label: "Municipalities" }]} />
+          <AdminCrumbs items={[{ label: "States" }]} />
           <h2>States</h2>
           <p className="admin-side-note">Select a state to see the municipalities in it.</p>
         </div>
@@ -618,10 +644,12 @@ function MunicipalitiesPanel({
     <div className="card admin-municipalities">
       <div className="admin-panel-head">
         <div>
+          {/* The state leads: this screen is the municipalities *of* it, and
+              the state is the crumb that goes back to the picker. */}
           <AdminCrumbs
             items={[
-              { label: "Municipalities", onClick: onBackToStates },
-              { label: stateName },
+              { label: stateName, onClick: onBackToStates },
+              { label: "Municipalities" },
             ]}
           />
           <h2>{stateName}</h2>
@@ -853,6 +881,7 @@ function StructuredRuleEditor({ rule, onChange, onRemove, disabled }) {
   const baseline = rule.sourceSection === BASELINE_RULE_SOURCE;
   const conditional = ["CONDITIONAL", "PIECEWISE"].includes(rule.ruleType);
   const issues = validateZoningRule(rule);
+  const notes = zoningRuleNotes(rule);
   const patch = (changes) => onChange({ ...rule, ...changes });
   const patchCalculation = (changes) =>
     patch({ calculation: { ...rule.calculation, ...changes } });
@@ -1010,6 +1039,11 @@ function StructuredRuleEditor({ rule, onChange, onRemove, disabled }) {
           </label>
         </div>
       </fieldset>
+      {notes.length > 0 && (
+        <ul className="structured-rule-notes">
+          {notes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      )}
       {issues.length > 0 && (
         <ul className="structured-rule-issues">
           {issues.map((issue) => <li key={issue}>{issue}</li>)}
@@ -1056,13 +1090,15 @@ function ConfigEditor({ adminEmail, ready }) {
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfProgress, setPdfProgress] = useState("");
   const [pdfImportedKeys, setPdfImportedKeys] = useState([]);
-  // Which sidebar section is showing. The state list opens first: the drill-down
-  // is state → municipality → district → rules, and picking the state is the
-  // decision every other section depends on.
-  const [view, setView] = useState("states");
-  // Which state the municipality list is showing. Seeded from the first town on
-  // load so the section is never sitting on a state that has nothing under it.
-  const [stateCode, setStateCode] = useState(null);
+  // Which sidebar section is showing. The drill-down is state → municipality →
+  // district → rules, but it opens on the towns of the state last worked in
+  // rather than at the top of it — the state picker is only worth showing when
+  // there is no such state to return to.
+  const [view, setView] = useState(() => (loadLastState() ? "municipalities" : "states"));
+  // Which state the municipality list is showing. The remembered state is only
+  // a starting point; it is replaced by the first town's state on load if the
+  // one remembered no longer has anything in it.
+  const [stateCode, setStateCode] = useState(loadLastState);
   const [stateRows, setStateRows] = useState([]); // [{code, name}] from the states table
   const [newState, setNewState] = useState(null); // null | {code, name}
   const {
@@ -1097,15 +1133,32 @@ function ConfigEditor({ adminEmail, ready }) {
       .catch(() => []);
 
   useEffect(() => {
-    reloadStates();
-    reload().then((data) => {
+    Promise.all([reloadStates(), reload()]).then(([rows, data]) => {
       if (data?.length) {
         setMuniId((current) => current ?? data[0].id);
         setDistrictId((current) => current ?? data[0].zoning_districts[0]?.id ?? null);
-        setStateCode((current) => current ?? data[0].state_code);
       }
+      // The remembered state is trusted only if it still exists — a state that
+      // has since been emptied or removed would otherwise open to nothing with
+      // no explanation.
+      const known = new Set([
+        ...(rows ?? []).map((row) => row.code),
+        ...(data ?? []).map((item) => item.state_code),
+      ]);
+      const resolved = (current) =>
+        current && known.has(current) ? current : data?.[0]?.state_code ?? null;
+      setStateCode(resolved);
+      // Nothing to open into: fall back to the picker rather than an empty list.
+      if (!resolved(loadLastState())) setView("states");
     });
   }, []);
+
+  // One place to record it, so every route into a state — the picker, the
+  // dashboard, creating or moving a town — is remembered without each having
+  // to say so.
+  useEffect(() => {
+    rememberLastState(stateCode);
+  }, [stateCode]);
 
   // Readiness for the list. A failure here must not block the editor, so an
   // unavailable count is simply left unknown rather than reported as zero —
@@ -1451,9 +1504,17 @@ function ConfigEditor({ adminEmail, ready }) {
     });
   };
 
-  /** Every check the loader/DB would enforce, run client-side on the draft. */
+  /**
+   * Every check the loader/DB would enforce, run client-side on the draft.
+   *
+   * `issues` block publishing; `notes` are reported and do not. The split
+   * exists because an unfinished rule is a normal state of work — it is skipped
+   * by the engine rather than answering wrongly, so it is no reason to hold the
+   * rest of the district back.
+   */
   const collectValidation = () => {
     const issues = [];
+    const notes = [];
     const ok = [];
     const sideOne = numOrNull(draft.side_yard_one_min_ft);
     const sideTotal = numOrNull(draft.side_yard_total_min_ft);
@@ -1479,9 +1540,9 @@ function ConfigEditor({ adminEmail, ready }) {
         : `Max FAR = ${draft.max_far} → buildable area capped at lot area × ${draft.max_far}.`
     );
     synchronizedRules.forEach((rule, index) => {
-      for (const issue of validateZoningRule(rule)) {
-        issues.push(`Rule ${index + 1} (${enumLabel(rule.category)}): ${issue}`);
-      }
+      const where = `Rule ${index + 1} (${enumLabel(rule.category)})`;
+      for (const issue of validateZoningRule(rule)) issues.push(`${where}: ${issue}`);
+      for (const note of zoningRuleNotes(rule)) notes.push(`${where}: ${note}`);
     });
     if (synchronizedRules.length > 0) {
       ok.push(`${synchronizedRules.length} normalized zoning rule(s) are ready to publish.`);
@@ -1495,7 +1556,7 @@ function ConfigEditor({ adminEmail, ready }) {
       }
     }
     if (issues.length === 0) ok.unshift("All checks passed — safe to publish.");
-    return { issues, ok };
+    return { issues, notes, ok };
   };
 
   const runValidation = () => setValidation(collectValidation());
@@ -2229,11 +2290,12 @@ function ConfigEditor({ adminEmail, ready }) {
 
   return (
     <section className="admin-shell">
-      {/* The rail names the section; clicking it goes to the top of that
-          section, which is now the state list rather than the town list. */}
+      {/* The rail returns to the towns of the state last worked in. The picker
+          is only the destination when there is no such state to return to;
+          otherwise it is reached from the state's own crumb. */}
       <AdminSidebar
         view={activeNav}
-        onView={(next) => requestView(next === "municipalities" ? "states" : next)}
+        onView={(next) => requestView(next === "municipalities" && !stateCode ? "states" : next)}
         adminEmail={adminEmail}
       />
 
@@ -2307,8 +2369,8 @@ function ConfigEditor({ adminEmail, ready }) {
                   goes to the same place and says where you are as well. */}
               <AdminCrumbs
                 items={[
-                  { label: "Municipalities", onClick: () => setView("states") },
-                  { label: stateName, onClick: () => setView("municipalities") },
+                  { label: stateName, onClick: () => setView("states") },
+                  { label: "Municipalities", onClick: () => setView("municipalities") },
                   { label: muni?.name ?? "Municipality" },
                 ]}
               />
@@ -2494,8 +2556,8 @@ function ConfigEditor({ adminEmail, ready }) {
           <div>
             <AdminCrumbs
               items={[
-                { label: "Municipalities", onClick: () => setView("states") },
-                { label: stateName, onClick: () => setView("municipalities") },
+                { label: stateName, onClick: () => setView("states") },
+                { label: "Municipalities", onClick: () => setView("municipalities") },
                 {
                   label: muni?.name ?? "Municipality",
                   onClick: () => setView("districts"),
@@ -2674,7 +2736,6 @@ function ConfigEditor({ adminEmail, ready }) {
               label="Max Stories (whole floors)"
               value={draft.max_stories}
               onChange={setField("max_stories")}
-              step="1"
               hint="Enter a whole number. The total building height is controlled by Max Total Building Height."
               imported={pdfImportedKeys.includes("max_stories")}
             />
@@ -2682,7 +2743,6 @@ function ConfigEditor({ adminEmail, ready }) {
               label="Max FAR (0.00)"
               value={draft.max_far}
               onChange={setField("max_far")}
-              step="0.01"
               hint="Example: 0.19 = 19% of the lot area."
             />
             <Num label="Max Total Building Height (ft)" value={draft.max_height_ft} onChange={setField("max_height_ft")} imported={pdfImportedKeys.includes("max_height_ft")} />
@@ -2769,13 +2829,11 @@ function ConfigEditor({ adminEmail, ready }) {
                     label="Min ($/sq ft)"
                     value={costDraft.tiers[name].min}
                     onChange={(value) => setTierField(name, "min")(value)}
-                    step="0.01"
                   />
                   <Num
                     label="Max ($/sq ft)"
                     value={costDraft.tiers[name].max}
                     onChange={(value) => setTierField(name, "max")(value)}
-                    step="0.01"
                   />
                 </>
               </div>
@@ -2863,6 +2921,10 @@ function ConfigEditor({ adminEmail, ready }) {
             <ul>
               {validation.issues.map((text) => (
                 <li className="validate-bad" key={text}>✕ {text}</li>
+              ))}
+              {/* Reported, not enforced — these never hold up a publish. */}
+              {(validation.notes ?? []).map((text) => (
+                <li className="validate-note" key={text}>• {text}</li>
               ))}
               {validation.ok.map((text) => (
                 <li key={text}>✓ {text}</li>
@@ -3213,8 +3275,8 @@ function ZoningLayerSetup({
         <div>
           <AdminCrumbs
             items={[
-              { label: "Municipalities", onClick: onBackToStates },
-              { label: stateNameFor(muni.state_code), onClick: onBack },
+              { label: stateNameFor(muni.state_code), onClick: onBackToStates },
+              { label: "Municipalities", onClick: onBack },
               { label: muni.name },
               ...(district ? [{ label: district.code }] : []),
             ]}
@@ -3786,16 +3848,50 @@ function AdminDashboard({ munis, zoningCounts, onOpen, onSetup, onView }) {
   );
 }
 
-function Num({ label, value, onChange, step = "1", imported = false, hint = null }) {
+/**
+ * A numeric field that reads the way the number is spoken — 10,000, not 10000.
+ *
+ * `type="text"` rather than `type="number"`: a number input rejects the
+ * separators outright, so grouping is impossible while it stays one. What that
+ * gives up is recovered deliberately — `inputMode` keeps the numeric keypad on
+ * touch, and the input pattern below refuses a leading minus the way `min="0"`
+ * used to.
+ *
+ * The grouped form shows only while the field is idle. Regrouping under the
+ * caret would move it on every keystroke past the thousands mark, and the raw
+ * keystrokes are held here rather than round-tripped through a number so a
+ * half-typed "10." survives long enough to become "10.5".
+ */
+function Num({ label, value, onChange, imported = false, hint = null }) {
+  const [typed, setTyped] = useState(null); // non-null only while focused
+
+  const blank = value === "" || value == null;
+  const display =
+    typed !== null
+      ? typed
+      : blank
+        ? ""
+        // Every decimal the value carries is kept: rounding to the default
+        // three would quietly rewrite a FAR of 0.1875 as 0.188.
+        : Number(value).toLocaleString("en-US", { maximumFractionDigits: 20 });
+
   return (
     <label className={imported ? "pdf-imported" : undefined}>
       {label}
       <input
-        type="number"
-        min="0"
-        step={step}
-        value={value}
-        onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
+        type="text"
+        inputMode="decimal"
+        value={display}
+        onFocus={() => setTyped(blank ? "" : String(value))}
+        onBlur={() => setTyped(null)}
+        onChange={(e) => {
+          const raw = e.target.value.replace(/,/g, "");
+          // Anything that is not a non-negative decimal is dropped rather than
+          // committed, which is what the number input did on its own.
+          if (raw !== "" && !/^\d*\.?\d*$/.test(raw)) return;
+          setTyped(raw);
+          onChange(raw === "" ? "" : Number(raw));
+        }}
       />
       {hint && <small>{hint}</small>}
     </label>
