@@ -1,4 +1,6 @@
 import { supabase } from "./supabase.js";
+import { serializeZoningRule } from "./zoningRules.js";
+import { stateNameFor } from "./states.js";
 
 /**
  * Admin-side data access. Everything here requires a signed-in Supabase user
@@ -53,6 +55,33 @@ function assertWritten(rows, what) {
   }
 }
 
+/**
+ * Every zoning district owns its rule values. Keep the complete blank shape in
+ * the insert payload instead of relying on database defaults, so a district
+ * created after another one can never appear to inherit that district's
+ * setbacks, build limits, permitted uses, notes, or ADU configuration.
+ */
+function blankDistrictFields() {
+  return {
+    permitted_uses: [],
+    notes: null,
+    min_lot_area_sqft: null,
+    min_lot_width_ft: null,
+    min_lot_depth_ft: null,
+    front_yard_min_ft: null,
+    front_yard_prevailing_rule: false,
+    side_yard_one_min_ft: null,
+    side_yard_total_min_ft: null,
+    rear_yard_min_ft: null,
+    max_height_ft: null,
+    max_stories: null,
+    max_building_coverage_pct: null,
+    max_impervious_coverage_pct: null,
+    max_far: null,
+    extra_rules: {},
+  };
+}
+
 export async function saveDistrict(districtId, fields) {
   const { data, error } = await supabase
     .from("zoning_districts")
@@ -63,6 +92,26 @@ export async function saveDistrict(districtId, fields) {
   assertWritten(data, "zoning district");
 }
 
+/** Replace all normalized rules for one district in a single DB transaction. */
+export async function replaceZoningRules(municipalityId, districtId, rules) {
+  const payload = (rules ?? []).map((rule) => {
+    const serialized = serializeZoningRule(rule);
+    return Object.fromEntries(
+      Object.entries(serialized).filter(([, value]) => value !== undefined)
+    );
+  });
+  const { data, error } = await supabase.rpc("admin_replace_zoning_rules", {
+    p_municipality_id: municipalityId,
+    p_district_id: districtId,
+    p_rules: payload,
+  });
+  if (error) throw error;
+  if (Number(data) !== payload.length) {
+    throw new Error(`Expected to publish ${payload.length} zoning rules; database reported ${data}.`);
+  }
+  return Number(data);
+}
+
 /**
  * Town-level provenance: where the rules were transcribed from and when they
  * were last checked against it.
@@ -71,6 +120,9 @@ export async function saveDistrict(districtId, fields) {
  * zoning data was last verified" (migration 0002), not "when someone last
  * touched a field" — auto-stamping it would turn a provenance claim into a
  * record of typing. It is entered by hand alongside the source URL.
+ *
+ * This replaces the old `touchMunicipality`, which stamped today's date on
+ * every publish — the behavior the comment above argues against.
  */
 export async function saveMunicipalityMeta(municipalityId, { sourceUrl, lastUpdated }) {
   const { data, error } = await supabase
@@ -85,8 +137,9 @@ export async function saveMunicipalityMeta(municipalityId, { sourceUrl, lastUpda
 /**
  * Save the cost model + its three tiers. The DB provenance_fields CHECK
  * requires baseline/factor to be set for estimated models and NULL for
- * verified ones. Each tier row carries {rate_per_sqft, rate_per_sqft_max,
- * notes, formula_reference}; max/notes are NULL for estimated tiers.
+ * legacy verified ones. Each tier row carries {rate_per_sqft,
+ * rate_per_sqft_max, notes, formula_reference}; projected tiers may use a
+ * min–max range and client-facing notes.
  */
 export async function saveCostModel(municipalityId, existingModelId, model, tierRows) {
   let modelId = existingModelId;
@@ -123,9 +176,32 @@ export async function saveCostModel(municipalityId, existingModelId, model, tier
 }
 
 /**
- * Create a municipality with one starter district so it shows up everywhere.
- * The state row must exist first (FK); ON CONFLICT DO NOTHING keeps this safe
- * when it already does.
+ * Add a state, so municipalities can be filed under it.
+ *
+ * `ignoreDuplicates` rather than an error on conflict: a state already being on
+ * file is the outcome the caller wanted, and older rows were created implicitly
+ * by the municipality form before states were added explicitly.
+ */
+export async function createState({ code, name }) {
+  const upper = code.trim().toUpperCase();
+  const { error } = await supabase
+    .from("states")
+    .upsert(
+      { code: upper, name: name.trim() || stateNameFor(upper) },
+      { onConflict: "code", ignoreDuplicates: true }
+    );
+  if (error) throw error;
+  return upper;
+}
+
+/**
+ * Create the municipality only. Districts are added explicitly afterward, so
+ * no starter district is inserted here — a district created as a side effect
+ * of naming a town was one nobody chose the code for.
+ *
+ * The state row must exist first (FK); ON CONFLICT DO NOTHING keeps that safe
+ * when it already does. `sourceUrl` and `lastUpdated` are the operator's
+ * provenance claim and are carried through from the form rather than stamped.
  */
 export async function createMunicipality({
   name,
@@ -134,13 +210,14 @@ export async function createMunicipality({
   slug,
   sourceUrl,
   lastUpdated,
-  districtCode,
-  districtName,
 }) {
   const code = stateCode.toUpperCase();
+  // Creating a town into a state nobody added yet still has to satisfy the FK.
+  // Named properly rather than as its own code, so a state that arrives this
+  // way is indistinguishable from one added from the state list.
   const { error: stateError } = await supabase
     .from("states")
-    .upsert({ code, name: code }, { onConflict: "code", ignoreDuplicates: true });
+    .upsert({ code, name: stateNameFor(code) }, { onConflict: "code", ignoreDuplicates: true });
   if (stateError) throw stateError;
 
   const { data: muniData, error: muniError } = await supabase
@@ -158,20 +235,34 @@ export async function createMunicipality({
     .select("id");
   if (muniError) throw muniError;
   assertWritten(muniData, "municipality");
-  const municipalityId = muniData[0].id;
+  return muniData[0].id;
+}
 
-  const { data: districtData, error: districtError } = await supabase
-    .from("zoning_districts")
-    .insert({
-      municipality_id: municipalityId,
-      code: districtCode,
-      name: districtName || null,
-      extra_rules: {},
-    })
+/**
+ * Correct an existing municipality's name, state or county.
+ *
+ * The slug deliberately stays as it was created. It is the durable config id:
+ * the public RPCs look a town up by it and the repo keys
+ * `config/towns/<slug>.json` on it, so a spelling fix to the display name is
+ * not a reason to break those references. The state row is upserted first for
+ * the same reason it is on create — `state_code` is a foreign key.
+ */
+export async function updateMunicipality(municipalityId, { name, stateCode, county }) {
+  const code = stateCode.toUpperCase();
+  const { error: stateError } = await supabase
+    .from("states")
+    .upsert({ code, name: stateNameFor(code) }, { onConflict: "code", ignoreDuplicates: true });
+  if (stateError) throw stateError;
+
+  // `last_updated` is left alone on purpose: it reports how current the town's
+  // zoning data is, which renaming it does not change.
+  const { data, error } = await supabase
+    .from("municipalities")
+    .update({ name, state_code: code, county: county || null })
+    .eq("id", municipalityId)
     .select("id");
-  if (districtError) throw districtError;
-  assertWritten(districtData, "district");
-  return municipalityId;
+  if (error) throw error;
+  assertWritten(data, "municipality update");
 }
 
 /**
@@ -211,6 +302,25 @@ export async function zoningAreaCounts() {
     counts.set(row.municipality_id, (counts.get(row.municipality_id) ?? 0) + 1);
   }
   return counts;
+}
+
+/** Replace one municipality's zoning polygons after the setup wizard has
+ * validated their codes. Geometry arrives as WGS84 GeoJSON and is transformed
+ * to the database's NJ State Plane storage projection by the RPC. */
+export async function publishZoningLayer(
+  municipalityId,
+  features,
+  { sourceUrl, sourceDate = null, srid = 4326 } = {}
+) {
+  const { data, error } = await supabase.rpc("admin_publish_zoning_layer", {
+    p_municipality_id: municipalityId,
+    p_features: features,
+    p_source_url: sourceUrl || "Admin zoning setup",
+    p_source_date: sourceDate,
+    p_srid: srid,
+  });
+  if (error) throw error;
+  return Number(data ?? 0);
 }
 
 /**
@@ -255,7 +365,12 @@ export async function deleteDistrict(districtId) {
 export async function createDistrict(municipalityId, code, name) {
   const { data, error } = await supabase
     .from("zoning_districts")
-    .insert({ municipality_id: municipalityId, code, name: name || null, extra_rules: {} })
+    .insert({
+      municipality_id: municipalityId,
+      code,
+      name: name || null,
+      ...blankDistrictFields(),
+    })
     .select("id");
   if (error) throw error;
   assertWritten(data, "district");

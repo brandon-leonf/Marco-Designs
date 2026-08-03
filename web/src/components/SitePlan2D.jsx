@@ -9,6 +9,7 @@ import {
   detachedOriginFromExisting,
   floorRects as computeFloorRects,
   rectFitsEnvelope,
+  rectFitsGeometry,
   rectOnTopOf,
 } from "../lib/placement.js";
 
@@ -57,6 +58,8 @@ const fmtFt = (value) => Number(value).toLocaleString("en-US", { maximumFraction
 export default function SitePlan2D({
   lotWidthFt,
   lotDepthFt,
+  parcelGeometry = null,
+  envelopeGeometry = null,
   setbacks,
   zoningVerified = true,
   existingBuilding,
@@ -127,6 +130,21 @@ export default function SitePlan2D({
   const originY = (VIEW_H - planH) / 2;
   const sx = (xFt) => originX + xFt * s;
   const sy = (yFt) => originY + (lotDepth - yFt) * s; // street at the bottom
+  const geometryPath = (geometry) => {
+    if (!geometry) return "";
+    const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+    return (polygons ?? [])
+      .flatMap((polygon) =>
+        (polygon ?? []).map((ring) =>
+          (ring ?? [])
+            .map(([x, y], index) => `${index === 0 ? "M" : "L"}${sx(x)} ${sy(y)}`)
+            .join(" ") + " Z"
+        )
+      )
+      .join(" ");
+  };
+  const parcelPath = geometryPath(parcelGeometry);
+  const envelopePath = geometryPath(envelopeGeometry);
 
   /** Pointer position in lot feet, via the SVG's own transform. */
   const pointerFeet = (event) => {
@@ -284,7 +302,12 @@ export default function SitePlan2D({
 
   const outsideEnvelope =
     zoningVerified &&
-    rects.some((r) => r && rectFitsEnvelope(r, envelope) === false);
+    rects.some((r) =>
+      r &&
+      (envelopeGeometry
+        ? rectFitsGeometry(r, envelopeGeometry) === false
+        : rectFitsEnvelope(r, envelope) === false)
+    );
   const offSupport = rects.some(
     (r, index) => index > 0 && r && rects[index - 1] && rectOnTopOf(r, rects[index - 1]) === false
   );
@@ -346,9 +369,15 @@ export default function SitePlan2D({
           </text>
         )}
 
-        <rect x={sx(0)} y={sy(lotDepth)} width={planW} height={planH} className="plan-lot" />
+        {parcelPath ? (
+          <path d={parcelPath} className="plan-lot" fillRule="evenodd" />
+        ) : (
+          <rect x={sx(0)} y={sy(lotDepth)} width={planW} height={planH} className="plan-lot" />
+        )}
 
-        {zoningVerified && envelope.x1 > envelope.x0 && envelope.y1 > envelope.y0 && (
+        {zoningVerified && envelopePath ? (
+          <path d={envelopePath} className="plan-envelope" fillRule="evenodd" />
+        ) : zoningVerified && envelope.x1 > envelope.x0 && envelope.y1 > envelope.y0 && (
           <rect
             x={sx(envelope.x0)}
             y={sy(envelope.y1)}
@@ -384,7 +413,10 @@ export default function SitePlan2D({
           if (!r) return null;
           const color = floorColor(index);
           const badPlacement =
-            (zoningVerified && rectFitsEnvelope(r, envelope) === false) ||
+            (zoningVerified &&
+              (envelopeGeometry
+                ? rectFitsGeometry(r, envelopeGeometry) === false
+                : rectFitsEnvelope(r, envelope) === false)) ||
             (index > 0 && rects[index - 1] && rectOnTopOf(r, rects[index - 1]) === false);
           const isActive = index === active;
           return (
@@ -445,19 +477,23 @@ export default function SitePlan2D({
           />
         ))}
 
-        {/* Lot dimensions and the setbacks that carve the envelope out of it. */}
-        <text x={sx(lotWidth / 2)} y={sy(lotDepth) - 10} className="plan-dim" textAnchor="middle">
-          {fmtFt(lotWidth)}′
-        </text>
-        <text
-          x={sx(0) - 12}
-          y={sy(lotDepth / 2)}
-          className="plan-dim"
-          textAnchor="middle"
-          transform={`rotate(-90 ${sx(0) - 12} ${sy(lotDepth / 2)})`}
-        >
-          {fmtFt(lotDepth)}′
-        </text>
+        {/* Maximum extents are not parcel-edge dimensions on an irregular lot. */}
+        {!parcelPath && (
+          <>
+            <text x={sx(lotWidth / 2)} y={sy(lotDepth) - 10} className="plan-dim" textAnchor="middle">
+              {fmtFt(lotWidth)}′
+            </text>
+            <text
+              x={sx(0) - 12}
+              y={sy(lotDepth / 2)}
+              className="plan-dim"
+              textAnchor="middle"
+              transform={`rotate(-90 ${sx(0) - 12} ${sy(lotDepth / 2)})`}
+            >
+              {fmtFt(lotDepth)}′
+            </text>
+          </>
+        )}
         {envelope.y0 > 0 && (
           <text x={sx(lotWidth / 2)} y={sy(envelope.y0) - 6} className="plan-setback" textAnchor="middle">
             Front {fmtFt(envelope.y0)}′
@@ -469,9 +505,14 @@ export default function SitePlan2D({
           </text>
         )}
         {envelope.x0 > 0 && (
-          <text x={sx(envelope.x0) + 4} y={sy(lotDepth * 0.78)} className="plan-setback" textAnchor="start">
-            Side {fmtFt(envelope.x0)}′
-          </text>
+          <>
+            <text x={sx(envelope.x0) + 4} y={sy(lotDepth * 0.72)} className="plan-setback" textAnchor="start">
+              Side {fmtFt(envelope.x0)}′
+            </text>
+            <text x={sx(envelope.x1) - 4} y={sy(lotDepth * 0.72)} className="plan-setback" textAnchor="end">
+              Side {fmtFt(lotWidth - envelope.x1)}′
+            </text>
+          </>
         )}
 
         {/* North arrow. The plan is drawn on the lot's own axes, so this marks
