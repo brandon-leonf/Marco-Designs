@@ -607,13 +607,18 @@ export default function BuildingPreview3D({
             event.currentTarget.setPointerCapture?.(event.pointerId);
           }}
           onPointerMove={(event) => {
-            if (drag.current?.pointerId !== event.pointerId) return;
-            const dx = event.clientX - drag.current.x;
-            const dy = event.clientY - drag.current.y;
+            // Capture the active gesture before scheduling React's state
+            // update. pointer-up can clear drag.current before the updater
+            // runs, so reading the ref inside that callback can dereference
+            // null during a fast drag/release sequence.
+            const activeDrag = drag.current;
+            if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
+            const dx = event.clientX - activeDrag.x;
+            const dy = event.clientY - activeDrag.y;
             setView((current) => ({
               ...current,
-              yaw: drag.current.yaw + dx * 0.45,
-              elevation: clamp(drag.current.elevation - dy * 0.35, MIN_ELEVATION, MAX_ELEVATION),
+              yaw: activeDrag.yaw + dx * 0.45,
+              elevation: clamp(activeDrag.elevation - dy * 0.35, MIN_ELEVATION, MAX_ELEVATION),
             }));
           }}
           onPointerUp={endDrag}

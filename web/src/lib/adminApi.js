@@ -1,4 +1,6 @@
 import { supabase } from "./supabase.js";
+import { serializeZoningRule } from "./zoningRules.js";
+import { stateNameFor } from "./states.js";
 
 /**
  * Admin-side data access. Everything here requires a signed-in Supabase user
@@ -90,6 +92,26 @@ export async function saveDistrict(districtId, fields) {
   assertWritten(data, "zoning district");
 }
 
+/** Replace all normalized rules for one district in a single DB transaction. */
+export async function replaceZoningRules(municipalityId, districtId, rules) {
+  const payload = (rules ?? []).map((rule) => {
+    const serialized = serializeZoningRule(rule);
+    return Object.fromEntries(
+      Object.entries(serialized).filter(([, value]) => value !== undefined)
+    );
+  });
+  const { data, error } = await supabase.rpc("admin_replace_zoning_rules", {
+    p_municipality_id: municipalityId,
+    p_district_id: districtId,
+    p_rules: payload,
+  });
+  if (error) throw error;
+  if (Number(data) !== payload.length) {
+    throw new Error(`Expected to publish ${payload.length} zoning rules; database reported ${data}.`);
+  }
+  return Number(data);
+}
+
 export async function touchMunicipality(municipalityId) {
   const today = new Date().toISOString().slice(0, 10);
   const { data, error } = await supabase
@@ -147,11 +169,34 @@ export async function saveCostModel(municipalityId, existingModelId, model, tier
  * The state row must exist first (FK); ON CONFLICT DO NOTHING keeps this safe
  * when it already does.
  */
-export async function createMunicipality({ name, stateCode, county, slug, districtCode, districtName }) {
+/**
+ * Add a state, so municipalities can be filed under it.
+ *
+ * `ignoreDuplicates` rather than an error on conflict: a state already being on
+ * file is the outcome the caller wanted, and older rows were created implicitly
+ * by the municipality form before states were added explicitly.
+ */
+export async function createState({ code, name }) {
+  const upper = code.trim().toUpperCase();
+  const { error } = await supabase
+    .from("states")
+    .upsert(
+      { code: upper, name: name.trim() || stateNameFor(upper) },
+      { onConflict: "code", ignoreDuplicates: true }
+    );
+  if (error) throw error;
+  return upper;
+}
+
+/** Create the municipality only. Districts are added explicitly afterward. */
+export async function createMunicipality({ name, stateCode, county, slug }) {
   const code = stateCode.toUpperCase();
+  // Creating a town into a state nobody added yet still has to satisfy the FK.
+  // Named properly rather than as its own code, so a state that arrives this
+  // way is indistinguishable from one added from the state list.
   const { error: stateError } = await supabase
     .from("states")
-    .upsert({ code, name: code }, { onConflict: "code", ignoreDuplicates: true });
+    .upsert({ code, name: stateNameFor(code) }, { onConflict: "code", ignoreDuplicates: true });
   if (stateError) throw stateError;
 
   const today = new Date().toISOString().slice(0, 10);
@@ -161,20 +206,34 @@ export async function createMunicipality({ name, stateCode, county, slug, distri
     .select("id");
   if (muniError) throw muniError;
   assertWritten(muniData, "municipality");
-  const municipalityId = muniData[0].id;
+  return muniData[0].id;
+}
 
-  const { data: districtData, error: districtError } = await supabase
-    .from("zoning_districts")
-    .insert({
-      municipality_id: municipalityId,
-      code: districtCode,
-      name: districtName || null,
-      ...blankDistrictFields(),
-    })
+/**
+ * Correct an existing municipality's name, state or county.
+ *
+ * The slug deliberately stays as it was created. It is the durable config id:
+ * the public RPCs look a town up by it and the repo keys
+ * `config/towns/<slug>.json` on it, so a spelling fix to the display name is
+ * not a reason to break those references. The state row is upserted first for
+ * the same reason it is on create — `state_code` is a foreign key.
+ */
+export async function updateMunicipality(municipalityId, { name, stateCode, county }) {
+  const code = stateCode.toUpperCase();
+  const { error: stateError } = await supabase
+    .from("states")
+    .upsert({ code, name: stateNameFor(code) }, { onConflict: "code", ignoreDuplicates: true });
+  if (stateError) throw stateError;
+
+  // `last_updated` is left alone on purpose: it reports how current the town's
+  // zoning data is, which renaming it does not change.
+  const { data, error } = await supabase
+    .from("municipalities")
+    .update({ name, state_code: code, county: county || null })
+    .eq("id", municipalityId)
     .select("id");
-  if (districtError) throw districtError;
-  assertWritten(districtData, "district");
-  return municipalityId;
+  if (error) throw error;
+  assertWritten(data, "municipality update");
 }
 
 /**

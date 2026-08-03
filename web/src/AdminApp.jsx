@@ -4,11 +4,13 @@ import "leaflet/dist/leaflet.css";
 import { booleanPointInPolygon, point } from "@turf/turf";
 import {
   supabase,
+  fetchStates,
   fetchMunicipalities,
   fetchZoningGeojson,
   fetchZoningProvenance,
 } from "./lib/supabase.js";
 import { geocodeAddress } from "./lib/geocode.js";
+import { STATE_NAMES, stateNameFor } from "./lib/states.js";
 import {
   getSession,
   onAuthChange,
@@ -16,9 +18,12 @@ import {
   signOut,
   checkIsAdmin,
   saveDistrict,
+  replaceZoningRules,
   touchMunicipality,
   saveCostModel,
+  createState,
   createMunicipality,
+  updateMunicipality,
   createDistrict,
   municipalityImpact,
   deleteMunicipality,
@@ -28,6 +33,20 @@ import {
 } from "./lib/adminApi.js";
 import Logo from "./components/Logo.jsx";
 import { computeBuildable, missingDistrictRules } from "./lib/envelope.js";
+import {
+  BASELINE_RULE_SOURCE,
+  RULE_APPLIES_TO,
+  RULE_CATEGORIES,
+  RULE_COMBINE_METHODS,
+  RULE_OPERATORS,
+  RULE_SIDES,
+  RULE_TYPES,
+  RULE_UNITS,
+  applyZoningRules,
+  normalizeZoningRule,
+  synchronizeBaselineRules,
+  validateZoningRule,
+} from "./lib/zoningRules.js";
 
 // Drafts live in this browser only (localStorage, keyed by district). Nothing
 // touches the live database until Publish.
@@ -261,11 +280,131 @@ function initialsFor(name) {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
-function MunicipalityCard({ item, status, selected = false, onOpen, onSetup, compact = false }) {
+/**
+ * Right-click menu state, shared by the municipality and district lists.
+ *
+ * Everything that would move the menu away from the row it points at closes it —
+ * a pointer press elsewhere, Escape, any scroll, the window losing focus or
+ * being resized — because the menu is positioned against the viewport and a
+ * stale one would sit over an unrelated row. `itemCount` only sizes the flip
+ * away from the bottom edge.
+ */
+function useContextMenu(itemCount = 2) {
+  const [contextMenu, setContextMenu] = useState(null);
+  const firstItemRef = useRef(null);
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    const close = () => setContextMenu(null);
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("scroll", close, true);
+    window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
+    firstItemRef.current?.focus();
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("scroll", close, true);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
+    };
+  }, [contextMenu]);
+
+  const openContextMenu = (event, item) => {
+    const menuWidth = 220;
+    const menuHeight = itemCount * 44 + 12;
+    setContextMenu({
+      item,
+      left: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+      top: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    });
+  };
+
+  return {
+    contextMenu,
+    openContextMenu,
+    closeContextMenu: () => setContextMenu(null),
+    firstItemRef,
+  };
+}
+
+/**
+ * The menu itself. `items` are `{label, onSelect, danger}` — selecting one
+ * closes the menu first, so a handler that navigates does not leave it behind.
+ */
+function ContextMenu({ menu, label, items, firstItemRef, onClose }) {
+  if (!menu) return null;
+  return (
+    <div
+      className="municipality-context-menu"
+      role="menu"
+      aria-label={label}
+      style={{ left: menu.left, top: menu.top }}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {items.map((entry, index) => (
+        <button
+          key={entry.label}
+          ref={index === 0 ? firstItemRef : undefined}
+          type="button"
+          role="menuitem"
+          className={entry.danger ? "menu-danger" : undefined}
+          onClick={() => {
+            const target = menu.item;
+            onClose();
+            entry.onSelect(target);
+          }}
+        >
+          {entry.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Open a row's menu from the keyboard, at the row rather than at the pointer.
+ * The Menu key and Shift+F10 are what a native context menu answers to.
+ */
+function contextMenuKeyHandler(open, item) {
+  return (event) => {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    open({ clientX: bounds.left + Math.min(56, bounds.width), clientY: bounds.top + 44 }, item);
+  };
+}
+
+function MunicipalityCard({
+  item,
+  status,
+  selected = false,
+  onOpen,
+  onSetup,
+  onContextMenu,
+  compact = false,
+}) {
   return (
     <li>
-      <div className={selected ? "muni-card selected" : "muni-card"}>
-        <button type="button" className="muni-card-open" onClick={() => onOpen(item.id)}>
+      <div
+        className={selected ? "muni-card selected" : "muni-card"}
+        onContextMenu={(event) => {
+          if (!onContextMenu) return;
+          event.preventDefault();
+          onContextMenu(event, item);
+        }}
+        onKeyDown={onContextMenu ? contextMenuKeyHandler(onContextMenu, item) : undefined}
+      >
+        <button
+          type="button"
+          className="muni-card-open"
+          aria-haspopup={onContextMenu ? "menu" : undefined}
+          onClick={() => onOpen(item.id)}
+        >
           <span className="muni-avatar" aria-hidden="true">{initialsFor(item.name)}</span>
           <span className="muni-card-body">
             <span className="muni-card-title">
@@ -308,12 +447,32 @@ function MunicipalityCard({ item, status, selected = false, onOpen, onSetup, com
 // nav section because it is edited in the same draft-and-publish cycle.
 const RULE_TABS = [
   { id: "setbacks", label: "Setbacks & limits" },
+  { id: "logic", label: "Rule logic" },
   { id: "adu", label: "ADU" },
   { id: "pricing", label: "Pricing" },
   { id: "import", label: "Import PDF" },
   { id: "review", label: "Review & test" },
   { id: "zoning-setup", label: "Zoning setup", opensView: true },
 ];
+
+function RuleTabBar({ activeTab, onSelect }) {
+  return (
+    <div className="rule-tabs" role="tablist" aria-label="Rule groups">
+      {RULE_TABS.map((tab) => (
+        <button
+          type="button"
+          role="tab"
+          key={tab.id}
+          className={activeTab === tab.id ? "rule-tab active" : "rule-tab"}
+          aria-selected={activeTab === tab.id}
+          onClick={() => onSelect(tab)}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 // Districts, rules and pricing are all reached by drilling into a town, so
 // they are not listed here. A top-level "District Rules" would jump to
@@ -354,21 +513,100 @@ function AdminSidebar({ view, onView, adminEmail }) {
 }
 
 /**
+ * The state list: the level above municipalities.
+ *
+ * Towns are configured one state at a time, and once more than one state is on
+ * file a single flat list stops saying which rules apply where. Picking the
+ * state first makes that explicit, and keeps the town list to the towns whose
+ * codes actually share a state.
+ */
+function StatesPanel({ states, stateCode, ready, newState, onNewState, onSelect, children }) {
+  return (
+    <div className="card admin-municipalities">
+      <div className="admin-panel-head">
+        <div>
+          <AdminCrumbs items={[{ label: "Municipalities" }]} />
+          <h2>States</h2>
+          <p className="admin-side-note">Select a state to see the municipalities in it.</p>
+        </div>
+        {/* Municipalities are added from inside a state, where the state they
+            land in is already settled — so this level adds states only. */}
+        <button
+          type="button"
+          className="primary compact"
+          disabled={!ready || !!newState}
+          onClick={onNewState}
+        >
+          ＋ New state
+        </button>
+      </div>
+
+      {children}
+
+      <ul className="muni-list">
+        {states.map((group) => (
+          <li key={group.code}>
+            <div className={group.code === stateCode ? "muni-card selected" : "muni-card"}>
+              <button
+                type="button"
+                className="muni-card-open"
+                onClick={() => onSelect(group.code)}
+              >
+                <span className="muni-avatar" aria-hidden="true">{group.code}</span>
+                <span className="muni-card-body">
+                  <span className="muni-card-title">
+                    <strong>{group.name}</strong>
+                    <span className="muni-readiness">
+                      <em className={`muni-status ${group.live === group.munis.length ? "active" : "draft"}`}>
+                        {group.live} of {group.munis.length} live
+                      </em>
+                    </span>
+                  </span>
+                  <span className="muni-card-meta">
+                    {group.munis.length}{" "}
+                    {group.munis.length === 1 ? "municipality" : "municipalities"}
+                    {group.counties.length > 0 && ` · ${group.counties.join(", ")}`}
+                  </span>
+                </span>
+                <span className="muni-card-chevron" aria-hidden="true">›</span>
+              </button>
+            </div>
+          </li>
+        ))}
+        {states.length === 0 && (
+          <li className="admin-side-note">No states yet. Add one to file municipalities under.</li>
+        )}
+      </ul>
+
+      <p className="admin-list-footer">
+        {states.length} {states.length === 1 ? "state" : "states"}
+      </p>
+    </div>
+  );
+}
+
+/**
  * The municipality list: search, readiness at a glance, and the way into a
  * town's configuration. Selecting one loads it and moves to its district rules.
  */
 function MunicipalitiesPanel({
   munis,
   muniId,
+  stateName,
   zoningCounts,
   ready,
   query,
   onQuery,
+  onBackToStates,
   onSelect,
   onSetup,
+  onEdit,
+  onDelete,
   onNew,
   children,
 }) {
+  const { contextMenu, openContextMenu, closeContextMenu, firstItemRef } = useContextMenu(2);
+
   const needle = query.trim().toLowerCase();
   const matches = needle
     ? munis.filter((item) =>
@@ -380,8 +618,13 @@ function MunicipalitiesPanel({
     <div className="card admin-municipalities">
       <div className="admin-panel-head">
         <div>
-          <AdminCrumbs items={[{ label: "Municipalities" }]} />
-          <h2>Municipalities</h2>
+          <AdminCrumbs
+            items={[
+              { label: "Municipalities", onClick: onBackToStates },
+              { label: stateName },
+            ]}
+          />
+          <h2>{stateName}</h2>
         </div>
         <button type="button" className="primary compact" disabled={!ready} onClick={onNew}>
           ＋ New municipality
@@ -395,8 +638,8 @@ function MunicipalitiesPanel({
         <input
           type="search"
           value={query}
-          placeholder="Search municipalities…"
-          aria-label="Search municipalities"
+          placeholder={`Search municipalities in ${stateName}…`}
+          aria-label={`Search municipalities in ${stateName}`}
           onChange={(event) => onQuery(event.target.value)}
         />
       </div>
@@ -417,17 +660,35 @@ function MunicipalitiesPanel({
               selected={item.id === muniId}
               onOpen={onSelect}
               onSetup={onSetup}
+              onContextMenu={openContextMenu}
             />
           );
         })}
         {matches.length === 0 && (
-          <li className="admin-side-note">No municipality matches “{query.trim()}”.</li>
+          <li className="admin-side-note">
+            {/* A state now scopes the list, so it can be empty with nothing
+                typed — the search wording would be wrong there. */}
+            {query.trim()
+              ? `No municipality in ${stateName} matches “${query.trim()}”.`
+              : `No municipalities in ${stateName} yet.`}
+          </li>
         )}
       </ul>
 
       <p className="admin-list-footer">
         Showing {matches.length} of {munis.length}
       </p>
+
+      <ContextMenu
+        menu={contextMenu}
+        label={contextMenu ? `${contextMenu.item.name} actions` : undefined}
+        firstItemRef={firstItemRef}
+        onClose={closeContextMenu}
+        items={[
+          { label: "Edit municipality", onSelect: onEdit },
+          { label: "Delete municipality", onSelect: onDelete, danger: true },
+        ]}
+      />
     </div>
   );
 }
@@ -540,6 +801,7 @@ function LoginCard() {
 function draftFromDistrict(district) {
   const adu = district.extra_rules?.adu ?? {};
   return {
+    name: district.name ?? "",
     front_yard_min_ft: numOrEmpty(district.front_yard_min_ft),
     rear_yard_min_ft: numOrEmpty(district.rear_yard_min_ft),
     side_yard_one_min_ft: numOrEmpty(district.side_yard_one_min_ft),
@@ -581,6 +843,182 @@ function draftFromCostModel(costModel) {
   };
 }
 
+const enumLabel = (value) =>
+  String(value ?? "")
+    .toLowerCase()
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+function StructuredRuleEditor({ rule, onChange, onRemove, disabled }) {
+  const baseline = rule.sourceSection === BASELINE_RULE_SOURCE;
+  const conditional = ["CONDITIONAL", "PIECEWISE"].includes(rule.ruleType);
+  const issues = validateZoningRule(rule);
+  const patch = (changes) => onChange({ ...rule, ...changes });
+  const patchCalculation = (changes) =>
+    patch({ calculation: { ...rule.calculation, ...changes } });
+  const patchCondition = (changes) =>
+    patch({
+      condition: {
+        metric: "GROSS_BUILDING_AREA",
+        operator: ">",
+        value: 0,
+        secondValue: null,
+        ...(rule.condition ?? {}),
+        ...changes,
+      },
+    });
+
+  return (
+    <article className={baseline ? "structured-rule baseline" : "structured-rule"}>
+      <div className="structured-rule-head">
+        <div>
+          <strong>{enumLabel(rule.category)}{rule.side ? ` · ${enumLabel(rule.side)}` : ""}</strong>
+          <span>{baseline ? "Synced from Setbacks & limits" : `Rule ${rule.id.slice(0, 8)}`}</span>
+        </div>
+        {!baseline && (
+          <button type="button" className="text-danger compact" onClick={onRemove} disabled={disabled}>
+            Delete rule
+          </button>
+        )}
+      </div>
+      <fieldset disabled={disabled || baseline}>
+        <div className="structured-rule-grid">
+          <label>
+            Category
+            <select
+              value={rule.category}
+              onChange={(event) => {
+                const category = event.target.value;
+                patch({ category, side: category === "SETBACK" ? rule.side ?? "FRONT" : null });
+              }}
+            >
+              {RULE_CATEGORIES.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
+            </select>
+          </label>
+          <label>
+            Applies to
+            <select value={rule.appliesTo} onChange={(event) => patch({ appliesTo: event.target.value })}>
+              {RULE_APPLIES_TO.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
+            </select>
+          </label>
+          {rule.category === "SETBACK" && (
+            <label>
+              Side
+              <select value={rule.side ?? "FRONT"} onChange={(event) => patch({ side: event.target.value })}>
+                {RULE_SIDES.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
+              </select>
+            </label>
+          )}
+          <label>
+            Rule type
+            <select
+              value={rule.ruleType}
+              onChange={(event) => {
+                const ruleType = event.target.value;
+                patch({
+                  ruleType,
+                  condition: ["CONDITIONAL", "PIECEWISE"].includes(ruleType)
+                    ? rule.condition ?? { metric: "GROSS_BUILDING_AREA", operator: ">", value: 0, secondValue: null }
+                    : null,
+                });
+              }}
+            >
+              {RULE_TYPES.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
+            </select>
+          </label>
+          <label>
+            Value
+            <input
+              type="number"
+              step="any"
+              value={rule.calculation.value ?? ""}
+              onChange={(event) => patchCalculation({ value: event.target.value })}
+              placeholder="e.g. 25"
+            />
+          </label>
+          <label>
+            Formula
+            <input
+              type="text"
+              value={rule.calculation.formula ?? ""}
+              onChange={(event) => patchCalculation({ formula: event.target.value })}
+              placeholder="grossBuildingArea * 0.008"
+            />
+          </label>
+          <label>
+            Unit
+            <select value={rule.calculation.unit} onChange={(event) => patchCalculation({ unit: event.target.value })}>
+              {RULE_UNITS.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+          </label>
+          <label>
+            Combine method
+            <select value={rule.combineMethod} onChange={(event) => patch({ combineMethod: event.target.value })}>
+              {RULE_COMBINE_METHODS.map((value) => <option key={value} value={value}>{value}</option>)}
+            </select>
+          </label>
+          <label>
+            Priority
+            <input type="number" step="1" value={rule.priority} onChange={(event) => patch({ priority: Number(event.target.value) })} />
+          </label>
+        </div>
+
+        {conditional && (
+          <div className="structured-condition">
+            <strong>Condition</strong>
+            <div className="structured-rule-grid">
+              <label>
+                Metric
+                <input type="text" value={rule.condition?.metric ?? ""} onChange={(event) => patchCondition({ metric: event.target.value })} placeholder="GROSS_BUILDING_AREA" />
+              </label>
+              <label>
+                Operator
+                <select value={rule.condition?.operator ?? ">"} onChange={(event) => patchCondition({ operator: event.target.value })}>
+                  {RULE_OPERATORS.map((value) => <option key={value} value={value}>{value}</option>)}
+                </select>
+              </label>
+              <label>
+                Value
+                <input type="number" step="any" value={rule.condition?.value ?? ""} onChange={(event) => patchCondition({ value: event.target.value })} />
+              </label>
+              {rule.condition?.operator === "BETWEEN" && (
+                <label>
+                  Second value
+                  <input type="number" step="any" value={rule.condition?.secondValue ?? ""} onChange={(event) => patchCondition({ secondValue: event.target.value })} />
+                </label>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="structured-rule-grid provenance">
+          <label>
+            Source section
+            <input type="text" value={rule.sourceSection} onChange={(event) => patch({ sourceSection: event.target.value })} />
+          </label>
+          <label>
+            Source URL
+            <input type="url" value={rule.sourceUrl} onChange={(event) => patch({ sourceUrl: event.target.value })} placeholder="https://…" />
+          </label>
+          <label>
+            Effective date
+            <input type="date" value={rule.effectiveDate} onChange={(event) => patch({ effectiveDate: event.target.value })} />
+          </label>
+          <label>
+            Expiration date
+            <input type="date" value={rule.expirationDate} onChange={(event) => patch({ expirationDate: event.target.value })} />
+          </label>
+        </div>
+      </fieldset>
+      {issues.length > 0 && (
+        <ul className="structured-rule-issues">
+          {issues.map((issue) => <li key={issue}>{issue}</li>)}
+        </ul>
+      )}
+    </article>
+  );
+}
+
 function ConfigEditor({ adminEmail, ready }) {
   const [munis, setMunis] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -588,27 +1026,51 @@ function ConfigEditor({ adminEmail, ready }) {
   const [districtId, setDistrictId] = useState(null);
   const [filter, setFilter] = useState("");
   const [draft, setDraft] = useState(null);
+  const [ruleDraft, setRuleDraft] = useState([]);
   const [costDraft, setCostDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState(null); // {kind: "ok"|"error", text}
   const [copied, setCopied] = useState(false);
-  const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, district}
+  const [newMuni, setNewMuni] = useState(null); // null | {name, state, county}
+  // Same three fields as the create form, reopened against a town that already
+  // exists. Its slug rides along read-only so the form can say which config id
+  // the edits are landing on.
+  const [editMuni, setEditMuni] = useState(null); // null | {id, name, state, county, slug}
   const [newDistrict, setNewDistrict] = useState(null); // null | {code, name}
+  const [editDist, setEditDist] = useState(null); // null | {id, code, name}
   // Destructive actions confirm by typing the name back, and state their
   // blast radius first — parcels are an NJGIN re-import, not an undo.
-  const [deleteMuni, setDeleteMuni] = useState(null); // null | {typed, impact|null}
+  const [deleteMuni, setDeleteMuni] = useState(null); // null | {id, name, typed, impact|null}
   const [deleteDist, setDeleteDist] = useState(null); // null | {id, code, typed}
   const [draftInfo, setDraftInfo] = useState(null); // {savedAt} when an unpublished local draft is loaded
   const [validation, setValidation] = useState(null); // {issues: [], ok: []}
-  const [testLot, setTestLot] = useState({ width: 25, depth: 102, area: 2548 });
+  const [testLot, setTestLot] = useState({
+    width: 25,
+    depth: 102,
+    area: 2548,
+    grossBuildingArea: 4000,
+    appliesTo: "PRINCIPAL_BUILDING",
+  });
   const [testResult, setTestResult] = useState(null); // {lines: [], summary: {}}
   const [pdfImport, setPdfImport] = useState(null);
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfProgress, setPdfProgress] = useState("");
   const [pdfImportedKeys, setPdfImportedKeys] = useState([]);
-  // Which sidebar section is showing. The list opens first: picking the town
-  // is the decision every other section depends on.
-  const [view, setView] = useState("municipalities");
+  // Which sidebar section is showing. The state list opens first: the drill-down
+  // is state → municipality → district → rules, and picking the state is the
+  // decision every other section depends on.
+  const [view, setView] = useState("states");
+  // Which state the municipality list is showing. Seeded from the first town on
+  // load so the section is never sitting on a state that has nothing under it.
+  const [stateCode, setStateCode] = useState(null);
+  const [stateRows, setStateRows] = useState([]); // [{code, name}] from the states table
+  const [newState, setNewState] = useState(null); // null | {code, name}
+  const {
+    contextMenu: districtMenu,
+    openContextMenu: openDistrictMenu,
+    closeContextMenu: closeDistrictMenu,
+    firstItemRef: districtMenuFirstItemRef,
+  } = useContextMenu(2);
   const [muniQuery, setMuniQuery] = useState("");
   const [zoningCounts, setZoningCounts] = useState(null);
   const [zoningSetupDirty, setZoningSetupDirty] = useState(false);
@@ -623,11 +1085,24 @@ function ConfigEditor({ adminEmail, ready }) {
       })
       .catch((e) => setLoadError(e.message ?? String(e)));
 
+  // A state with no towns yet is still a state, so the list is read rather than
+  // derived. A failure here is not fatal: the codes on the municipalities still
+  // produce a usable list, so it falls back to those rather than blocking.
+  const reloadStates = () =>
+    fetchStates()
+      .then((rows) => {
+        setStateRows(rows);
+        return rows;
+      })
+      .catch(() => []);
+
   useEffect(() => {
+    reloadStates();
     reload().then((data) => {
       if (data?.length) {
         setMuniId((current) => current ?? data[0].id);
         setDistrictId((current) => current ?? data[0].zoning_districts[0]?.id ?? null);
+        setStateCode((current) => current ?? data[0].state_code);
       }
     });
   }, []);
@@ -657,7 +1132,49 @@ function ConfigEditor({ adminEmail, ready }) {
   const openMunicipality = (id) => {
     setMuniId(id);
     setDistrictId(null);
+    // Arriving from the dashboard can cross states, so the crumb trail is told
+    // which state this town is in rather than assuming the one already picked.
+    const targetMuni = munis?.find((item) => item.id === id) ?? null;
+    if (targetMuni?.state_code) setStateCode(targetMuni.state_code);
     setView("districts");
+  };
+
+  const submitNewState = async () => {
+    const code = newState?.code.trim().toUpperCase() ?? "";
+    if (code.length !== 2) {
+      setSaveState({ kind: "error", text: "A state needs its 2-letter code." });
+      return;
+    }
+    setSaving(true);
+    setSaveState(null);
+    try {
+      await createState({ code, name: newState.name });
+      await reloadStates();
+      setNewState(null);
+      // Straight into the new state: it is empty, and adding the first
+      // municipality is the only thing left to do in it.
+      setStateCode(code);
+      setMuniQuery("");
+      setView("municipalities");
+      setSaveState({
+        kind: "ok",
+        text: `${stateNameFor(code)} added. Add its first municipality next.`,
+      });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Drill from the state list into the towns in one state. */
+  const openState = (code) => {
+    setStateCode(code);
+    setMuniQuery("");
+    setNewMuni(null);
+    setEditMuni(null);
+    setDeleteMuni(null);
+    setView("municipalities");
   };
 
   const openDistrict = (id) => {
@@ -667,11 +1184,30 @@ function ConfigEditor({ adminEmail, ready }) {
   };
 
   const openZoningSetup = (id) => {
+    const targetMuni = munis?.find((item) => item.id === id) ?? null;
     setMuniId(id);
-    setDistrictId(null);
+    if (targetMuni?.state_code) setStateCode(targetMuni.state_code);
+    setDistrictId((current) =>
+      targetMuni?.zoning_districts.some((item) => item.id === current)
+        ? current
+        : targetMuni?.zoning_districts[0]?.id ?? null
+    );
     setZoningSetupDirty(false);
     setPendingSetupView(null);
     setView("zoning-setup");
+  };
+
+  const selectSetupTab = (tab) => {
+    if (tab.id === "zoning-setup") return;
+    const destination = districtId
+      ? { view: "rules", ruleTab: tab.id }
+      : { view: "districts", ruleTab: tab.id };
+    if (zoningSetupDirty) {
+      setPendingSetupView(destination);
+      return;
+    }
+    setRuleTab(tab.id);
+    setView(destination.view);
   };
 
   const requestView = (nextView) => {
@@ -690,6 +1226,9 @@ function ConfigEditor({ adminEmail, ready }) {
       window.location.hash = "#/";
     } else if (nextView === "__sign_out__") {
       signOut();
+    } else if (nextView && typeof nextView === "object") {
+      setRuleTab(nextView.ruleTab ?? "setbacks");
+      setView(nextView.view);
     } else if (nextView) {
       setView(nextView);
     }
@@ -716,6 +1255,50 @@ function ConfigEditor({ adminEmail, ready }) {
 
   const muni = munis?.find((m) => m.id === muniId) ?? null;
   const district = muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
+  const stateName = stateNameFor(stateCode);
+
+  // Every state on file, whether or not a municipality has been added to it —
+  // an added state has to be visible before it has anything in it, or there is
+  // nowhere to add the first town. Codes found only on municipalities are
+  // folded in too, so a town can never sit in a state the list omits.
+  const states = useMemo(() => {
+    const groups = new Map();
+    const blankGroup = (code) => ({
+      code,
+      // Named from the code rather than from the stored name: rows created
+      // before states were added explicitly hold the code in that column, and
+      // "NJ" is not what the list should say.
+      name: stateNameFor(code),
+      munis: [],
+      counties: [],
+      live: 0,
+    });
+    for (const row of stateRows) {
+      if (row.code) groups.set(row.code, blankGroup(row.code));
+    }
+    for (const item of munis ?? []) {
+      const code = item.state_code;
+      if (!code) continue;
+      const group = groups.get(code) ?? blankGroup(code);
+      group.munis.push(item);
+      if (item.county && !group.counties.includes(item.county)) group.counties.push(item.county);
+      // Same readiness rule the town rows report, rolled up.
+      if (
+        municipalityStatus(item, zoningCounts ? zoningCounts.get(item.id) ?? 0 : null).key ===
+        "active"
+      ) {
+        group.live += 1;
+      }
+      groups.set(code, group);
+    }
+    for (const group of groups.values()) group.counties.sort((a, b) => a.localeCompare(b));
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [munis, stateRows, zoningCounts]);
+
+  const stateMunis = useMemo(
+    () => (munis ?? []).filter((item) => item.state_code === stateCode),
+    [munis, stateCode]
+  );
   const rawCostModel = muni?.build_cost_models;
   const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
 
@@ -724,16 +1307,38 @@ function ConfigEditor({ adminEmail, ready }) {
   useEffect(() => {
     if (!district) {
       setDraft(null);
+      setRuleDraft([]);
       setDraftInfo(null);
       return;
     }
     const stored = loadLocalDraft(district.id);
     if (stored?.draft) {
-      setDraft(stored.draft);
+      setDraft({
+        ...stored.draft,
+        // Drafts saved before district names became editable do not contain
+        // this key. Preserve the published name instead of showing a blank.
+        name: stored.draft.name ?? district.name ?? "",
+      });
+      setRuleDraft(
+        (stored.ruleDraft ?? district.zoning_rules ?? []).map((rule) =>
+          normalizeZoningRule(rule, {
+            municipalityId: muni?.id,
+            districtId: district.id,
+          })
+        )
+      );
       if (stored.costDraft) setCostDraft({ ...stored.costDraft, provenance: "estimated" });
       setDraftInfo({ savedAt: stored.savedAt });
     } else {
       setDraft(draftFromDistrict(district));
+      setRuleDraft(
+        (district.zoning_rules ?? []).map((rule) =>
+          normalizeZoningRule(rule, {
+            municipalityId: muni?.id,
+            districtId: district.id,
+          })
+        )
+      );
       setDraftInfo(null);
     }
     setSaveState(null);
@@ -742,7 +1347,7 @@ function ConfigEditor({ adminEmail, ready }) {
     setPdfImport(null);
     setPdfProgress("");
     setPdfImportedKeys([]);
-  }, [district]);
+  }, [district, muni?.id]);
   useEffect(() => {
     if (!muni) {
       setCostDraft(null);
@@ -761,12 +1366,22 @@ function ConfigEditor({ adminEmail, ready }) {
     );
   }, [muni, filter]);
 
+  const synchronizedRules = useMemo(
+    () => synchronizeBaselineRules(
+      district ? { ...district, source_url: muni?.source_url ?? "" } : district,
+      draft,
+      ruleDraft
+    ),
+    [district, draft, ruleDraft, muni?.source_url]
+  );
+
   const jsonPreview = useMemo(() => {
     if (!draft || !muni || !district) return "";
     return JSON.stringify(
       {
         municipality: muni.name,
         district: district.code,
+        district_name: draft.name.trim() || null,
         setbacks: {
           front_yard_min_ft: numOrNull(draft.front_yard_min_ft),
           rear_yard_min_ft: numOrNull(draft.rear_yard_min_ft),
@@ -786,6 +1401,7 @@ function ConfigEditor({ adminEmail, ready }) {
           max_far: numOrNull(draft.max_far),
           max_height_ft: numOrNull(draft.max_height_ft),
         },
+        zoning_rules: synchronizedRules,
         adu: {
           allowed: draft.adu_allowed,
           detached_allowed: draft.adu_detached_allowed,
@@ -813,7 +1429,7 @@ function ConfigEditor({ adminEmail, ready }) {
       null,
       2
     );
-  }, [draft, costDraft, muni, district]);
+  }, [draft, costDraft, muni, district, synchronizedRules]);
 
   const costModelComplete =
     costDraft &&
@@ -824,7 +1440,10 @@ function ConfigEditor({ adminEmail, ready }) {
   const saveDraftLocal = () => {
     if (!district) return;
     const savedAt = new Date().toISOString();
-    localStorage.setItem(draftKey(district.id), JSON.stringify({ draft, costDraft, savedAt }));
+    localStorage.setItem(
+      draftKey(district.id),
+      JSON.stringify({ draft, costDraft, ruleDraft: synchronizedRules, savedAt })
+    );
     setDraftInfo({ savedAt });
     setSaveState({
       kind: "ok",
@@ -859,6 +1478,14 @@ function ConfigEditor({ adminEmail, ready }) {
         ? "Max FAR is blank → stored as null (no FAR cap). Blank is never treated as 0."
         : `Max FAR = ${draft.max_far} → buildable area capped at lot area × ${draft.max_far}.`
     );
+    synchronizedRules.forEach((rule, index) => {
+      for (const issue of validateZoningRule(rule)) {
+        issues.push(`Rule ${index + 1} (${enumLabel(rule.category)}): ${issue}`);
+      }
+    });
+    if (synchronizedRules.length > 0) {
+      ok.push(`${synchronizedRules.length} normalized zoning rule(s) are ready to publish.`);
+    }
     for (const name of TIER_ORDER) {
       const t = costDraft.tiers[name];
       if (t.min === "" || t.max === "") {
@@ -874,15 +1501,26 @@ function ConfigEditor({ adminEmail, ready }) {
   const runValidation = () => setValidation(collectValidation());
 
   /** District-shaped object from the DRAFT values, exactly as publish would store them. */
-  const districtFromDraft = () => ({
-    front_yard_min_ft: numOrNull(draft.front_yard_min_ft),
-    rear_yard_min_ft: numOrNull(draft.rear_yard_min_ft),
-    side_yard_one_min_ft: numOrNull(draft.side_yard_one_min_ft),
-    side_yard_total_min_ft: numOrNull(draft.side_yard_total_min_ft),
-    max_building_coverage_pct: numOrNull(draft.max_building_coverage_pct),
-    max_stories: numOrNull(draft.max_stories),
-    max_far: numOrNull(draft.max_far),
-  });
+  const districtFromDraft = () => applyZoningRules(
+    {
+      ...district,
+      front_yard_min_ft: numOrNull(draft.front_yard_min_ft),
+      rear_yard_min_ft: numOrNull(draft.rear_yard_min_ft),
+      side_yard_one_min_ft: numOrNull(draft.side_yard_one_min_ft),
+      side_yard_total_min_ft: numOrNull(draft.side_yard_total_min_ft),
+      max_building_coverage_pct: numOrNull(draft.max_building_coverage_pct),
+      max_stories: numOrNull(draft.max_stories),
+      max_far: numOrNull(draft.max_far),
+      zoning_rules: synchronizedRules,
+    },
+    {
+      GROSS_BUILDING_AREA: Number(testLot.grossBuildingArea) || 0,
+      LOT_AREA: Number(testLot.area) || 0,
+      LOT_WIDTH: Number(testLot.width) || 0,
+      LOT_DEPTH: Number(testLot.depth) || 0,
+    },
+    { appliesTo: testLot.appliesTo }
+  );
 
   const runTest = () => {
     const d = districtFromDraft();
@@ -962,6 +1600,7 @@ function ConfigEditor({ adminEmail, ready }) {
       const { max_stories_exact: _oldMaxStoriesExact, ...existingExtraRules } =
         district.extra_rules ?? {};
       await saveDistrict(district.id, {
+        name: draft.name.trim() || null,
         front_yard_min_ft: numOrNull(draft.front_yard_min_ft),
         rear_yard_min_ft: numOrNull(draft.rear_yard_min_ft),
         side_yard_one_min_ft: numOrNull(draft.side_yard_one_min_ft),
@@ -985,6 +1624,8 @@ function ConfigEditor({ adminEmail, ready }) {
           },
         },
       });
+
+      await replaceZoningRules(muni.id, district.id, synchronizedRules);
 
       if (costModelComplete) {
         await saveCostModel(
@@ -1032,8 +1673,8 @@ function ConfigEditor({ adminEmail, ready }) {
       .toLowerCase()}`;
 
   const submitNewMuni = async () => {
-    if (!newMuni?.name.trim() || newMuni.state.trim().length !== 2 || !newMuni.district.trim()) {
-      setSaveState({ kind: "error", text: "A new municipality needs a name, a 2-letter state, and a starting district code." });
+    if (!newMuni?.name.trim() || newMuni.state.trim().length !== 2) {
+      setSaveState({ kind: "error", text: "A new municipality needs a name and a 2-letter state." });
       return;
     }
     setSaving(true);
@@ -1044,15 +1685,65 @@ function ConfigEditor({ adminEmail, ready }) {
         stateCode: newMuni.state.trim(),
         county: newMuni.county.trim(),
         slug: slugFor(newMuni.name, newMuni.state),
-        districtCode: newMuni.district.trim().toUpperCase(),
       });
-      const data = await reload();
+      await reload();
       setMuniId(id);
-      setDistrictId(data?.find((m) => m.id === id)?.zoning_districts[0]?.id ?? null);
+      setDistrictId(null);
+      // A town can be created into a state other than the one being browsed;
+      // follow it there so the crumbs and the list behind it agree.
+      setStateCode(newMuni.state.trim().toUpperCase());
+      setView("districts");
       setNewMuni(null);
       setSaveState({
         kind: "ok",
-        text: "Municipality created. Fill in the district rules and cost model, then publish the configuration.",
+        text: "Municipality created. Add its zoning districts next, then enter each district’s rules.",
+      });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Reopen the create form's fields against a town that already exists. */
+  const startEditMuni = (targetMuni) => {
+    if (!targetMuni) return;
+    setMuniId(targetMuni.id);
+    setDistrictId(null);
+    setNewMuni(null);
+    setDeleteMuni(null);
+    setEditMuni({
+      id: targetMuni.id,
+      name: targetMuni.name ?? "",
+      state: targetMuni.state_code ?? "",
+      county: targetMuni.county ?? "",
+      slug: targetMuni.slug ?? "",
+    });
+    setSaveState(null);
+  };
+
+  const submitEditMuni = async () => {
+    if (!editMuni?.name.trim() || editMuni.state.trim().length !== 2) {
+      setSaveState({ kind: "error", text: "A municipality needs a name and a 2-letter state." });
+      return;
+    }
+    setSaving(true);
+    setSaveState(null);
+    try {
+      await updateMunicipality(editMuni.id, {
+        name: editMuni.name.trim(),
+        stateCode: editMuni.state.trim(),
+        county: editMuni.county.trim(),
+      });
+      const renamed = editMuni.name.trim();
+      await reload();
+      // Correcting the state moves the town out of the list it was edited from,
+      // so follow it rather than leaving it looking deleted.
+      setStateCode(editMuni.state.trim().toUpperCase());
+      setEditMuni(null);
+      setSaveState({
+        kind: "ok",
+        text: `Saved. This town now reads ${renamed} everywhere, including the public app.`,
       });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
@@ -1062,11 +1753,19 @@ function ConfigEditor({ adminEmail, ready }) {
   };
 
   /** Open the municipality delete confirm and load what it would take with it. */
-  const startDeleteMuni = async () => {
-    setDeleteMuni({ typed: "", impact: null });
+  const startDeleteMuni = async (targetMuni) => {
+    if (!targetMuni) return;
+    setMuniId(targetMuni.id);
+    setDistrictId(null);
+    setNewMuni(null);
+    setEditMuni(null);
+    setDeleteMuni({ id: targetMuni.id, name: targetMuni.name, typed: "", impact: null });
     setSaveState(null);
     try {
-      setDeleteMuni({ typed: "", impact: await municipalityImpact(muni.id) });
+      const impact = await municipalityImpact(targetMuni.id);
+      setDeleteMuni((current) =>
+        current?.id === targetMuni.id ? { ...current, impact } : current
+      );
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
       setDeleteMuni(null);
@@ -1074,15 +1773,25 @@ function ConfigEditor({ adminEmail, ready }) {
   };
 
   const submitDeleteMuni = async () => {
-    if (deleteMuni?.typed.trim() !== muni.name) return;
+    if (!deleteMuni || deleteMuni.typed.trim() !== deleteMuni.name) return;
     setSaving(true);
     setSaveState(null);
     try {
-      const removed = muni.name;
-      await deleteMunicipality(muni.id);
-      localStorage.removeItem(draftKey(districtId));
+      const removed = deleteMuni.name;
+      await deleteMunicipality(deleteMuni.id);
+      const removedMuni = munis.find((item) => item.id === deleteMuni.id);
+      for (const removedDistrict of removedMuni?.zoning_districts ?? []) {
+        localStorage.removeItem(draftKey(removedDistrict.id));
+      }
       const data = await reload();
-      const next = data?.[0] ?? null;
+      // Stay in the state being browsed if it still has towns; deleting its last
+      // one empties the state itself, so fall back to the state list.
+      const sameState = (data ?? []).filter((item) => item.state_code === stateCode);
+      const next = sameState[0] ?? data?.[0] ?? null;
+      if (!sameState.length) {
+        setStateCode(next?.state_code ?? null);
+        setView("states");
+      }
       setMuniId(next?.id ?? null);
       setDistrictId(next?.zoning_districts[0]?.id ?? null);
       setDeleteMuni(null);
@@ -1149,6 +1858,50 @@ function ConfigEditor({ adminEmail, ready }) {
     } finally {
       setSaving(false);
     }
+  };
+
+  /** Open the district code/name form against a district that already exists. */
+  const startEditDist = (targetDistrict) => {
+    if (!targetDistrict) return;
+    setNewDistrict(null);
+    setDeleteDist(null);
+    setEditDist({
+      id: targetDistrict.id,
+      code: targetDistrict.code ?? "",
+      name: targetDistrict.name ?? "",
+    });
+    setSaveState(null);
+  };
+
+  const submitEditDist = async () => {
+    if (!editDist?.code.trim()) {
+      setSaveState({ kind: "error", text: "A district needs a code." });
+      return;
+    }
+    setSaving(true);
+    setSaveState(null);
+    try {
+      const code = editDist.code.trim().toUpperCase();
+      // Only the identifying columns — the rules on this district are edited
+      // through the draft-and-publish cycle and must not be touched here.
+      await saveDistrict(editDist.id, { code, name: editDist.name.trim() || null });
+      await reload();
+      setEditDist(null);
+      setSaveState({ kind: "ok", text: `District saved as ${code}.` });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Open the district delete confirm. */
+  const startDeleteDist = (targetDistrict) => {
+    if (!targetDistrict) return;
+    setNewDistrict(null);
+    setEditDist(null);
+    setDeleteDist({ id: targetDistrict.id, code: targetDistrict.code, typed: "" });
+    setSaveState(null);
   };
 
   const copyJson = async () => {
@@ -1231,13 +1984,102 @@ function ConfigEditor({ adminEmail, ready }) {
     setDraft((d) => ({ ...d, [key]: value }));
     setPdfImportedKeys((keys) => keys.filter((item) => item !== key));
   };
+  const addStructuredRule = () => {
+    setRuleDraft((rules) => [
+      ...rules,
+      normalizeZoningRule({
+        municipalityId: muni.id,
+        districtId: district.id,
+        category: "SETBACK",
+        appliesTo: "PRINCIPAL_BUILDING",
+        side: "EACH_SIDE",
+        ruleType: "CONDITIONAL",
+        condition: {
+          metric: "GROSS_BUILDING_AREA",
+          operator: ">",
+          value: 0,
+        },
+        calculation: { value: null, formula: "", unit: "FT" },
+        combineMethod: "MAX",
+        priority: 200,
+        sourceSection: "",
+        sourceUrl: muni.source_url ?? "",
+      }),
+    ]);
+  };
+  const updateStructuredRule = (id, next) =>
+    setRuleDraft((rules) => rules.map((rule) => (rule.id === id ? next : rule)));
+  const removeStructuredRule = (id) =>
+    setRuleDraft((rules) => rules.filter((rule) => rule.id !== id));
   const setTierField = (name, key) => (value) =>
     setCostDraft((d) => ({
       ...d,
       tiers: { ...d.tiers, [name]: { ...d.tiers[name], [key]: value } },
     }));
 
-  // The create and delete flows are the same wherever a municipality is
+  // Save stays disabled until an edit actually differs from the stored row, so
+  // the button never invites a write that would change nothing.
+  const editMuniRow = editMuni ? munis.find((item) => item.id === editMuni.id) ?? null : null;
+  const muniEdited =
+    !!editMuni &&
+    (editMuni.name.trim() !== (editMuniRow?.name ?? "") ||
+      editMuni.state.trim().toUpperCase() !== (editMuniRow?.state_code ?? "") ||
+      editMuni.county.trim() !== (editMuniRow?.county ?? ""));
+
+  // Held as an element for the same reason the municipality forms are: a
+  // component redeclared each render would remount and drop input focus.
+  const stateForm = newState ? (
+    <div className="inline-create" role="group" aria-label="New state">
+      <div className="inline-create-row">
+        <label>
+          State code
+          <input
+            type="text"
+            maxLength={2}
+            autoFocus
+            value={newState.code}
+            placeholder="e.g. FL"
+            onChange={(e) => {
+              const code = e.target.value.toUpperCase();
+              // The name follows the code while it is still the one the code
+              // implies. Once it has been typed over, it is left alone.
+              setNewState((current) => ({
+                code,
+                name:
+                  current.name && current.name !== STATE_NAMES[current.code]
+                    ? current.name
+                    : STATE_NAMES[code] ?? "",
+              }));
+            }}
+          />
+        </label>
+        <label>
+          State name
+          <input
+            type="text"
+            value={newState.name}
+            placeholder="e.g. Florida"
+            onChange={(e) => setNewState({ ...newState, name: e.target.value })}
+          />
+        </label>
+      </div>
+      <div className="inline-create-actions">
+        <button type="button" className="secondary compact" onClick={() => setNewState(null)}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="primary compact"
+          disabled={saving || newState.code.trim().length !== 2}
+          onClick={submitNewState}
+        >
+          {saving ? "Adding…" : "Add state"}
+        </button>
+      </div>
+    </div>
+  ) : null;
+
+  // The create, edit and delete flows are the same wherever a municipality is
   // managed from, so they are held as an element rather than a component —
   // a component redeclared each render would remount and drop input focus.
   const muniForms = (
@@ -1272,15 +2114,6 @@ function ConfigEditor({ adminEmail, ready }) {
               />
             </label>
           </div>
-          <label>
-            First district code
-            <input
-              type="text"
-              value={newMuni.district}
-              placeholder="e.g. R"
-              onChange={(e) => setNewMuni({ ...newMuni, district: e.target.value })}
-            />
-          </label>
           {newMuni.name.trim() && newMuni.state.trim().length === 2 && (
             <p className="admin-side-note">
               Config id: <code>{slugFor(newMuni.name, newMuni.state)}</code>
@@ -1295,9 +2128,60 @@ function ConfigEditor({ adminEmail, ready }) {
             </button>
           </div>
         </div>
+      ) : editMuni ? (
+        <div className="inline-create" role="group" aria-label="Edit municipality">
+          <label>
+            Town name
+            <input
+              type="text"
+              value={editMuni.name}
+              placeholder="e.g. Hoboken"
+              onChange={(e) => setEditMuni({ ...editMuni, name: e.target.value })}
+            />
+          </label>
+          <div className="inline-create-row">
+            <label>
+              State
+              <input
+                type="text"
+                maxLength={2}
+                value={editMuni.state}
+                onChange={(e) => setEditMuni({ ...editMuni, state: e.target.value.toUpperCase() })}
+              />
+            </label>
+            <label>
+              County
+              <input
+                type="text"
+                value={editMuni.county}
+                placeholder="optional"
+                onChange={(e) => setEditMuni({ ...editMuni, county: e.target.value })}
+              />
+            </label>
+          </div>
+          {/* The create form derives the config id from the name; here it is
+              stated rather than derived, because renaming a town does not
+              re-key its zoning layer, parcels or config file. */}
+          <p className="admin-side-note">
+            Config id: <code>{editMuni.slug}</code> — unchanged by a rename.
+          </p>
+          <div className="inline-create-actions">
+            <button type="button" className="secondary compact" onClick={() => setEditMuni(null)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary compact"
+              disabled={saving || !muniEdited}
+              onClick={submitEditMuni}
+            >
+              {saving ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+        </div>
       ) : deleteMuni ? (
         <div className="danger-confirm" role="group" aria-label="Delete municipality">
-          <strong>Delete {muni?.name}?</strong>
+          <strong>Delete {deleteMuni.name}?</strong>
           {deleteMuni.impact ? (
             <ul>
               <li>{deleteMuni.impact.districts} zoning district(s) and their rules</li>
@@ -1313,7 +2197,7 @@ function ConfigEditor({ adminEmail, ready }) {
           )}
           <label>
             <span>
-              Type <code>{muni?.name}</code> to confirm
+              Type <code>{deleteMuni.name}</code> to confirm
             </span>
             <input
               type="text"
@@ -1328,7 +2212,7 @@ function ConfigEditor({ adminEmail, ready }) {
             <button
               type="button"
               className="danger compact"
-              disabled={saving || deleteMuni.typed.trim() !== muni?.name}
+              disabled={saving || deleteMuni.typed.trim() !== deleteMuni.name}
               onClick={submitDeleteMuni}
             >
               {saving ? "Deleting…" : "Delete permanently"}
@@ -1345,19 +2229,47 @@ function ConfigEditor({ adminEmail, ready }) {
 
   return (
     <section className="admin-shell">
-      <AdminSidebar view={activeNav} onView={requestView} adminEmail={adminEmail} />
+      {/* The rail names the section; clicking it goes to the top of that
+          section, which is now the state list rather than the town list. */}
+      <AdminSidebar
+        view={activeNav}
+        onView={(next) => requestView(next === "municipalities" ? "states" : next)}
+        adminEmail={adminEmail}
+      />
 
-      {view === "municipalities" ? (
+      {view === "states" ? (
+        <StatesPanel
+          states={states}
+          stateCode={stateCode}
+          ready={ready}
+          newState={newState}
+          onSelect={openState}
+          onNewState={() => {
+            setSaveState(null);
+            setNewState({ code: "", name: "" });
+          }}
+        >
+          {stateForm}
+        </StatesPanel>
+      ) : view === "municipalities" ? (
         <MunicipalitiesPanel
-          munis={munis}
+          munis={stateMunis}
           muniId={muniId}
+          stateName={stateName}
           zoningCounts={zoningCounts}
           ready={ready}
           query={muniQuery}
           onQuery={setMuniQuery}
+          onBackToStates={() => setView("states")}
           onSelect={openMunicipality}
           onSetup={openZoningSetup}
-          onNew={() => setNewMuni({ name: "", state: "NJ", county: "", district: "R" })}
+          onEdit={startEditMuni}
+          onDelete={startDeleteMuni}
+          onNew={() => {
+            setEditMuni(null);
+            setDeleteMuni(null);
+            setNewMuni({ name: "", state: stateCode ?? "NJ", county: "" });
+          }}
         >
           {muniForms}
         </MunicipalitiesPanel>
@@ -1372,9 +2284,11 @@ function ConfigEditor({ adminEmail, ready }) {
       ) : view === "zoning-setup" ? (
         <ZoningLayerSetup
           muni={muni}
+          district={district}
           zoningAreaCount={zoningCounts?.get(muni?.id) ?? 0}
           onBack={() => requestView("municipalities")}
-          onEditRules={() => requestView(districtId ? "rules" : "districts")}
+          onBackToStates={() => requestView("states")}
+          onSelectRuleTab={selectSetupTab}
           dirty={zoningSetupDirty}
           pendingNavigation={pendingSetupView}
           onDirtyChange={setZoningSetupDirty}
@@ -1393,8 +2307,9 @@ function ConfigEditor({ adminEmail, ready }) {
                   goes to the same place and says where you are as well. */}
               <AdminCrumbs
                 items={[
-                  { label: "Municipalities", onClick: () => setView("municipalities") },
-                  { label: `${muni?.name ?? "Municipality"}, ${muni?.state_code ?? ""}`.trim() },
+                  { label: "Municipalities", onClick: () => setView("states") },
+                  { label: stateName, onClick: () => setView("municipalities") },
+                  { label: muni?.name ?? "Municipality" },
                 ]}
               />
               <h2>Zoning Districts</h2>
@@ -1414,7 +2329,13 @@ function ConfigEditor({ adminEmail, ready }) {
               <button
                 type="button"
                 className={item.id === districtId ? "district-item selected" : "district-item"}
+                aria-haspopup="menu"
                 onClick={() => openDistrict(item.id)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  openDistrictMenu(event, item);
+                }}
+                onKeyDown={contextMenuKeyHandler(openDistrictMenu, item)}
               >
                 <span className="district-code">{item.code}</span>
                 <span className="district-name">{item.name ?? "—"}</span>
@@ -1424,6 +2345,16 @@ function ConfigEditor({ adminEmail, ready }) {
           ))}
           {districts.length === 0 && <li className="admin-side-note">No districts match.</li>}
         </ul>
+        <ContextMenu
+          menu={districtMenu}
+          label={districtMenu ? `District ${districtMenu.item.code} actions` : undefined}
+          firstItemRef={districtMenuFirstItemRef}
+          onClose={closeDistrictMenu}
+          items={[
+            { label: "Edit zoning district", onSelect: startEditDist },
+            { label: "Delete zoning district", onSelect: startDeleteDist, danger: true },
+          ]}
+        />
         <p className="district-count">{muni?.zoning_districts.length ?? 0} districts total</p>
         {newDistrict ? (
           <div className="inline-create" role="group" aria-label="New district">
@@ -1453,6 +2384,48 @@ function ConfigEditor({ adminEmail, ready }) {
               </button>
               <button type="button" className="primary compact" disabled={saving} onClick={submitNewDistrict}>
                 Add
+              </button>
+            </div>
+          </div>
+        ) : editDist ? (
+          <div className="inline-create" role="group" aria-label="Edit district">
+            <div className="inline-create-row">
+              <label>
+                Code
+                <input
+                  type="text"
+                  value={editDist.code}
+                  placeholder="e.g. R-2"
+                  onChange={(e) => setEditDist({ ...editDist, code: e.target.value })}
+                />
+              </label>
+              <label>
+                Name
+                <input
+                  type="text"
+                  value={editDist.name}
+                  placeholder="optional"
+                  onChange={(e) => setEditDist({ ...editDist, name: e.target.value })}
+                />
+              </label>
+            </div>
+            {/* Zoning polygons point at the district by id, not by code, so a
+                code correction does not strand the map. */}
+            <p className="admin-side-note">
+              Renaming changes how this district is labelled everywhere. Its rules, pricing and
+              mapped zoning polygons stay attached.
+            </p>
+            <div className="inline-create-actions">
+              <button type="button" className="secondary compact" onClick={() => setEditDist(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary compact"
+                disabled={saving || !editDist.code.trim()}
+                onClick={submitEditDist}
+              >
+                {saving ? "Saving…" : "Save changes"}
               </button>
             </div>
           </div>
@@ -1490,6 +2463,9 @@ function ConfigEditor({ adminEmail, ready }) {
           </div>
         ) : (
           <div className="admin-muni-actions">
+            {/* Deleting the town is on its right-click menu in the list it
+                belongs to; a standing delete button on the way into its
+                districts was one misclick from the wrong thing. */}
             <button
               type="button"
               className="secondary compact"
@@ -1497,14 +2473,6 @@ function ConfigEditor({ adminEmail, ready }) {
               onClick={() => setNewDistrict({ code: "", name: "" })}
             >
               ＋ Add district
-            </button>
-            <button
-              type="button"
-              className="text-danger compact"
-              disabled={!ready || !muni}
-              onClick={startDeleteMuni}
-            >
-              Delete {muni?.name ?? "municipality"}
             </button>
           </div>
         )}
@@ -1526,9 +2494,10 @@ function ConfigEditor({ adminEmail, ready }) {
           <div>
             <AdminCrumbs
               items={[
-                { label: "Municipalities", onClick: () => setView("municipalities") },
+                { label: "Municipalities", onClick: () => setView("states") },
+                { label: stateName, onClick: () => setView("municipalities") },
                 {
-                  label: `${muni?.name ?? "Municipality"}, ${muni?.state_code ?? ""}`.trim(),
+                  label: muni?.name ?? "Municipality",
                   onClick: () => setView("districts"),
                 },
                 { label: district?.code ?? "District" },
@@ -1536,7 +2505,7 @@ function ConfigEditor({ adminEmail, ready }) {
             />
             <h2>District Rules</h2>
             <p>
-              {district?.code} — {district?.name ?? "District"}
+              {district?.code} — {draft.name.trim() || "Unnamed district"}
             </p>
           </div>
           <span className="admin-updated">
@@ -1549,25 +2518,31 @@ function ConfigEditor({ adminEmail, ready }) {
           )}
         </div>
 
-        <div className="rule-tabs" role="tablist" aria-label="Rule groups">
-          {RULE_TABS.map((tab) => (
-            <button
-              type="button"
-              role="tab"
-              key={tab.id}
-              className={ruleTab === tab.id ? "rule-tab active" : "rule-tab"}
-              aria-selected={ruleTab === tab.id}
-              onClick={() => {
-                if (tab.opensView) {
-                  setView("zoning-setup");
-                  return;
-                }
-                setRuleTab(tab.id);
-              }}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <RuleTabBar
+          activeTab={ruleTab}
+          onSelect={(tab) => {
+            if (tab.opensView) {
+              setView("zoning-setup");
+              return;
+            }
+            setRuleTab(tab.id);
+          }}
+        />
+
+        <div className="district-identity-editor">
+          <label>
+            District name
+            <input
+              type="text"
+              value={draft.name}
+              placeholder="e.g. One Family Residential"
+              disabled={!ready || saving}
+              onChange={(event) => setField("name")(event.target.value)}
+            />
+          </label>
+          <span>
+            District code <strong>{district.code}</strong>
+          </span>
         </div>
 
         {ruleTab === "import" && (
@@ -1718,6 +2693,41 @@ function ConfigEditor({ adminEmail, ready }) {
         </>
         )}
 
+        {ruleTab === "logic" && (
+        <fieldset className="admin-section structured-rules-section" disabled={!ready || saving}>
+          <legend>
+            <span className="admin-section-icon" aria-hidden="true">ƒ</span> Structured zoning rules
+          </legend>
+          <div className="structured-rules-intro">
+            <div>
+              <p>
+                Base setbacks and limits are synchronized from the first tab. Add conditional,
+                formula, piecewise, or structure-specific rules here; the calculator combines all
+                applicable results by priority and combine method.
+              </p>
+              <small>
+                Formula example: <code>grossBuildingArea * 0.008</code>. Supported metrics include
+                GROSS_BUILDING_AREA, LOT_AREA, LOT_WIDTH, LOT_DEPTH, BUILDING_HEIGHT, and STORIES.
+              </small>
+            </div>
+            <button type="button" className="secondary compact" onClick={addStructuredRule}>
+              ＋ Add zoning rule
+            </button>
+          </div>
+          <div className="structured-rule-list">
+            {synchronizedRules.map((rule) => (
+              <StructuredRuleEditor
+                key={rule.id}
+                rule={rule}
+                disabled={!ready || saving}
+                onChange={(next) => updateStructuredRule(rule.id, next)}
+                onRemove={() => removeStructuredRule(rule.id)}
+              />
+            ))}
+          </div>
+        </fieldset>
+        )}
+
         {ruleTab === "adu" && (
         <>
         <fieldset className="admin-section" disabled={!ready || saving}>
@@ -1815,6 +2825,13 @@ function ConfigEditor({ adminEmail, ready }) {
             <Num label="Test lot width (ft)" value={testLot.width} onChange={(v) => setTestLot({ ...testLot, width: v })} />
             <Num label="Test lot depth (ft)" value={testLot.depth} onChange={(v) => setTestLot({ ...testLot, depth: v })} />
             <Num label="Test lot area (sq ft)" value={testLot.area} onChange={(v) => setTestLot({ ...testLot, area: v })} />
+            <Num label="Test gross building area (sq ft)" value={testLot.grossBuildingArea} onChange={(v) => setTestLot({ ...testLot, grossBuildingArea: v })} />
+            <label>
+              Applies to
+              <select value={testLot.appliesTo} onChange={(event) => setTestLot({ ...testLot, appliesTo: event.target.value })}>
+                {RULE_APPLIES_TO.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
+              </select>
+            </label>
           </div>
           <button type="button" className="secondary compact admin-test-run" onClick={runTest}>
             ▶ Run test calculation
@@ -1868,6 +2885,14 @@ function ConfigEditor({ adminEmail, ready }) {
               localStorage.removeItem(draftKey(district.id));
               setDraftInfo(null);
               setDraft(draftFromDistrict(district));
+              setRuleDraft(
+                (district.zoning_rules ?? []).map((rule) =>
+                  normalizeZoningRule(rule, {
+                    municipalityId: muni.id,
+                    districtId: district.id,
+                  })
+                )
+              );
               setCostDraft(draftFromCostModel(costModel));
               setSaveState(null);
               setValidation(null);
@@ -1899,9 +2924,11 @@ function ConfigEditor({ adminEmail, ready }) {
 
 function ZoningLayerSetup({
   muni,
+  district,
   zoningAreaCount,
   onBack,
-  onEditRules,
+  onBackToStates,
+  onSelectRuleTab,
   onPublished,
   dirty,
   pendingNavigation,
@@ -2186,20 +3213,29 @@ function ZoningLayerSetup({
         <div>
           <AdminCrumbs
             items={[
-              { label: "Municipalities", onClick: onBack },
-              { label: `${muni.name}, ${muni.state_code}` },
+              { label: "Municipalities", onClick: onBackToStates },
+              { label: stateNameFor(muni.state_code), onClick: onBack },
+              { label: muni.name },
+              ...(district ? [{ label: district.code }] : []),
             ]}
           />
-          <h2>Zoning Layer Setup</h2>
-          <p className="admin-side-note">
-            {incompleteDistrictCount > 0
-              ? `${incompleteDistrictCount} district rule set${incompleteDistrictCount === 1 ? "" : "s"} incomplete`
-              : "Rules complete"}
-            {" · "}
-            {zoningAreaCount > 0 ? `${zoningAreaCount} map boundaries published` : "Map boundary missing"}
-          </p>
+          <h2>District Rules</h2>
+          <p>{district ? `${district.code} — ${district.name ?? "District"}` : "Choose a district to edit its rules."}</p>
         </div>
-        <button type="button" className="secondary compact" onClick={onEditRules}>Edit district rules</button>
+        <span className="admin-updated">Last updated: {muni.last_updated ?? "—"}</span>
+      </div>
+
+      <RuleTabBar activeTab="zoning-setup" onSelect={onSelectRuleTab} />
+
+      <div className="zoning-setup-title">
+        <h3>Zoning Layer Setup</h3>
+        <p className="admin-side-note">
+          {incompleteDistrictCount > 0
+            ? `${incompleteDistrictCount} district rule set${incompleteDistrictCount === 1 ? "" : "s"} incomplete`
+            : "Rules complete"}
+          {" · "}
+          {zoningAreaCount > 0 ? `${zoningAreaCount} map boundaries published` : "Map boundary missing"}
+        </p>
       </div>
 
       <ol className="zoning-setup-steps">
@@ -2695,7 +3731,7 @@ function AdminDashboard({ munis, zoningCounts, onOpen, onSetup, onView }) {
     <div className="card admin-dashboard">
       <div className="admin-panel-head">
         <h2>Dashboard</h2>
-        <button type="button" className="secondary compact" onClick={() => onView("municipalities")}>
+        <button type="button" className="secondary compact" onClick={() => onView("states")}>
           All municipalities
         </button>
       </div>

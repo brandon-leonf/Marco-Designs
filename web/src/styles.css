@@ -1830,6 +1830,41 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .muni-status.pricing { color: #8a6116; background: #fbf1da; }
 .muni-setup-action { flex: 0 0 auto; white-space: nowrap; }
 .admin-list-footer { margin: 0; color: var(--muted); font-size: 0.76rem; }
+.municipality-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  padding: 0.35rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(43, 43, 43, 0.18);
+}
+.municipality-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 0.62rem 0.75rem;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ink);
+  background: transparent;
+  font-size: 0.82rem;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+.municipality-context-menu button:hover,
+.municipality-context-menu button:focus-visible {
+  outline: none;
+  background: var(--info-bg);
+}
+/* Only the destructive item reads as destructive — when delete was the sole
+   entry the whole menu could be red, but an edit item next to it cannot be.
+   Named `menu-danger` rather than reusing `.danger`, which is the filled red
+   pill button and would turn a menu row into one. */
+.municipality-context-menu button.menu-danger { color: #9d312b; }
+.municipality-context-menu button.menu-danger:hover,
+.municipality-context-menu button.menu-danger:focus-visible { background: #fff1ef; }
 
 .admin-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.65rem; }
 .admin-stats > div {
@@ -1844,6 +1879,10 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 
 /* ---------- Admin: zoning layer setup ---------- */
 .admin-setup-page { display: grid; gap: 1rem; padding: 1.25rem; }
+.admin-setup-page > .rule-tabs { margin-bottom: 0; }
+.zoning-setup-title { display: grid; gap: 0.15rem; }
+.zoning-setup-title h3 { margin: 0; font-size: 1.15rem; }
+.zoning-setup-title p { margin: 0; color: var(--muted); }
 .zoning-setup-steps { display: grid; gap: 0.8rem; margin: 0; padding: 0; list-style: none; }
 .setup-step {
   display: grid;
@@ -2072,6 +2111,32 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--line);
 }
+.district-identity-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 1rem;
+  margin: -0.25rem 0 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--info-bg);
+}
+.district-identity-editor label {
+  display: grid;
+  flex: 0 1 28rem;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.district-identity-editor input { width: 100%; }
+.district-identity-editor span {
+  padding-bottom: 0.7rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.district-identity-editor strong { color: var(--ink); }
 .rule-tab {
   padding: 0.5rem 0.8rem;
   border: 1px solid transparent;
@@ -2232,6 +2297,73 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
   to { background: #fff9df; transform: translateY(0); }
 }
 .admin-hint { color: var(--muted); font-size: 0.78rem; margin: 0.8rem 0 0; }
+
+.structured-rules-section { display: grid; gap: 1rem; }
+.structured-rules-intro {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 1rem;
+}
+.structured-rules-intro p { margin: 0 0 0.35rem; color: var(--muted); }
+.structured-rules-intro small { color: var(--muted); }
+.structured-rule-list { display: grid; gap: 0.85rem; }
+.structured-rule {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--primary-fill);
+  border-radius: 10px;
+  padding: 0.9rem;
+  background: #fff;
+}
+.structured-rule.baseline { border-left-color: var(--line-strong); background: var(--info-bg); }
+.structured-rule-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.structured-rule-head > div { display: grid; gap: 0.15rem; }
+.structured-rule-head span { color: var(--muted); font-size: 0.72rem; }
+.structured-rule fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.structured-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.7rem;
+}
+.structured-rule-grid.provenance { margin-top: 0.75rem; }
+.structured-rule-grid label {
+  display: grid;
+  gap: 0.25rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.structured-rule-grid input,
+.structured-rule-grid select {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.48rem 0.55rem;
+  background: #fff;
+}
+.structured-rule.baseline .structured-rule-grid input:disabled,
+.structured-rule.baseline .structured-rule-grid select:disabled {
+  color: var(--muted);
+  opacity: 1;
+  background: #f3efe5;
+}
+.structured-condition {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--active);
+}
+.structured-condition > strong { display: block; margin-bottom: 0.55rem; font-size: 0.8rem; }
+.structured-rule-issues { margin: 0.65rem 0 0; color: var(--danger); font-size: 0.75rem; }
+@media (max-width: 720px) {
+  .structured-rules-intro { flex-direction: column; }
+}
 
 .admin-toggle { font-weight: 700; }
 .toggle-row { display: flex; align-items: center; gap: 0.5rem; min-height: 2.35rem; }

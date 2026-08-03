@@ -36,6 +36,7 @@ import {
 import { buildParcelPlanFrame, estimateParcelRectDims, matchParcelToRoad } from "./lib/roads.js";
 import { standardizedPropertyAddress } from "./lib/address.js";
 import { buildSetbackEnvelope, planarGeometryArea } from "./lib/setbackGeometry.js";
+import { applyZoningRules } from "./lib/zoningRules.js";
 import ParcelSearch from "./components/ParcelSearch.jsx";
 import BuildingPreview3D from "./components/BuildingPreview3D.jsx";
 import SitePlan2D, { floorColor } from "./components/SitePlan2D.jsx";
@@ -347,9 +348,41 @@ export default function App() {
         : null,
     [parcelPick]
   );
-  const district = outsideCoverage
+  const baseDistrict = outsideCoverage
     ? null
     : muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
+  const structuredPlan = useMemo(() => derivePlan(plannedFloors), [plannedFloors]);
+  const existingGrossBuildingArea = useMemo(() => {
+    if (projectType !== "addition" && projectType !== "adu") return 0;
+    const entered = Number(existingStructure.total_area_sqft);
+    if (entered > 0) return entered;
+    const footprint = Number(existingStructure.footprint_sqft);
+    const stories = Number(existingStructure.stories);
+    return footprint > 0 && stories > 0 ? footprint * stories : 0;
+  }, [existingStructure, projectType]);
+  const ruleMetrics = useMemo(() => {
+    const positiveOrNull = (value) => Number(value) > 0 ? Number(value) : null;
+    const existingStories = projectType === "addition"
+      ? Number(existingStructure.stories || 0)
+      : 0;
+    return {
+      GROSS_BUILDING_AREA:
+        existingGrossBuildingArea + Number(structuredPlan.plannedAreaSoFar || 0),
+      LOT_AREA: positiveOrNull(parcel?.lot_area_sqft ?? lot.area_sqft),
+      LOT_WIDTH: positiveOrNull(parcel?.lot_frontage_ft ?? lot.width_ft),
+      LOT_DEPTH: positiveOrNull(parcel?.lot_depth_ft ?? lot.depth_ft),
+      BUILDING_HEIGHT: structuredPlan.plannedHeight == null
+        ? null
+        : Number(structuredPlan.plannedHeight) + existingStories * FLOOR_TO_FLOOR_FT,
+      STORIES: Number(structuredPlan.plannedFloorCount || 0) + existingStories,
+    };
+  }, [existingGrossBuildingArea, existingStructure.stories, lot, parcel, projectType, structuredPlan]);
+  const district = useMemo(
+    () => applyZoningRules(baseDistrict, ruleMetrics, {
+      appliesTo: projectType === "adu" ? "ACCESSORY_BUILDING" : "PRINCIPAL_BUILDING",
+    }),
+    [baseDistrict, projectType, ruleMetrics]
+  );
   const rawCostModel = muni?.build_cost_models;
   const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
   const propertyAddress = useMemo(

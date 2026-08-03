@@ -15,6 +15,10 @@ import {
   buildSetbackEnvelope,
   planarGeometryArea,
 } from "../src/lib/setbackGeometry.js";
+import {
+  applyZoningRules,
+  evaluateFormula,
+} from "../src/lib/zoningRules.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const configPath = resolve(here, "../../config/towns/union-city-nj.json");
@@ -64,6 +68,72 @@ assert.deepEqual(
     storiesByHeight: 3,
   },
   "Legacy half-story values must normalize to whole floors"
+);
+
+const aaaStructuredRules = [
+  {
+    id: "00000000-0000-4000-8000-000000000001",
+    municipalityId: "1",
+    districtId: "1",
+    category: "SETBACK",
+    appliesTo: "PRINCIPAL_BUILDING",
+    side: "EACH_SIDE",
+    ruleType: "FIXED",
+    calculation: { value: 25, unit: "FT" },
+    combineMethod: "MAX",
+    priority: 100,
+    sourceSection: "AAA base side yard",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000002",
+    municipalityId: "1",
+    districtId: "1",
+    category: "SETBACK",
+    appliesTo: "PRINCIPAL_BUILDING",
+    side: "EACH_SIDE",
+    ruleType: "CONDITIONAL",
+    condition: { metric: "GROSS_BUILDING_AREA", operator: ">", value: 3000 },
+    calculation: { formula: "grossBuildingArea * 0.008", unit: "FT" },
+    combineMethod: "MAX",
+    priority: 200,
+    sourceSection: "AAA gross-area formula",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000003",
+    municipalityId: "1",
+    districtId: "1",
+    category: "SETBACK",
+    appliesTo: "PRINCIPAL_BUILDING",
+    side: "EACH_SIDE",
+    ruleType: "CONDITIONAL",
+    condition: { metric: "GROSS_BUILDING_AREA", operator: ">", value: 5000 },
+    calculation: { value: 40, unit: "FT" },
+    combineMethod: "MAX",
+    priority: 300,
+    sourceSection: "AAA over-5000 minimum",
+  },
+];
+const aaaDistrict = { ...rules, code: "AAA", zoning_rules: aaaStructuredRules };
+assert.equal(
+  applyZoningRules(aaaDistrict, { GROSS_BUILDING_AREA: 2500 }).side_yard_one_min_ft,
+  25,
+  "AAA must retain its fixed 25 ft side yard at 3,000 sq ft or less"
+);
+assert.equal(
+  applyZoningRules(aaaDistrict, { GROSS_BUILDING_AREA: 4000 }).side_yard_one_min_ft,
+  32,
+  "AAA must evaluate the gross-area formula above 3,000 sq ft"
+);
+assert.equal(
+  applyZoningRules(aaaDistrict, { GROSS_BUILDING_AREA: 5001 }).side_yard_one_min_ft,
+  40.008,
+  "AAA must combine the formula and over-5,000 minimum using MAX"
+);
+assert.equal(evaluateFormula("grossBuildingArea * 0.008", { grossBuildingArea: 4000 }), 32);
+assert.throws(
+  () => evaluateFormula("globalThis.process.exit()", {}),
+  /unsupported characters/,
+  "Rule formulas must never execute arbitrary JavaScript"
 );
 
 assert.deepEqual(
