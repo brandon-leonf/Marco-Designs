@@ -63,11 +63,19 @@ export async function saveDistrict(districtId, fields) {
   assertWritten(data, "zoning district");
 }
 
-export async function touchMunicipality(municipalityId) {
-  const today = new Date().toISOString().slice(0, 10);
+/**
+ * Town-level provenance: where the rules were transcribed from and when they
+ * were last checked against it.
+ *
+ * `last_updated` is deliberately NOT stamped on publish. It means "when the
+ * zoning data was last verified" (migration 0002), not "when someone last
+ * touched a field" — auto-stamping it would turn a provenance claim into a
+ * record of typing. It is entered by hand alongside the source URL.
+ */
+export async function saveMunicipalityMeta(municipalityId, { sourceUrl, lastUpdated }) {
   const { data, error } = await supabase
     .from("municipalities")
-    .update({ last_updated: today })
+    .update({ source_url: sourceUrl || null, last_updated: lastUpdated || null })
     .eq("id", municipalityId)
     .select("id");
   if (error) throw error;
@@ -119,17 +127,34 @@ export async function saveCostModel(municipalityId, existingModelId, model, tier
  * The state row must exist first (FK); ON CONFLICT DO NOTHING keeps this safe
  * when it already does.
  */
-export async function createMunicipality({ name, stateCode, county, slug, districtCode, districtName }) {
+export async function createMunicipality({
+  name,
+  stateCode,
+  county,
+  slug,
+  sourceUrl,
+  lastUpdated,
+  districtCode,
+  districtName,
+}) {
   const code = stateCode.toUpperCase();
   const { error: stateError } = await supabase
     .from("states")
     .upsert({ code, name: code }, { onConflict: "code", ignoreDuplicates: true });
   if (stateError) throw stateError;
 
-  const today = new Date().toISOString().slice(0, 10);
   const { data: muniData, error: muniError } = await supabase
     .from("municipalities")
-    .insert({ state_code: code, name, slug, county: county || null, last_updated: today })
+    .insert({
+      state_code: code,
+      name,
+      slug,
+      county: county || null,
+      // Both are the operator's claim about the ordinance, not a timestamp of
+      // this insert — blank stays blank rather than being filled in with today.
+      source_url: sourceUrl || null,
+      last_updated: lastUpdated || null,
+    })
     .select("id");
   if (muniError) throw muniError;
   assertWritten(muniData, "municipality");
