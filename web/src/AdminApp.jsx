@@ -19,7 +19,7 @@ import {
   checkIsAdmin,
   saveDistrict,
   replaceZoningRules,
-  touchMunicipality,
+  saveMunicipalityMeta,
   saveCostModel,
   createState,
   createMunicipality,
@@ -85,6 +85,17 @@ function rememberLastState(code) {
     // A browser refusing storage is not a reason to fail navigation.
   }
 }
+
+/**
+ * The public calculator, opened with one district applied to whatever address
+ * is searched (App.jsx `PREVIEW_PARAM`). A district with no zoning polygons —
+ * every newly added one — is unreachable through the normal address lookup,
+ * so this is how its rules get exercised through the real client flow.
+ *
+ * Same document, different hash route, so the built site needs no extra page.
+ */
+const publicTestUrl = (districtId) =>
+  `${window.location.origin}${window.location.pathname}${window.location.search}#/?preview_district=${districtId}`;
 
 const TIER_ORDER = ["essential", "signature", "premium"];
 const TIER_LABELS = {
@@ -1065,11 +1076,18 @@ function ConfigEditor({ adminEmail, ready }) {
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState(null); // {kind: "ok"|"error", text}
   const [copied, setCopied] = useState(false);
-  const [newMuni, setNewMuni] = useState(null); // null | {name, state, county}
-  // Same three fields as the create form, reopened against a town that already
-  // exists. Its slug rides along read-only so the form can say which config id
-  // the edits are landing on.
+  // No `district` field: createMunicipality no longer inserts a starter
+  // district, so the code for one is asked for on the districts panel instead.
+  const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, sourceUrl, lastUpdated}
+  // Same identifying fields as the create form, reopened against a town that
+  // already exists. Its slug rides along read-only so the form can say which
+  // config id the edits are landing on. Provenance is `muniMeta` below, which
+  // saves on its own button rather than with the name.
   const [editMuni, setEditMuni] = useState(null); // null | {id, name, state, county, slug}
+  // Town-level provenance, edited in place on the districts panel. Held apart
+  // from the district draft because it saves on its own button, not on Publish.
+  const [muniMeta, setMuniMeta] = useState(null); // null | {sourceUrl, lastUpdated}
+  const [metaSaving, setMetaSaving] = useState(false);
   const [newDistrict, setNewDistrict] = useState(null); // null | {code, name}
   const [editDist, setEditDist] = useState(null); // null | {id, code, name}
   // Destructive actions confirm by typing the name back, and state their
@@ -1307,6 +1325,37 @@ function ConfigEditor({ adminEmail, ready }) {
   const activeNav = view === "dashboard" ? "dashboard" : "municipalities";
 
   const muni = munis?.find((m) => m.id === muniId) ?? null;
+
+  // Reset the provenance form whenever the town changes or is reloaded, so it
+  // always shows what is actually stored rather than a stale edit.
+  useEffect(() => {
+    setMuniMeta(
+      muni
+        ? { sourceUrl: muni.source_url ?? "", lastUpdated: muni.last_updated ?? "" }
+        : null
+    );
+  }, [muni?.id, muni?.source_url, muni?.last_updated]);
+
+  const metaDirty =
+    muniMeta != null &&
+    muni != null &&
+    (muniMeta.sourceUrl !== (muni.source_url ?? "") ||
+      muniMeta.lastUpdated !== (muni.last_updated ?? ""));
+
+  const saveMeta = async () => {
+    if (!muni || !muniMeta) return;
+    setMetaSaving(true);
+    setSaveState(null);
+    try {
+      await saveMunicipalityMeta(muni.id, muniMeta);
+      await reload();
+      setSaveState({ kind: "ok", text: "Municipality details saved." });
+    } catch (err) {
+      setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setMetaSaving(false);
+    }
+  };
   const district = muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
   const stateName = stateNameFor(stateCode);
 
@@ -1354,6 +1403,10 @@ function ConfigEditor({ adminEmail, ready }) {
   );
   const rawCostModel = muni?.build_cost_models;
   const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
+  // What the PUBLISHED row is still missing — the draft in this browser is not
+  // what the public app will read, so the test-drive warning has to check the
+  // stored district rather than the form.
+  const publishedMissing = district ? missingDistrictRules(district) : [];
 
   // Re-seed the drafts whenever the selected district (or fresh data) changes.
   // An unpublished local draft for the district wins over the published values.
@@ -1713,7 +1766,7 @@ function ConfigEditor({ adminEmail, ready }) {
         );
       }
 
-      await touchMunicipality(muni.id);
+      // `last_updated` is not touched here on purpose — see saveMunicipalityMeta.
       localStorage.removeItem(draftKey(district.id));
       setDraftInfo(null);
       await reload();
@@ -1746,6 +1799,8 @@ function ConfigEditor({ adminEmail, ready }) {
         stateCode: newMuni.state.trim(),
         county: newMuni.county.trim(),
         slug: slugFor(newMuni.name, newMuni.state),
+        sourceUrl: newMuni.sourceUrl.trim(),
+        lastUpdated: newMuni.lastUpdated,
       });
       await reload();
       setMuniId(id);
@@ -1753,8 +1808,10 @@ function ConfigEditor({ adminEmail, ready }) {
       // A town can be created into a state other than the one being browsed;
       // follow it there so the crumbs and the list behind it agree.
       setStateCode(newMuni.state.trim().toUpperCase());
-      setView("districts");
       setNewMuni(null);
+      // No starter district is created any more, so there are no rules to land
+      // on — the districts panel, where its first district is named, is next.
+      setView("districts");
       setSaveState({
         kind: "ok",
         text: "Municipality created. Add its zoning districts next, then enter each district’s rules.",
@@ -1906,13 +1963,16 @@ function ConfigEditor({ adminEmail, ready }) {
       // normally never reuse ids) and prevents any stale browser draft from
       // making a new district look as though it inherited another one's data.
       localStorage.removeItem(draftKey(id));
-      setDistrictId(id);
-      setRuleTab("setbacks");
-      setView("rules");
+      // Straight into its rules: it is created empty, so the next action is
+      // always to fill it in — and until they are filled in and published,
+      // neither the public app nor a test drive will calculate.
+      openDistrict(id);
       setNewDistrict(null);
       setSaveState({
         kind: "ok",
-        text: "District added with blank rules. Enter this district’s values, then Save draft or Publish configuration.",
+        text:
+          "District added with blank rules. Fill in its setbacks, coverage and stories, then " +
+          "Publish — “Review & test” can then run it on the public app.",
       });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
@@ -2175,6 +2235,29 @@ function ConfigEditor({ adminEmail, ready }) {
               />
             </label>
           </div>
+          <label>
+            Ordinance source URL
+            <input
+              type="url"
+              value={newMuni.sourceUrl}
+              placeholder="https://… (link to the zoning ordinance)"
+              onChange={(e) => setNewMuni({ ...newMuni, sourceUrl: e.target.value })}
+            />
+          </label>
+          <label>
+            Zoning last verified
+            <input
+              type="date"
+              value={newMuni.lastUpdated}
+              onChange={(e) => setNewMuni({ ...newMuni, lastUpdated: e.target.value })}
+            />
+          </label>
+          <p className="admin-side-note">
+            Both are optional and can be filled in later, but they are the town’s provenance —
+            the date is when the ordinance was <em>checked</em>, not when it was typed in here.
+          </p>
+          {/* No "first district code" field: districts are added on the
+              districts panel, so the town is not created with one. */}
           {newMuni.name.trim() && newMuni.state.trim().length === 2 && (
             <p className="admin-side-note">
               Config id: <code>{slugFor(newMuni.name, newMuni.state)}</code>
@@ -2330,7 +2413,13 @@ function ConfigEditor({ adminEmail, ready }) {
           onNew={() => {
             setEditMuni(null);
             setDeleteMuni(null);
-            setNewMuni({ name: "", state: stateCode ?? "NJ", county: "" });
+            setNewMuni({
+              name: "",
+              state: stateCode ?? "NJ",
+              county: "",
+              sourceUrl: "",
+              lastUpdated: "",
+            });
           }}
         >
           {muniForms}
@@ -2379,6 +2468,60 @@ function ConfigEditor({ adminEmail, ready }) {
             </div>
           </div>
         {muniForms}
+        {muniMeta && (
+          <fieldset className="admin-section" disabled={!ready}>
+            <legend>
+              <span className="admin-section-icon" aria-hidden="true">ⓘ</span> Municipality details
+            </legend>
+            <p className="admin-hint">
+              Where these rules came from. The public app labels every number by provenance, so a
+              town with no source is a town whose figures cannot be traced back to an ordinance.
+            </p>
+            <label>
+              Ordinance source URL
+              <input
+                type="url"
+                value={muniMeta.sourceUrl}
+                placeholder="https://… (link to the zoning ordinance)"
+                onChange={(e) => setMuniMeta({ ...muniMeta, sourceUrl: e.target.value })}
+              />
+            </label>
+            <label>
+              Zoning last verified
+              <input
+                type="date"
+                value={muniMeta.lastUpdated}
+                onChange={(e) => setMuniMeta({ ...muniMeta, lastUpdated: e.target.value })}
+              />
+            </label>
+            <p className="admin-side-note">
+              This date is when someone last checked these rules against the ordinance — set it by
+              hand. Publishing a rule change does not move it.
+            </p>
+            {/* The editor's shared status line lives in the rules view, which is
+                not rendered here — this panel reports its own result. */}
+            {saveState && (
+              <p
+                className={
+                  saveState.kind === "ok" ? "status-line save-ok" : "status-line error-text"
+                }
+                role="status"
+              >
+                {saveState.text}
+              </p>
+            )}
+            <div className="inline-create-actions">
+              <button
+                type="button"
+                className="primary compact"
+                disabled={!metaDirty || metaSaving}
+                onClick={saveMeta}
+              >
+                {metaSaving ? "Saving…" : "Save details"}
+              </button>
+            </div>
+          </fieldset>
+        )}
         <input
           type="search"
           placeholder="Filter districts…"
@@ -2571,7 +2714,15 @@ function ConfigEditor({ adminEmail, ready }) {
             </p>
           </div>
           <span className="admin-updated">
-            Last updated: {muni?.last_updated ?? "—"}
+            Zoning verified: {muni?.last_updated ?? "not recorded"}
+            {muni?.source_url && (
+              <>
+                {" · "}
+                <a href={muni.source_url} target="_blank" rel="noreferrer">
+                  source
+                </a>
+              </>
+            )}
           </span>
           {draftInfo && (
             <span className="draft-badge" title={`Draft saved ${draftInfo.savedAt}`}>
@@ -2904,6 +3055,41 @@ function ConfigEditor({ adminEmail, ready }) {
               <pre className="json-preview test-log"><code>{testResult.lines.join("\n")}</code></pre>
             </>
           )}
+        </fieldset>
+
+        <fieldset className="admin-section" disabled={!ready}>
+          <legend>
+            <span className="admin-section-icon" aria-hidden="true">↗</span> G. Test on the public app
+          </legend>
+          <p className="admin-hint">
+            Opens the client-facing calculator with <strong>{district.code}</strong> applied to
+            whatever address you search — the only way to run a district that has no zoning
+            polygons yet, since the address lookup would never reach it. Every screen there is
+            labelled as a test drive, so it can never be mistaken for a verified result.
+          </p>
+          <p className="admin-hint">
+            It reads <strong>published</strong> rules, not the draft in this browser.
+          </p>
+          {draftInfo && (
+            <p className="status-line error-text">
+              This district has an unpublished draft. Publish first, or you will be testing the
+              previously published values.
+            </p>
+          )}
+          {publishedMissing.length > 0 && (
+            <p className="status-line error-text">
+              Published rules are incomplete — missing {publishedMissing.join(", ")}. The test drive
+              opens and says so, but refuses to calculate until those are published.
+            </p>
+          )}
+          <a
+            className="secondary compact link-button"
+            href={publicTestUrl(district.id)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            ↗ Open the public app as {district.code}
+          </a>
         </fieldset>
         </>
         )}

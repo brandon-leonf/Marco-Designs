@@ -89,6 +89,36 @@ const UNVERIFIED_DISTRICT = {
 };
 const STEPS = ["Project & Property", "What You Can Build", "Results", "Review & Export"];
 
+// The config editor's test drive. `#/?preview_district=<id>` applies one
+// district's PUBLISHED rules to whatever property is searched, so a district
+// that has no zoning polygons yet — a brand-new one always does — can still be
+// run through the real client flow end to end.
+//
+// It deliberately overrides the verification step, so every screen it touches
+// says so. The app must never appear to have verified zoning it did not: the
+// banner stays up for the whole session and the zoning layer reports "test
+// drive", not "verified".
+export const PREVIEW_PARAM = "preview_district";
+
+function previewDistrictIdFromHash() {
+  const hash = window.location.hash ?? "";
+  const mark = hash.indexOf("?");
+  if (mark === -1) return null;
+  const raw = new URLSearchParams(hash.slice(mark + 1)).get(PREVIEW_PARAM);
+  const id = Number(raw);
+  return raw != null && Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function usePreviewDistrictId() {
+  const [id, setId] = useState(previewDistrictIdFromHash);
+  useEffect(() => {
+    const onHashChange = () => setId(previewDistrictIdFromHash());
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  return id;
+}
+
 const fmt = (n, digits = 0) =>
   n == null || !isFinite(n)
     ? "—"
@@ -328,6 +358,24 @@ export default function App() {
   }, []);
 
   const muni = munis?.find((m) => m.id === muniId) ?? null;
+
+  // Test drive (see PREVIEW_PARAM). The district is looked up across every
+  // loaded municipality, because the point of the mode is to exercise a
+  // district the address lookup would never have reached.
+  const previewDistrictId = usePreviewDistrictId();
+  const previewMuni = useMemo(
+    () =>
+      previewDistrictId == null
+        ? null
+        : munis?.find((item) =>
+            item.zoning_districts.some((d) => d.id === previewDistrictId)
+          ) ?? null,
+    [munis, previewDistrictId]
+  );
+  const previewDistrict =
+    previewMuni?.zoning_districts.find((d) => d.id === previewDistrictId) ?? null;
+  const previewing = Boolean(previewDistrict);
+
   // How the selection has to be loaded, and whether it is anywhere we hold
   // zoning for. A property outside that coverage is located and flagged, never
   // measured: the loaded town's districts say nothing about a lot in another
@@ -348,9 +396,19 @@ export default function App() {
         : null,
     [parcelPick]
   );
-  const baseDistrict = outsideCoverage
-    ? null
-    : muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
+  // A previewed district wins over whatever the zoning lookup resolved — that
+  // override is the whole feature — and its own municipality supplies the rate
+  // card, so pricing matches the rules being tested rather than the town the
+  // test address happens to sit in.
+  //
+  // It is the *base* district, so a test drive still runs through the
+  // normalized rules below: previewing a district that answers with different
+  // rules than the real one would be a test drive of nothing.
+  const baseDistrict = previewing
+    ? previewDistrict
+    : outsideCoverage
+      ? null
+      : muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
   const structuredPlan = useMemo(() => derivePlan(plannedFloors), [plannedFloors]);
   const existingGrossBuildingArea = useMemo(() => {
     if (projectType !== "addition" && projectType !== "adu") return 0;
@@ -383,7 +441,8 @@ export default function App() {
     }),
     [baseDistrict, projectType, ruleMetrics]
   );
-  const rawCostModel = muni?.build_cost_models;
+  const rulesMuni = previewing ? previewMuni : muni;
+  const rawCostModel = rulesMuni?.build_cost_models;
   const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
   const propertyAddress = useMemo(
     () => standardizedPropertyAddress(parcel, parcelPick, muni),
@@ -410,23 +469,37 @@ export default function App() {
         // layer is missing or inconclusive. Load it independently with a
         // zero-foot inset, then replace it with the verified envelope only
         // after a district match supplies authoritative setbacks.
+        // Under a test drive the previewed district supplies the setbacks
+        // outright, so the envelope is inset in the same round trip rather
+        // than after a district match that is not going to happen.
+        const previewInsetFt =
+          previewing && missingDistrictRules(previewDistrict).length === 0
+            ? conservativeInsetFt(previewDistrict)
+            : 0;
         const [check, boundary] = await Promise.all([
           resolveParcelZoning(parcelPick.parcel_id),
-          fetchParcelEnvelope(parcelPick.parcel_id, 0),
+          fetchParcelEnvelope(parcelPick.parcel_id, previewInsetFt),
         ]);
         if (stale) return;
 
-        setParcel({
-          ...boundary,
-          envelope_geojson: null,
-          envelope_area_sqft: null,
-        });
+        setParcel(
+          previewing
+            ? boundary
+            : {
+                ...boundary,
+                envelope_geojson: null,
+                envelope_area_sqft: null,
+              }
+        );
 
         if (!check) {
           setZoningCheck({ status: "unmapped" });
           return;
         }
         setZoningCheck(check);
+        // The real lookup still runs and is still reported — the test drive
+        // replaces which rules are applied, not what the layer actually says.
+        if (previewing) return;
         if (check.status !== "matched") return;
 
         const matchedDistrict = muni?.zoning_districts.find(
@@ -454,7 +527,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [muni, parcelPick, pickKind]);
+  }, [muni, parcelPick, pickKind, previewing, previewDistrict]);
 
   // Live NJGIN path: pull the parcel geometry once, then intersect that WGS84
   // polygon with the municipality's published zoning layer. A local parcel
@@ -645,9 +718,12 @@ export default function App() {
   // Outside our coverage there is no district on purpose, and the reason has
   // already been given by the unverified flag. Reporting Union City's rules as
   // "missing" on top of that would blame the wrong thing.
+  // A previewed district is always checked: an incomplete one is exactly what
+  // the test drive is meant to catch, and "outside coverage" no longer applies
+  // once a district has been named explicitly.
   const missingRules = useMemo(
-    () => (outsideCoverage ? [] : missingDistrictRules(district)),
-    [district, outsideCoverage]
+    () => (outsideCoverage && !previewing ? [] : missingDistrictRules(district)),
+    [district, outsideCoverage, previewing]
   );
   const rulesReady = Boolean(district) && missingRules.length === 0;
   // A district that records ADUs as not permitted answers the client's
@@ -655,7 +731,9 @@ export default function App() {
   const adu = useMemo(() => aduRules(district), [district]);
   const aduBlocked = projectType === "adu" && adu.known && !adu.allowed;
   const zoningAvailable =
-    zoningCheck?.status === "matched" && Boolean(district) && missingRules.length === 0;
+    (previewing || zoningCheck?.status === "matched") &&
+    Boolean(district) &&
+    missingRules.length === 0;
   const municipalGisIdentified = municipalGisCheck?.status === "matched";
   const pricingAvailable = Boolean(costModel?.build_cost_tiers?.length);
   // Address, parcel, zoning, and pricing are independent layers. This mode is
@@ -1362,6 +1440,15 @@ export default function App() {
     <>
       <TopNav />
       <main className="shell">
+      {previewDistrictId != null && (
+        <PreviewBanner
+          districtId={previewDistrictId}
+          district={previewDistrict}
+          muni={previewMuni}
+          missing={previewing ? missingDistrictRules(previewDistrict) : []}
+          loading={!munis}
+        />
+      )}
       <Stepper step={step} maxStepReached={maxStepReached} onStep={goToStep} />
 
       {error && <div className="card error">Failed to load data: {error}</div>}
@@ -1380,6 +1467,7 @@ export default function App() {
           outsideCoverage={outsideCoverage}
           applicationMode={applicationMode}
           zoningAvailable={zoningAvailable}
+          previewing={previewing}
           municipalGisIdentified={municipalGisIdentified}
           pricingAvailable={pricingAvailable}
           projectType={projectType}
@@ -1464,6 +1552,67 @@ export default function App() {
   );
 }
 
+/**
+ * Test-drive banner. Shown on every step for as long as the mode is on, because
+ * the results below it are produced by a district that was chosen by hand — not
+ * one the zoning layer resolved for this address.
+ */
+function PreviewBanner({ districtId, district, muni, missing, loading }) {
+  const exit = () => {
+    window.location.hash = "#/";
+  };
+
+  if (loading) {
+    return (
+      <div className="preview-banner" role="status">
+        <strong>Loading the district being tested…</strong>
+      </div>
+    );
+  }
+
+  if (!district) {
+    return (
+      <div className="preview-banner missing" role="alert">
+        <div>
+          <strong>District #{districtId} was not found</strong>
+          <span>
+            It may have been deleted, or the municipality it belongs to is no longer loaded. The app
+            below is running normally.
+          </span>
+        </div>
+        <button type="button" className="secondary compact" onClick={exit}>
+          Exit test drive
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={missing.length ? "preview-banner missing" : "preview-banner"} role="status">
+      <div>
+        <strong>
+          Config editor test drive — {district.code}
+          {district.name ? ` (${district.name})` : ""}
+          {muni ? `, ${muni.name}` : ""}
+        </strong>
+        <span>
+          Published rules for this district are applied to whatever address you search. The zoning
+          layer is not what selected them, so nothing here is a verified result for that property.
+        </span>
+        {missing.length > 0 && (
+          <span className="preview-banner-missing">
+            This district cannot calculate yet — missing {missing.join(", ")}. Fill those in and
+            publish, then reload this page.
+          </span>
+        )}
+      </div>
+      <button type="button" className="secondary compact" onClick={exit}>
+        Exit test drive
+      </button>
+    </div>
+  );
+}
+
 function TopNav() {
   return (
     <nav className="top-nav">
@@ -1544,6 +1693,7 @@ function ProjectSetup({
   outsideCoverage,
   applicationMode,
   zoningAvailable,
+  previewing,
   municipalGisIdentified,
   pricingAvailable,
   projectType,
@@ -1649,6 +1799,7 @@ function ProjectSetup({
               zoningCheck={zoningCheck}
               municipalGisCheck={municipalGisCheck}
               zoningAvailable={zoningAvailable}
+              previewing={previewing}
               pricingAvailable={pricingAvailable}
             />
           )}
@@ -1833,9 +1984,12 @@ function LookupLayerStatus({
   zoningCheck,
   municipalGisCheck,
   zoningAvailable,
+  previewing,
   pricingAvailable,
 }) {
-  const modeCopy = {
+  const modeCopy = previewing
+    ? ["Config editor test drive", "preview"]
+    : {
     address: ["Enter an address", "waiting"],
     resolving: ["Resolving property layers", "resolving"],
     full: ["Full zoning + pricing mode", "full"],
@@ -1845,6 +1999,10 @@ function LookupLayerStatus({
     parcel_only: ["Parcel preview mode · zoning unavailable", "partial"],
     address_only: ["Address location mode · parcel unavailable", "partial"],
   }[mode] ?? ["Property lookup", "waiting"];
+  // A test drive never reports the zoning layer as verified — the district was
+  // supplied by the config editor, and the layer may say something else
+  // entirely for this address.
+  const zoningVerifiedHere = zoningAvailable && !previewing;
   const rows = [
     {
       label: "Municipality & State",
@@ -1866,20 +2024,27 @@ function LookupLayerStatus({
     },
     {
       label: "Zoning district",
-      state: zoningAvailable
-        ? "verified"
-        : zoningCheck?.district_code
-          ? "identified"
-        : municipalGisCheck?.status === "matched"
-          ? "identified"
-          : "unavailable",
-      value: zoningAvailable
-        ? district?.code ?? zoningStatusLabel(zoningCheck)
-        : zoningCheck?.district_code
-          ? zoningStatusLabel(zoningCheck)
-        : municipalGisCheck?.status === "matched"
-          ? municipalGisDistrictLabel(municipalGisCheck)
-          : municipalGisStatusLabel(municipalGisCheck, zoningCheck),
+      // Preview first, then the verified layer, then the two "identified but
+      // rules pending" fallbacks — Marco's own zoning check before the
+      // municipal GIS one, since ours is the more specific answer.
+      state: previewing
+        ? "preview"
+        : zoningVerifiedHere
+          ? "verified"
+          : zoningCheck?.district_code
+            ? "identified"
+            : municipalGisCheck?.status === "matched"
+              ? "identified"
+              : "unavailable",
+      value: previewing
+        ? `${district?.code ?? "—"}${district?.name ? ` — ${district.name}` : ""} · Test drive from the config editor — not verified for this address`
+        : zoningVerifiedHere
+          ? `${district.code}${district.name ? ` — ${district.name}` : ""} · Zoning verified from Marco Designs`
+          : zoningCheck?.district_code
+            ? zoningStatusLabel(zoningCheck)
+            : municipalGisCheck?.status === "matched"
+              ? municipalGisDistrictLabel(municipalGisCheck)
+              : municipalGisStatusLabel(municipalGisCheck, zoningCheck),
     },
     {
       label: "Construction pricing",
@@ -1902,7 +2067,13 @@ function LookupLayerStatus({
             key={row.label}
           >
             <span aria-hidden="true">
-              {row.state === "identified" ? "B" : row.state === "unavailable" || !row.ready && !row.state ? "—" : "✓"}
+              {row.state === "preview"
+                ? "▶"
+                : row.state === "identified"
+                  ? "B"
+                  : row.state === "unavailable" || (!row.ready && !row.state)
+                    ? "—"
+                    : "✓"}
             </span>
             <div>
               <strong>{row.label}</strong>

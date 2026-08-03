@@ -90,6 +90,29 @@ button { -webkit-tap-highlight-color: transparent; }
 .brand-logo { display: block; height: 18px; width: auto; color: var(--nav); }
 .brand p { margin: 0; color: var(--muted); font-size: 0.78rem; }
 
+/* Config-editor test drive. Deliberately the loudest thing on the page: the
+   numbers underneath come from a district chosen by hand, not from the zoning
+   layer, and that has to stay obvious on every step. */
+.preview-banner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 1rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid #cdbbe6;
+  border-left: 5px solid #6d4b9b;
+  border-radius: 13px;
+  color: #4b3270;
+  background: #f6f1fc;
+}
+.preview-banner > div { display: flex; min-width: 0; flex-direction: column; gap: 0.2rem; }
+.preview-banner strong { font-size: 0.82rem; }
+.preview-banner span { font-size: 0.7rem; line-height: 1.45; }
+.preview-banner .preview-banner-missing { color: #8c1d18; font-weight: 700; }
+.preview-banner.missing { border-color: #f0b7b1; border-left-color: #8c1d18; color: #8c1d18; background: #fdf1f0; }
+.preview-banner .secondary { flex: 0 0 auto; }
+
 .stepper {
   display: flex;
   align-items: center;
@@ -521,6 +544,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .lookup-mode.full { color: #315f44; background: var(--green-soft); }
 .lookup-mode.partial { color: #7b5412; background: #fff2d7; }
 .lookup-mode.identified { color: #6f541d; background: #f8e7bc; }
+.lookup-mode.preview { color: #4b3270; background: #efe7f8; }
 .lookup-layer-status ol {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -548,6 +572,7 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 }
 .lookup-layer-status li.unavailable > span { color: var(--muted); background: #ece9e1; }
 .lookup-layer-status li.identified > span { color: #fff; background: #9b6e15; }
+.lookup-layer-status li.preview > span { color: #fff; background: #6d4b9b; }
 .lookup-layer-status li div { display: flex; min-width: 0; flex-direction: column; gap: 0.08rem; }
 .lookup-layer-status li strong { color: var(--nav); font-size: 0.7rem; }
 .lookup-layer-status li small {
@@ -2412,6 +2437,18 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .save-ok { color: var(--green); font-weight: 700; }
 .admin-actions { justify-content: flex-end; }
 button.compact { padding: 0.45rem 0.9rem; font-size: 0.82rem; }
+/* An anchor that has to read as a button — it opens a second tab, which a
+   button cannot do without scripting around the browser's own affordances. */
+a.link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: fit-content;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+fieldset:disabled a.link-button { pointer-events: none; opacity: 0.45; }
 
 /* ---------- Admin: zoning PDF import ---------- */
 .pdf-import-section { border-color: var(--active-line); background: #fffdf8; }
