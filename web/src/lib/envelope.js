@@ -80,14 +80,26 @@ export const FLOOR_TO_FLOOR_FT = 10;
  * physically allows (kickoff core algorithm, step 3).
  */
 export function resolveStories(district) {
-  const permitted = district.max_stories ?? 1;
+  // Stories are whole occupied floors. Round legacy half-story records up so
+  // 2.5 becomes 3, while max_height_ft independently caps the total height.
+  const permitted = Math.max(1, Math.ceil(Number(district.max_stories ?? 1)));
   const heightFt = district.max_height_ft;
   if (heightFt == null) {
-    return { stories: permitted, heightLimited: false, storiesByHeight: null };
+    return {
+      stories: permitted,
+      permittedStories: permitted,
+      heightLimited: false,
+      storiesByHeight: null,
+    };
   }
   const byHeight = Math.floor(Number(heightFt) / FLOOR_TO_FLOOR_FT);
   const stories = Math.max(1, Math.min(permitted, byHeight));
-  return { stories, heightLimited: stories < permitted, storiesByHeight: byHeight };
+  return {
+    stories,
+    permittedStories: permitted,
+    heightLimited: stories < permitted,
+    storiesByHeight: byHeight,
+  };
 }
 
 /**
@@ -155,7 +167,7 @@ export function computeBuildable(lot, district) {
   const coverageCap = coveragePct != null ? lotArea * (coveragePct / 100) : Infinity;
   const footprint = Math.min(envelope.areaSqft, coverageCap);
 
-  const { stories, heightLimited, storiesByHeight } = resolveStories(district);
+  const { stories, permittedStories, heightLimited, storiesByHeight } = resolveStories(district);
   let buildable = footprint * stories;
 
   const farCap = district.max_far != null ? lotArea * district.max_far : Infinity;
@@ -168,7 +180,7 @@ export function computeBuildable(lot, district) {
     stories,
     heightLimited,
     storiesByHeight,
-    permittedStories: district.max_stories ?? 1,
+    permittedStories,
     buildable,
     binding:
       footprint === 0
@@ -191,7 +203,7 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
   const coverageCap = coveragePct != null ? lotAreaSqft * (coveragePct / 100) : Infinity;
   const footprint = Math.min(envelopeAreaSqft ?? 0, coverageCap);
 
-  const { stories, heightLimited, storiesByHeight } = resolveStories(district);
+  const { stories, permittedStories, heightLimited, storiesByHeight } = resolveStories(district);
   let buildable = footprint * stories;
   const farCap = district.max_far != null ? lotAreaSqft * district.max_far : Infinity;
   buildable = Math.min(buildable, farCap);
@@ -203,7 +215,7 @@ export function computeBuildableFromAreas(lotAreaSqft, envelopeAreaSqft, distric
     stories,
     heightLimited,
     storiesByHeight,
-    permittedStories: district.max_stories ?? 1,
+    permittedStories,
     buildable,
     binding: footprint === 0 ? "setbacks" : coverageCap < (envelopeAreaSqft ?? 0) ? "coverage" : "setbacks",
     farLimited: buildable === farCap && farCap !== Infinity,

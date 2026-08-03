@@ -1,11 +1,10 @@
 // Live NJGIN parcel data — https://nj.gov/njgin/edata/parcels/
 //
-// The imported `parcels` table (scripts/import_parcels.py) is still the
-// preferred source: PostGIS owns the geometry, and only that path can verify
-// zoning by intersecting the parcel with a municipal zoning layer. This module
-// is the fallback for municipalities where that import has not been run — it
-// queries the same statewide NJOGIS service the importer reads from, live from
-// the browser, so address search works without a loaded database.
+// This statewide NJOGIS service is the application's default New Jersey parcel
+// authority. Local imported rows remain a legacy/offline-compatible path, but
+// current address searches and map clicks resolve their polygon, block/lot and
+// standardized PAMS_PIN here, then intersect that polygon with Marco's
+// published municipal zoning layer in the browser.
 //
 // The service is public, CORS-open, and read-only. Geometry comes back as
 // GeoJSON in EPSG:4326; `toLocalFeet` converts it to planar feet so ParcelPlan

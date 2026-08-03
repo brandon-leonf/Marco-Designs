@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { resolveZoningAreas } from "./zoningLookup.js";
 
 const url = import.meta.env.VITE_SUPABASE_URL;
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -24,7 +25,20 @@ export async function fetchMunicipalities() {
     )
     .order("name");
   if (error) throw error;
-  return data;
+  return (data ?? []).map((municipality) => ({
+    ...municipality,
+    zoning_districts: (municipality.zoning_districts ?? []).map((district) => ({
+      ...district,
+      // The editor and calculator use whole floors. Older 2.5-story records
+      // become 3 floors while max_height_ft remains the total-building cap.
+      max_stories:
+        district.max_stories == null && district.extra_rules?.max_stories_exact == null
+          ? null
+          : Math.ceil(
+              Number(district.extra_rules?.max_stories_exact ?? district.max_stories)
+            ),
+    })),
+  }));
 }
 
 /**
@@ -124,6 +138,16 @@ export async function fetchZoningGeojson(muniSlug) {
   });
   if (error) throw error;
   return data ?? [];
+}
+
+/**
+ * Verify a live statewide NJGIN parcel against Marco's published zoning layer.
+ * The parcel remains in NJGIN; only its WGS84 geometry crosses this read-only
+ * boundary, so a separate local parcel import is not required.
+ */
+export async function resolvePublishedZoning(muniSlug, parcelGeojson) {
+  const areas = await fetchZoningGeojson(muniSlug);
+  return resolveZoningAreas(areas, parcelGeojson);
 }
 
 /** Where the zoning layer came from and what it does not cover. */

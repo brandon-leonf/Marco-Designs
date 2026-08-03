@@ -1,5 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { supabase, fetchMunicipalities } from "./lib/supabase.js";
+import { useEffect, useMemo, useRef, useState } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+import { booleanPointInPolygon, point } from "@turf/turf";
+import {
+  supabase,
+  fetchMunicipalities,
+  fetchZoningGeojson,
+  fetchZoningProvenance,
+} from "./lib/supabase.js";
+import { geocodeAddress } from "./lib/geocode.js";
 import {
   getSession,
   onAuthChange,
@@ -15,6 +24,7 @@ import {
   deleteMunicipality,
   deleteDistrict,
   zoningAreaCounts,
+  publishZoningLayer,
 } from "./lib/adminApi.js";
 import Logo from "./components/Logo.jsx";
 import { computeBuildable, missingDistrictRules } from "./lib/envelope.js";
@@ -37,12 +47,57 @@ const TIER_LABELS = {
   signature: "Signature",
   premium: "Premium",
 };
-// Fixed multipliers behind Marco's estimated model: baseline x factor x multiplier.
-const TIER_MULTIPLIERS = { essential: 0.75, signature: 1.0, premium: 1.4 };
-
 /** "" in a form field means "not set" and is stored as NULL. */
 const numOrNull = (value) => (value === "" || value == null ? null : Number(value));
 const numOrEmpty = (value) => (value == null ? "" : value);
+const mapSearchCache = new Map();
+const BOUNDARY_COLORS = [
+  "#2f6f4e",
+  "#b45f36",
+  "#4f67a8",
+  "#9a5a9e",
+  "#a07b16",
+  "#287d89",
+  "#8b4b55",
+];
+let boundaryIdSequence = 0;
+const newBoundaryId = (prefix = "boundary") =>
+  `${prefix}-${Date.now()}-${++boundaryIdSequence}`;
+const withBoundaryIds = (features, prefix) =>
+  (features ?? []).map((feature) => ({
+    ...feature,
+    id: feature.id ?? newBoundaryId(prefix),
+  }));
+
+async function searchMapLocation(value) {
+  const query = String(value ?? "").trim();
+  if (query.length < 2) return null;
+  const cacheKey = query.toLowerCase();
+  if (mapSearchCache.has(cacheKey)) return mapSearchCache.get(cacheKey);
+
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.searchParams.set("q", query);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("countrycodes", "us");
+  url.searchParams.set("limit", "1");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("polygon_geojson", "1");
+  url.searchParams.set("polygon_threshold", "0.0001");
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error("Map search is temporarily unavailable.");
+  const row = (await response.json())?.[0] ?? null;
+  const result = row
+    ? {
+        lat: Number(row.lat),
+        lon: Number(row.lon),
+        label: row.display_name,
+        bounds: Array.isArray(row.boundingbox) ? row.boundingbox.map(Number) : null,
+        geometry: row.geojson ?? null,
+      }
+    : null;
+  mapSearchCache.set(cacheKey, result);
+  return result;
+}
 
 export default function AdminApp() {
   const [session, setSession] = useState(undefined); // undefined = still checking
@@ -126,15 +181,35 @@ function municipalityStatus(muni, zoningAreas) {
   const rawCostModel = muni?.build_cost_models;
   const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
   const tiers = costModel?.build_cost_tiers ?? [];
-  const hasPricing = tiers.some((tier) => Number(tier?.rate_per_sqft) > 0);
+  const hasPricing = TIER_ORDER.every((name) =>
+    tiers.some(
+      (tier) =>
+        tier?.tier === name &&
+        Number(tier?.rate_per_sqft) > 0 &&
+        (tier?.rate_per_sqft_max == null ||
+          Number(tier.rate_per_sqft_max) >= Number(tier.rate_per_sqft))
+    )
+  );
 
   if (districts.length === 0) return { key: "districts", label: "Needs districts" };
-  // null means the count could not be read. Unknown is not the same as zero,
-  // and reporting a missing layer on a failed query would be a lie.
-  if (zoningAreas === 0) return { key: "zoning", label: "Needs zoning layer" };
   if (!hasPricing) return { key: "pricing", label: "Needs pricing" };
   if (districts.some((district) => missingDistrictRules(district).length > 0)) {
     return { key: "draft", label: "Draft" };
+  }
+  // Completed rules and geographic coverage are separate readiness facts.
+  // Missing polygons must not make a completed rule set look unfinished.
+  if (zoningAreas === 0) {
+    return {
+      key: "map-missing",
+      label: "Rules complete",
+      detail: "Map boundary missing",
+      setupAction: true,
+    };
+  }
+  // null means the count could not be read. Unknown is not the same as zero,
+  // and reporting a missing layer on a failed query would be a lie.
+  if (zoningAreas == null) {
+    return { key: "map-unknown", label: "Rules complete", detail: "Map status unavailable" };
   }
   return { key: "active", label: "Active" };
 }
@@ -186,6 +261,48 @@ function initialsFor(name) {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
+function MunicipalityCard({ item, status, selected = false, onOpen, onSetup, compact = false }) {
+  return (
+    <li>
+      <div className={selected ? "muni-card selected" : "muni-card"}>
+        <button type="button" className="muni-card-open" onClick={() => onOpen(item.id)}>
+          <span className="muni-avatar" aria-hidden="true">{initialsFor(item.name)}</span>
+          <span className="muni-card-body">
+            <span className="muni-card-title">
+              <strong>{item.name}, {item.state_code}</strong>
+              <span className="muni-readiness">
+                <em className={`muni-status ${status.key}`}>{status.label}</em>
+                {status.detail && (
+                  <em className={`muni-status ${status.key}-detail`}>{status.detail}</em>
+                )}
+              </span>
+            </span>
+            <span className="muni-card-meta">
+              {!compact && (
+                <>
+                  {item.zoning_districts.length}{" "}
+                  {item.zoning_districts.length === 1 ? "district" : "districts"} · {" "}
+                </>
+              )}
+              Updated {formatUpdated(item.last_updated)}
+            </span>
+          </span>
+          <span className="muni-card-chevron" aria-hidden="true">›</span>
+        </button>
+        {status.setupAction && (
+          <button
+            type="button"
+            className="secondary compact muni-setup-action"
+            onClick={() => onSetup(item.id)}
+          >
+            Set up zoning layer
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
+
 // The rule groups, as tabs. Setbacks opens first because it is the section a
 // district cannot be calculated without; Pricing is here rather than in its own
 // nav section because it is edited in the same draft-and-publish cycle.
@@ -195,6 +312,7 @@ const RULE_TABS = [
   { id: "pricing", label: "Pricing" },
   { id: "import", label: "Import PDF" },
   { id: "review", label: "Review & test" },
+  { id: "zoning-setup", label: "Zoning setup", opensView: true },
 ];
 
 // Districts, rules and pricing are all reached by drilling into a town, so
@@ -247,6 +365,7 @@ function MunicipalitiesPanel({
   query,
   onQuery,
   onSelect,
+  onSetup,
   onNew,
   children,
 }) {
@@ -291,33 +410,14 @@ function MunicipalitiesPanel({
             zoningCounts ? zoningCounts.get(item.id) ?? 0 : null
           );
           return (
-            <li key={item.id}>
-              <button
-                type="button"
-                className={item.id === muniId ? "muni-card selected" : "muni-card"}
-                onClick={() => onSelect(item.id)}
-              >
-                <span className="muni-avatar" aria-hidden="true">
-                  {initialsFor(item.name)}
-                </span>
-                <span className="muni-card-body">
-                  <span className="muni-card-title">
-                    <strong>
-                      {item.name}, {item.state_code}
-                    </strong>
-                    <em className={`muni-status ${status.key}`}>{status.label}</em>
-                  </span>
-                  <span className="muni-card-meta">
-                    {item.zoning_districts.length}{" "}
-                    {item.zoning_districts.length === 1 ? "district" : "districts"} · Updated{" "}
-                    {formatUpdated(item.last_updated)}
-                  </span>
-                </span>
-                <span className="muni-card-chevron" aria-hidden="true">
-                  ›
-                </span>
-              </button>
-            </li>
+            <MunicipalityCard
+              key={item.id}
+              item={item}
+              status={status}
+              selected={item.id === muniId}
+              onOpen={onSelect}
+              onSetup={onSetup}
+            />
           );
         })}
         {matches.length === 0 && (
@@ -471,7 +571,10 @@ function draftFromCostModel(costModel) {
     };
   }
   return {
-    provenance: costModel?.provenance ?? "estimated",
+    // The editor publishes one honest client-facing mode: regional projection.
+    // Legacy verified rows are loaded into the same range fields, then become
+    // estimated when the admin publishes them with a baseline and local factor.
+    provenance: "estimated",
     regional_baseline_per_sqft: numOrEmpty(costModel?.regional_baseline_per_sqft),
     local_cost_factor: numOrEmpty(costModel?.local_cost_factor),
     tiers,
@@ -508,6 +611,8 @@ function ConfigEditor({ adminEmail, ready }) {
   const [view, setView] = useState("municipalities");
   const [muniQuery, setMuniQuery] = useState("");
   const [zoningCounts, setZoningCounts] = useState(null);
+  const [zoningSetupDirty, setZoningSetupDirty] = useState(false);
+  const [pendingSetupView, setPendingSetupView] = useState(null);
 
   const reload = () =>
     fetchMunicipalities()
@@ -561,6 +666,50 @@ function ConfigEditor({ adminEmail, ready }) {
     setView("rules");
   };
 
+  const openZoningSetup = (id) => {
+    setMuniId(id);
+    setDistrictId(null);
+    setZoningSetupDirty(false);
+    setPendingSetupView(null);
+    setView("zoning-setup");
+  };
+
+  const requestView = (nextView) => {
+    if (view === "zoning-setup" && zoningSetupDirty && nextView !== "zoning-setup") {
+      setPendingSetupView(nextView);
+      return;
+    }
+    setView(nextView);
+  };
+
+  const finishSetupNavigation = () => {
+    const nextView = pendingSetupView;
+    setPendingSetupView(null);
+    setZoningSetupDirty(false);
+    if (nextView === "__back_to_app__") {
+      window.location.hash = "#/";
+    } else if (nextView === "__sign_out__") {
+      signOut();
+    } else if (nextView) {
+      setView(nextView);
+    }
+  };
+
+  useEffect(() => {
+    if (view !== "zoning-setup" || !zoningSetupDirty) return undefined;
+    const interceptTopNavigation = (event) => {
+      const target = event.target;
+      const backToApp = target?.closest?.('a[href="#/"]');
+      const signOutButton = target?.closest?.(".nav-signout");
+      if (!backToApp && !signOutButton) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPendingSetupView(backToApp ? "__back_to_app__" : "__sign_out__");
+    };
+    document.addEventListener("click", interceptTopNavigation, true);
+    return () => document.removeEventListener("click", interceptTopNavigation, true);
+  }, [view, zoningSetupDirty]);
+
   // Districts, rules and pricing are all inside the Municipalities section, so
   // the rail stays lit on Municipalities however deep the drill-down goes.
   const activeNav = view === "dashboard" ? "dashboard" : "municipalities";
@@ -581,7 +730,7 @@ function ConfigEditor({ adminEmail, ready }) {
     const stored = loadLocalDraft(district.id);
     if (stored?.draft) {
       setDraft(stored.draft);
-      if (stored.costDraft) setCostDraft(stored.costDraft);
+      if (stored.costDraft) setCostDraft({ ...stored.costDraft, provenance: "estimated" });
       setDraftInfo({ savedAt: stored.savedAt });
     } else {
       setDraft(draftFromDistrict(district));
@@ -644,21 +793,19 @@ function ConfigEditor({ adminEmail, ready }) {
           parking_required: draft.adu_parking_required,
         },
         cost_model: costDraft && {
-          provenance: costDraft.provenance,
+          provenance: "estimated",
           regional_baseline_per_sqft: numOrNull(costDraft.regional_baseline_per_sqft),
           local_cost_factor: numOrNull(costDraft.local_cost_factor),
           tiers: Object.fromEntries(
             TIER_ORDER.map((name) => [
               name,
-              costDraft.provenance === "verified"
-                ? {
-                    rate_per_sqft: {
-                      min: numOrNull(costDraft.tiers[name].min),
-                      max: numOrNull(costDraft.tiers[name].max),
-                    },
-                    notes: costDraft.tiers[name].notes || null,
-                  }
-                : { rate_per_sqft: numOrNull(costDraft.tiers[name].min) },
+              {
+                rate_per_sqft: {
+                  min: numOrNull(costDraft.tiers[name].min),
+                  max: numOrNull(costDraft.tiers[name].max),
+                },
+                notes: costDraft.tiers[name].notes || null,
+              },
             ])
           ),
         },
@@ -668,15 +815,11 @@ function ConfigEditor({ adminEmail, ready }) {
     );
   }, [draft, costDraft, muni, district]);
 
-  const estimated = costDraft?.provenance === "estimated";
   const costModelComplete =
     costDraft &&
     TIER_ORDER.every(
-      (name) =>
-        costDraft.tiers[name].min !== "" && (estimated || costDraft.tiers[name].max !== "")
-    ) &&
-    (!estimated ||
-      (costDraft.regional_baseline_per_sqft !== "" && costDraft.local_cost_factor !== ""));
+      (name) => costDraft.tiers[name].min !== "" && costDraft.tiers[name].max !== ""
+    );
 
   const saveDraftLocal = () => {
     if (!district) return;
@@ -707,7 +850,10 @@ function ConfigEditor({ adminEmail, ready }) {
     const imp = numOrNull(draft.max_impervious_coverage_pct);
     if (imp != null && (imp < 0 || imp > 100)) issues.push("Max impervious coverage must be between 0 and 100%.");
     const stories = numOrNull(draft.max_stories);
-    if (stories != null && stories < 1) issues.push("Max stories must be at least 1.");
+    if (stories != null && stories < 1) issues.push("Max Stories must be at least 1.");
+    if (stories != null && !Number.isInteger(stories)) {
+      issues.push("Max Stories must be a whole number, such as 2 or 3.");
+    }
     ok.push(
       draft.max_far === ""
         ? "Max FAR is blank → stored as null (no FAR cap). Blank is never treated as 0."
@@ -715,15 +861,11 @@ function ConfigEditor({ adminEmail, ready }) {
     );
     for (const name of TIER_ORDER) {
       const t = costDraft.tiers[name];
-      if (estimated) {
-        if (t.min === "") issues.push(`${TIER_LABELS[name]}: estimated rate is missing.`);
-      } else {
-        if (t.min === "" || t.max === "") issues.push(`${TIER_LABELS[name]}: verified tiers need both min and max.`);
-        else if (Number(t.max) < Number(t.min)) issues.push(`${TIER_LABELS[name]}: max ($${t.max}) is below min ($${t.min}).`);
+      if (t.min === "" || t.max === "") {
+        issues.push(`${TIER_LABELS[name]}: projected tiers need both min and max.`);
+      } else if (Number(t.max) < Number(t.min)) {
+        issues.push(`${TIER_LABELS[name]}: max ($${t.max}) is below min ($${t.min}).`);
       }
-    }
-    if (estimated && (costDraft.regional_baseline_per_sqft === "" || costDraft.local_cost_factor === "")) {
-      issues.push("Estimated cost models must carry the regional baseline and local cost factor they derive from.");
     }
     if (issues.length === 0) ok.unshift("All checks passed — safe to publish.");
     return { issues, ok };
@@ -789,7 +931,7 @@ function ConfigEditor({ adminEmail, ready }) {
     for (const name of TIER_ORDER) {
       const t = costDraft.tiers[name];
       if (t.min === "") continue;
-      if (!estimated && t.max !== "") {
+      if (t.max !== "") {
         lines.push(
           `COST   ${TIER_LABELS[name]}: ${num(res.buildable)} × $${num(t.min)}–$${num(t.max)} = $${num(res.buildable * Number(t.min))} – $${num(res.buildable * Number(t.max))}`
         );
@@ -816,6 +958,9 @@ function ConfigEditor({ adminEmail, ready }) {
     setSaving(true);
     setSaveState(null);
     try {
+      const maxStories = numOrNull(draft.max_stories);
+      const { max_stories_exact: _oldMaxStoriesExact, ...existingExtraRules } =
+        district.extra_rules ?? {};
       await saveDistrict(district.id, {
         front_yard_min_ft: numOrNull(draft.front_yard_min_ft),
         rear_yard_min_ft: numOrNull(draft.rear_yard_min_ft),
@@ -827,11 +972,11 @@ function ConfigEditor({ adminEmail, ready }) {
         front_yard_prevailing_rule: draft.front_yard_prevailing_rule,
         max_building_coverage_pct: numOrNull(draft.max_building_coverage_pct),
         max_impervious_coverage_pct: numOrNull(draft.max_impervious_coverage_pct),
-        max_stories: numOrNull(draft.max_stories),
+        max_stories: maxStories,
         max_far: numOrNull(draft.max_far),
         max_height_ft: numOrNull(draft.max_height_ft),
         extra_rules: {
-          ...(district.extra_rules ?? {}),
+          ...existingExtraRules,
           adu: {
             allowed: draft.adu_allowed,
             detached_allowed: draft.adu_detached_allowed,
@@ -846,20 +991,22 @@ function ConfigEditor({ adminEmail, ready }) {
           muni.id,
           costModel?.id ?? null,
           {
-            provenance: costDraft.provenance,
-            regional_baseline_per_sqft: estimated
-              ? numOrNull(costDraft.regional_baseline_per_sqft)
-              : null,
-            local_cost_factor: estimated ? numOrNull(costDraft.local_cost_factor) : null,
+            provenance: "estimated",
+            // The deployed database still requires these fields for estimated
+            // rows. Preserve existing metadata; older verified rows use the
+            // Signature minimum as a neutral internal baseline with factor 1.
+            // Pricing itself always comes from the three admin-entered ranges.
+            regional_baseline_per_sqft:
+              numOrNull(costDraft.regional_baseline_per_sqft) ??
+              Number(costDraft.tiers.signature.min),
+            local_cost_factor: numOrNull(costDraft.local_cost_factor) ?? 1,
           },
           TIER_ORDER.map((name) => ({
             tier: name,
             rate_per_sqft: Number(costDraft.tiers[name].min),
-            rate_per_sqft_max: estimated ? null : Number(costDraft.tiers[name].max),
-            notes: estimated ? null : costDraft.tiers[name].notes || null,
-            formula_reference: estimated
-              ? `regional_baseline * local_factor * ${TIER_MULTIPLIERS[name]}`
-              : "authoritative_historical_rate",
+            rate_per_sqft_max: Number(costDraft.tiers[name].max),
+            notes: costDraft.tiers[name].notes || null,
+            formula_reference: "admin_entered_regional_projection_range",
           }))
         );
       }
@@ -905,7 +1052,7 @@ function ConfigEditor({ adminEmail, ready }) {
       setNewMuni(null);
       setSaveState({
         kind: "ok",
-        text: "Municipality created. Fill in the district rules and cost model, then Save Changes.",
+        text: "Municipality created. Fill in the district rules and cost model, then publish the configuration.",
       });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
@@ -984,9 +1131,19 @@ function ConfigEditor({ adminEmail, ready }) {
         newDistrict.name.trim()
       );
       await reload();
+      // A newly created district always opens on its own blank zoning-rule
+      // form. Clearing a same-id local entry is defensive (Postgres sequences
+      // normally never reuse ids) and prevents any stale browser draft from
+      // making a new district look as though it inherited another one's data.
+      localStorage.removeItem(draftKey(id));
       setDistrictId(id);
+      setRuleTab("setbacks");
+      setView("rules");
       setNewDistrict(null);
-      setSaveState({ kind: "ok", text: "District added. Fill in its rules, then Save Changes." });
+      setSaveState({
+        kind: "ok",
+        text: "District added with blank rules. Enter this district’s values, then Save draft or Publish configuration.",
+      });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
     } finally {
@@ -1074,35 +1231,11 @@ function ConfigEditor({ adminEmail, ready }) {
     setDraft((d) => ({ ...d, [key]: value }));
     setPdfImportedKeys((keys) => keys.filter((item) => item !== key));
   };
-  const setCostField = (key) => (value) => setCostDraft((d) => ({ ...d, [key]: value }));
   const setTierField = (name, key) => (value) =>
     setCostDraft((d) => ({
       ...d,
       tiers: { ...d.tiers, [name]: { ...d.tiers[name], [key]: value } },
     }));
-
-  const deriveEstimatedRates = () => {
-    const base = Number(costDraft.regional_baseline_per_sqft);
-    const factor = Number(costDraft.local_cost_factor);
-    if (!base || !factor) {
-      setSaveState({ kind: "error", text: "Enter the regional baseline and local cost factor first." });
-      return;
-    }
-    setCostDraft((d) => ({
-      ...d,
-      tiers: Object.fromEntries(
-        TIER_ORDER.map((name) => [
-          name,
-          {
-            ...d.tiers[name],
-            min: Math.round(base * factor * TIER_MULTIPLIERS[name] * 100) / 100,
-            max: "",
-          },
-        ])
-      ),
-    }));
-    setSaveState(null);
-  };
 
   // The create and delete flows are the same wherever a municipality is
   // managed from, so they are held as an element rather than a component —
@@ -1212,7 +1345,7 @@ function ConfigEditor({ adminEmail, ready }) {
 
   return (
     <section className="admin-shell">
-      <AdminSidebar view={activeNav} onView={setView} adminEmail={adminEmail} />
+      <AdminSidebar view={activeNav} onView={requestView} adminEmail={adminEmail} />
 
       {view === "municipalities" ? (
         <MunicipalitiesPanel
@@ -1223,6 +1356,7 @@ function ConfigEditor({ adminEmail, ready }) {
           query={muniQuery}
           onQuery={setMuniQuery}
           onSelect={openMunicipality}
+          onSetup={openZoningSetup}
           onNew={() => setNewMuni({ name: "", state: "NJ", county: "", district: "R" })}
         >
           {muniForms}
@@ -1232,7 +1366,24 @@ function ConfigEditor({ adminEmail, ready }) {
           munis={munis}
           zoningCounts={zoningCounts}
           onOpen={openMunicipality}
+          onSetup={openZoningSetup}
           onView={setView}
+        />
+      ) : view === "zoning-setup" ? (
+        <ZoningLayerSetup
+          muni={muni}
+          zoningAreaCount={zoningCounts?.get(muni?.id) ?? 0}
+          onBack={() => requestView("municipalities")}
+          onEditRules={() => requestView(districtId ? "rules" : "districts")}
+          dirty={zoningSetupDirty}
+          pendingNavigation={pendingSetupView}
+          onDirtyChange={setZoningSetupDirty}
+          onCancelNavigation={() => setPendingSetupView(null)}
+          onLeaveWithoutSaving={finishSetupNavigation}
+          onSavedAndLeave={finishSetupNavigation}
+          onPublished={async () => {
+            await reload();
+          }}
         />
       ) : view === "districts" ? (
         <div className="card admin-districts wide">
@@ -1406,7 +1557,13 @@ function ConfigEditor({ adminEmail, ready }) {
               key={tab.id}
               className={ruleTab === tab.id ? "rule-tab active" : "rule-tab"}
               aria-selected={ruleTab === tab.id}
-              onClick={() => setRuleTab(tab.id)}
+              onClick={() => {
+                if (tab.opensView) {
+                  setView("zoning-setup");
+                  return;
+                }
+                setRuleTab(tab.id);
+              }}
             >
               {tab.label}
             </button>
@@ -1538,9 +1695,22 @@ function ConfigEditor({ adminEmail, ready }) {
           </legend>
           <div className="admin-fields four">
             <Num label="Max Building Coverage (%)" value={draft.max_building_coverage_pct} onChange={setField("max_building_coverage_pct")} imported={pdfImportedKeys.includes("max_building_coverage_pct")} />
-            <Num label="Max Stories" value={draft.max_stories} onChange={setField("max_stories")} step="0.5" imported={pdfImportedKeys.includes("max_stories")} />
-            <Num label="Max FAR" value={draft.max_far} onChange={setField("max_far")} step="0.05" />
-            <Num label="Max Height (ft)" value={draft.max_height_ft} onChange={setField("max_height_ft")} imported={pdfImportedKeys.includes("max_height_ft")} />
+            <Num
+              label="Max Stories (whole floors)"
+              value={draft.max_stories}
+              onChange={setField("max_stories")}
+              step="1"
+              hint="Enter a whole number. The total building height is controlled by Max Total Building Height."
+              imported={pdfImportedKeys.includes("max_stories")}
+            />
+            <Num
+              label="Max FAR (0.00)"
+              value={draft.max_far}
+              onChange={setField("max_far")}
+              step="0.01"
+              hint="Example: 0.19 = 19% of the lot area."
+            />
+            <Num label="Max Total Building Height (ft)" value={draft.max_height_ft} onChange={setField("max_height_ft")} imported={pdfImportedKeys.includes("max_height_ft")} />
             <Num label="Max Impervious Coverage (%)" value={draft.max_impervious_coverage_pct} onChange={setField("max_impervious_coverage_pct")} imported={pdfImportedKeys.includes("max_impervious_coverage_pct")} />
           </div>
         </fieldset>
@@ -1574,99 +1744,45 @@ function ConfigEditor({ adminEmail, ready }) {
           <legend>
             <span className="admin-section-icon" aria-hidden="true">$</span> D. Cost Model
           </legend>
-          <div className="admin-fields four">
-            <label>
-              Provenance
-              <select value={costDraft.provenance} onChange={(e) => setCostField("provenance")(e.target.value)}>
-                <option value="verified">Verified — Marco’s real figures</option>
-                <option value="estimated">Estimated — regional projection</option>
-              </select>
-            </label>
-            {estimated && (
-              <>
-                <Num
-                  label="Regional Baseline ($/sq ft)"
-                  value={costDraft.regional_baseline_per_sqft}
-                  onChange={setCostField("regional_baseline_per_sqft")}
-                  step="0.01"
-                />
-                <Num
-                  label="Local Cost Factor"
-                  value={costDraft.local_cost_factor}
-                  onChange={setCostField("local_cost_factor")}
-                  step="0.01"
-                />
-              </>
-            )}
+          <div className="admin-fields pricing-provenance">
+            <div className="admin-static-field">
+              <span>Provenance</span>
+              <strong>Estimated — Regional Projection</strong>
+            </div>
           </div>
-          {estimated ? (
-            <div className="provenance-note estimated" role="note">
-              <strong>✕ Clients will see a red warning</strong>
-              <span>
-                “Rough estimate based on regional variables — actual costs may include expenses not
-                accounted for.” Each tier is one derived rate: baseline × factor × multiplier
-                (0.75 / 1.0 / 1.4).
-              </span>
-            </div>
-          ) : (
-            <div className="provenance-note verified" role="note">
-              <strong>✓ Clients will see “Verified Price”</strong>
-              <span>
-                Verified pricing shows a min–max range per tier, with your client-facing notes under
-                each level.
-              </span>
-            </div>
-          )}
           {TIER_ORDER.map((name) => (
             <div className="tier-editor" key={name}>
               <span className="tier-editor-name">{TIER_LABELS[name]}</span>
               <div className="admin-fields four">
-                {estimated ? (
+                <>
                   <Num
-                    label="Rate ($/sq ft)"
+                    label="Min ($/sq ft)"
                     value={costDraft.tiers[name].min}
                     onChange={(value) => setTierField(name, "min")(value)}
                     step="0.01"
                   />
-                ) : (
-                  <>
-                    <Num
-                      label="Min ($/sq ft)"
-                      value={costDraft.tiers[name].min}
-                      onChange={(value) => setTierField(name, "min")(value)}
-                      step="0.01"
-                    />
-                    <Num
-                      label="Max ($/sq ft)"
-                      value={costDraft.tiers[name].max}
-                      onChange={(value) => setTierField(name, "max")(value)}
-                      step="0.01"
-                    />
-                  </>
-                )}
-              </div>
-              {!estimated && (
-                <label className="tier-notes-field">
-                  Client-facing notes
-                  <input
-                    type="text"
-                    value={costDraft.tiers[name].notes}
-                    placeholder="e.g. Our most popular level — semi-custom homes with real character."
-                    onChange={(e) => setTierField(name, "notes")(e.target.value)}
+                  <Num
+                    label="Max ($/sq ft)"
+                    value={costDraft.tiers[name].max}
+                    onChange={(value) => setTierField(name, "max")(value)}
+                    step="0.01"
                   />
-                </label>
-              )}
+                </>
+              </div>
+              <label className="tier-notes-field">
+                Client-facing notes
+                <input
+                  type="text"
+                  value={costDraft.tiers[name].notes}
+                  placeholder="e.g. Our most popular level — semi-custom homes with real character."
+                  onChange={(e) => setTierField(name, "notes")(e.target.value)}
+                />
+              </label>
             </div>
           ))}
-          {estimated && (
-            <button type="button" className="secondary compact" onClick={deriveEstimatedRates}>
-              ⟳ Derive rates from baseline × factor
-            </button>
-          )}
           <p className="admin-hint">
-            Every visitor sees the provenance label — verified prices with a green checkmark, estimates
-            with a red warning. Switching to estimated requires the baseline and factor the derivation
-            uses.
+            Enter Marco’s figures for Essential, Signature, and Premium, including each range and
+            client-facing description.
           </p>
         </fieldset>
         </>
@@ -1700,7 +1816,7 @@ function ConfigEditor({ adminEmail, ready }) {
             <Num label="Test lot depth (ft)" value={testLot.depth} onChange={(v) => setTestLot({ ...testLot, depth: v })} />
             <Num label="Test lot area (sq ft)" value={testLot.area} onChange={(v) => setTestLot({ ...testLot, area: v })} />
           </div>
-          <button type="button" className="secondary compact" onClick={runTest}>
+          <button type="button" className="secondary compact admin-test-run" onClick={runTest}>
             ▶ Run test calculation
           </button>
           {testResult && (
@@ -1781,11 +1897,793 @@ function ConfigEditor({ adminEmail, ready }) {
   );
 }
 
+function ZoningLayerSetup({
+  muni,
+  zoningAreaCount,
+  onBack,
+  onEditRules,
+  onPublished,
+  dirty,
+  pendingNavigation,
+  onDirtyChange,
+  onCancelNavigation,
+  onLeaveWithoutSaving,
+  onSavedAndLeave,
+}) {
+  const [sourceMode, setSourceMode] = useState("draw");
+  const [layer, setLayer] = useState(null);
+  const [layerBusy, setLayerBusy] = useState(true);
+  const [layerName, setLayerName] = useState("");
+  const [layerError, setLayerError] = useState("");
+  const [codeField, setCodeField] = useState("");
+  const [mapping, setMapping] = useState({});
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [testAddress, setTestAddress] = useState("");
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setBoundaryTestResult] = useState(null);
+  const [publishBusy, setPublishBusy] = useState(false);
+  const [publishState, setPublishState] = useState(null);
+  const [hasUnfinishedBoundary, setHasUnfinishedBoundary] = useState(false);
+
+  const districts = muni?.zoning_districts ?? [];
+  const incompleteDistrictCount = districts.filter(
+    (district) => missingDistrictRules(district).length > 0
+  ).length;
+  const features = layer?.features ?? [];
+
+  // Drawing is incremental. Load the published polygons first so adding one
+  // more district cannot silently replace boundaries from an earlier session.
+  useEffect(() => {
+    if (!muni?.slug) return undefined;
+    let stale = false;
+    onDirtyChange(false);
+    setLayerBusy(true);
+    setLayerError("");
+    Promise.all([
+      fetchZoningGeojson(muni.slug),
+      fetchZoningProvenance(muni.slug),
+    ])
+      .then(([areas, provenance]) => {
+        if (stale) return;
+        if (areas.length) {
+          setLayer({
+            type: "FeatureCollection",
+            features: areas.map((area, index) => ({
+              type: "Feature",
+              id: newBoundaryId(`published-${index + 1}`),
+              properties: { district_code: area.district_code },
+              geometry: area.geojson,
+            })),
+          });
+          setLayerName(
+            `${areas.length} published boundar${areas.length === 1 ? "y" : "ies"} loaded`
+          );
+          setCodeField("district_code");
+        } else {
+          setLayer(null);
+          setLayerName("");
+        }
+        if (/^https?:\/\//i.test(provenance?.source_map_url ?? "")) {
+          setSourceUrl(provenance.source_map_url);
+        }
+      })
+      .catch((error) => {
+        if (!stale) {
+          setLayerError(
+            `Published boundaries could not be loaded: ${error.message ?? String(error)}`
+          );
+        }
+      })
+      .finally(() => {
+        if (!stale) setLayerBusy(false);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [muni?.slug]);
+
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const warnBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [dirty]);
+  const propertyFields = useMemo(() => {
+    const names = new Set();
+    for (const feature of features) {
+      Object.keys(feature?.properties ?? {}).forEach((name) => names.add(name));
+    }
+    return [...names].sort();
+  }, [features]);
+
+  useEffect(() => {
+    if (!propertyFields.length) {
+      setCodeField("");
+      return;
+    }
+    const preferred = ["district_code", "code", "district", "zone", "zoning"]
+      .find((name) => propertyFields.some((field) => field.toLowerCase() === name));
+    setCodeField((current) =>
+      propertyFields.includes(current)
+        ? current
+        : propertyFields.find((field) => field.toLowerCase() === preferred) ?? propertyFields[0]
+    );
+  }, [propertyFields]);
+
+  const sourceCodes = useMemo(() => {
+    if (!codeField) return [];
+    return [...new Set(
+      features
+        .map((feature) => String(feature?.properties?.[codeField] ?? "").trim())
+        .filter(Boolean)
+    )].sort();
+  }, [features, codeField]);
+
+  useEffect(() => {
+    const districtCodes = new Map(
+      districts.map((district) => [String(district.code).trim().toUpperCase(), district.code])
+    );
+    setMapping((current) => {
+      const next = {};
+      for (const sourceCode of sourceCodes) {
+        next[sourceCode] =
+          current[sourceCode] ?? districtCodes.get(sourceCode.toUpperCase()) ?? "";
+      }
+      return next;
+    });
+  }, [districts, sourceCodes]);
+
+  if (!muni) {
+    return <div className="card admin-setup-page">Municipality not found.</div>;
+  }
+
+  const validGeometry = (geometry) =>
+    geometry?.type === "Polygon" || geometry?.type === "MultiPolygon";
+
+  const uploadLayer = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setLayerError("");
+    setPublishState(null);
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed?.type !== "FeatureCollection" || !Array.isArray(parsed.features)) {
+        throw new Error("Upload a GeoJSON FeatureCollection.");
+      }
+      if (!parsed.features.length || parsed.features.some((feature) => !validGeometry(feature.geometry))) {
+        throw new Error("Every zoning feature must contain a Polygon or MultiPolygon geometry.");
+      }
+      setLayer({
+        ...parsed,
+        features: withBoundaryIds(parsed.features, "uploaded"),
+      });
+      setLayerName(file.name);
+      onDirtyChange(true);
+    } catch (error) {
+      setLayer(null);
+      setLayerName("");
+      setLayerError(error.message ?? String(error));
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const addDrawnBoundary = (feature) => {
+    setLayer((current) => ({
+      type: "FeatureCollection",
+      features: [
+        ...(current?.features ?? []),
+        { ...feature, id: feature.id ?? newBoundaryId("drawn") },
+      ],
+    }));
+    setLayerName("Boundaries drawn in the setup map");
+    setCodeField("district_code");
+    setLayerError("");
+    setPublishState(null);
+    onDirtyChange(true);
+  };
+
+  const removeBoundary = (featureId) => {
+    setLayer((current) => ({
+      type: "FeatureCollection",
+      features: (current?.features ?? []).filter(
+        (feature) => String(feature.id) !== String(featureId)
+      ),
+    }));
+    setBoundaryTestResult(null);
+    setPublishState({
+      kind: "ok",
+      text: "Boundary removed from this draft. Publish the municipality to save the deletion.",
+    });
+    onDirtyChange(true);
+  };
+
+  const allMatched =
+    features.length > 0 &&
+    features.every((feature) => {
+      const sourceCode = String(feature?.properties?.[codeField] ?? "").trim();
+      return Boolean(sourceCode && mapping[sourceCode]);
+    });
+  const mappedFeatures = allMatched
+    ? features.map((feature, index) => ({
+        district_code: mapping[String(feature?.properties?.[codeField] ?? "").trim()],
+        geometry: feature.geometry,
+        source_feature_id: String(feature.id ?? index + 1),
+        properties: feature.properties ?? {},
+      }))
+    : [];
+  const unmatchedCodes = sourceCodes.filter((sourceCode) => !mapping[sourceCode]);
+
+  const testBoundary = async () => {
+    if (!testAddress.trim() || !allMatched) return;
+    setTestBusy(true);
+    setBoundaryTestResult(null);
+    try {
+      const matches = await geocodeAddress(testAddress, 1);
+      if (!matches.length) throw new Error("No matching address was found.");
+      const match = matches[0];
+      const location = point([match.lon, match.lat]);
+      const featureIndex = features.findIndex((feature) =>
+        booleanPointInPolygon(location, feature)
+      );
+      if (featureIndex < 0) {
+        setBoundaryTestResult({
+          kind: "error",
+          text: `${match.full_label ?? match.address} is outside the uploaded boundaries.`,
+        });
+        return;
+      }
+      const sourceCode = String(features[featureIndex]?.properties?.[codeField] ?? "").trim();
+      setBoundaryTestResult({
+        kind: "ok",
+        text: `${match.full_label ?? match.address} matches district ${mapping[sourceCode]}.`,
+      });
+    } catch (error) {
+      setBoundaryTestResult({ kind: "error", text: error.message ?? String(error) });
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  const publish = async () => {
+    if (!mappedFeatures.length || hasUnfinishedBoundary) return false;
+    setPublishBusy(true);
+    setPublishState(null);
+    try {
+      const count = await publishZoningLayer(muni.id, mappedFeatures, {
+        sourceUrl: sourceUrl.trim() || "Admin zoning setup",
+        srid: 4326,
+      });
+      await onPublished();
+      setPublishState({ kind: "ok", text: `Published ${count} zoning polygon${count === 1 ? "" : "s"}.` });
+      onDirtyChange(false);
+      return true;
+    } catch (error) {
+      const raw = error.message ?? String(error);
+      setPublishState({
+        kind: "error",
+        text: /admin_publish_zoning_layer/i.test(raw)
+          ? "Zoning-layer publishing is not enabled in the connected database yet. Deploy the pending database migrations, then publish again."
+          : raw,
+      });
+      return false;
+    } finally {
+      setPublishBusy(false);
+    }
+  };
+
+  const saveAndLeave = async () => {
+    const saved = await publish();
+    if (saved) onSavedAndLeave();
+  };
+
+  return (
+    <div className="card admin-setup-page">
+      <div className="admin-panel-head">
+        <div>
+          <AdminCrumbs
+            items={[
+              { label: "Municipalities", onClick: onBack },
+              { label: `${muni.name}, ${muni.state_code}` },
+            ]}
+          />
+          <h2>Zoning Layer Setup</h2>
+          <p className="admin-side-note">
+            {incompleteDistrictCount > 0
+              ? `${incompleteDistrictCount} district rule set${incompleteDistrictCount === 1 ? "" : "s"} incomplete`
+              : "Rules complete"}
+            {" · "}
+            {zoningAreaCount > 0 ? `${zoningAreaCount} map boundaries published` : "Map boundary missing"}
+          </p>
+        </div>
+        <button type="button" className="secondary compact" onClick={onEditRules}>Edit district rules</button>
+      </div>
+
+      <ol className="zoning-setup-steps">
+        <li className={features.length ? "setup-step complete" : "setup-step current"}>
+          <span className="setup-step-number">1</span>
+          <div className="setup-step-content">
+            <div className="setup-step-heading">
+              <div><h3>Draw or upload zoning boundaries</h3><p>Add Polygon or MultiPolygon boundaries in WGS84 coordinates.</p></div>
+              {features.length > 0 && <em>✓ {features.length} polygon{features.length === 1 ? "" : "s"}</em>}
+            </div>
+            <div className="setup-source-tabs" role="tablist" aria-label="Boundary source">
+              <button type="button" className={sourceMode === "draw" ? "active" : ""} onClick={() => setSourceMode("draw")}>Draw boundaries</button>
+              <button type="button" className={sourceMode === "upload" ? "active" : ""} onClick={() => setSourceMode("upload")}>Upload GeoJSON</button>
+            </div>
+            {sourceMode === "upload" ? (
+              <div className="setup-upload-box">
+                <label className="secondary compact file-button">
+                  Choose GeoJSON
+                  <input type="file" accept=".geojson,.json,application/geo+json,application/json" onChange={uploadLayer} />
+                </label>
+                <span>{layerName || "No boundary file selected"}</span>
+              </div>
+            ) : (
+              layerBusy ? (
+                <p className="status-line">Loading published zoning boundaries…</p>
+              ) : (
+                <BoundaryDrawMap
+                  districts={districts}
+                  features={features}
+                  municipalityLabel={`${muni.name}, ${muni.state_code}`}
+                  onFeature={addDrawnBoundary}
+                  onRemoveFeature={removeBoundary}
+                  onDrawingChange={(unfinished) => {
+                    setHasUnfinishedBoundary(unfinished);
+                    if (unfinished) onDirtyChange(true);
+                  }}
+                />
+              )
+            )}
+            {layerError && <p className="status-line error-text">{layerError}</p>}
+            {unmatchedCodes.length > 0 && (
+              <p className="status-line error-text">
+                No configured district matches {unmatchedCodes.join(", ")}. Add or rename the district rules before publishing.
+              </p>
+            )}
+            <label className="setup-source-url">
+              Source map URL <small>Recommended for provenance</small>
+              <input
+                type="url"
+                value={sourceUrl}
+                placeholder="https://municipality.gov/zoning-map"
+                onChange={(event) => {
+                  setSourceUrl(event.target.value);
+                  onDirtyChange(true);
+                }}
+              />
+            </label>
+          </div>
+        </li>
+
+        <li className={testResult?.kind === "ok" ? "setup-step complete" : allMatched ? "setup-step current" : "setup-step locked"}>
+          <span className="setup-step-number">2</span>
+          <div className="setup-step-content">
+            <div className="setup-step-heading"><div><h3>Test an address</h3><p>Confirm that a real address lands in the expected district polygon.</p></div>{testResult?.kind === "ok" && <em>✓ Passed</em>}</div>
+            <div className="setup-test-row">
+              <input type="search" value={testAddress} placeholder={`Address in ${muni.name}`} disabled={!allMatched || testBusy} onChange={(event) => setTestAddress(event.target.value)} />
+              <button type="button" className="secondary compact" disabled={!allMatched || !testAddress.trim() || testBusy} onClick={testBoundary}>{testBusy ? "Testing…" : "Test address"}</button>
+            </div>
+            {testResult && <p className={testResult.kind === "ok" ? "status-line save-ok" : "status-line error-text"}>{testResult.text}</p>}
+          </div>
+        </li>
+
+        <li className={allMatched ? "setup-step current" : "setup-step locked"}>
+          <span className="setup-step-number">3</span>
+          <div className="setup-step-content">
+            <div className="setup-step-heading"><div><h3>Publish municipality</h3><p>Replace this municipality’s zoning layer with the reviewed boundaries.</p></div></div>
+            <button
+              type="button"
+              className="primary"
+              disabled={!allMatched || publishBusy || hasUnfinishedBoundary}
+              onClick={publish}
+            >
+              {publishBusy ? "Publishing…" : "Publish municipality"}
+            </button>
+            {hasUnfinishedBoundary && (
+              <p className="status-line error-text">
+                Finish the polygon or undo its remaining points before publishing.
+              </p>
+            )}
+            {publishState && <p className={publishState.kind === "ok" ? "status-line save-ok" : "status-line error-text"}>{publishState.text}</p>}
+          </div>
+        </li>
+      </ol>
+      {pendingNavigation && (
+        <div className="unsaved-boundary-backdrop" role="presentation">
+          <section
+            className="unsaved-boundary-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="unsaved-boundary-title"
+          >
+            <h3 id="unsaved-boundary-title">Save boundary changes before leaving?</h3>
+            <p>
+              Your added or deleted zoning boundaries have not been published to the database yet.
+            </p>
+            {hasUnfinishedBoundary && (
+              <p className="status-line error-text">
+                One polygon is unfinished. Stay here to finish it before saving.
+              </p>
+            )}
+            <div className="unsaved-boundary-actions">
+              <button type="button" className="secondary" onClick={onCancelNavigation}>
+                Stay here
+              </button>
+              <button type="button" className="text-danger" onClick={onLeaveWithoutSaving}>
+                Leave without saving
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={publishBusy || !mappedFeatures.length || hasUnfinishedBoundary}
+                onClick={saveAndLeave}
+              >
+                {publishBusy ? "Saving…" : "Save & publish, then leave"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BoundaryDrawMap({
+  districts,
+  features = [],
+  municipalityLabel,
+  onFeature,
+  onRemoveFeature,
+  onDrawingChange,
+}) {
+  const containerRef = useRef(null);
+  const mapRef = useRef(null);
+  const lineRef = useRef(null);
+  const boundariesLayerRef = useRef(null);
+  const lastFittedViewRef = useRef("");
+  const searchHighlightRef = useRef(null);
+  const callbackRef = useRef(onFeature);
+  callbackRef.current = onFeature;
+  const [districtCode, setDistrictCode] = useState(districts[0]?.code ?? "");
+  const [points, setPoints] = useState([]);
+  const [searchText, setSearchText] = useState(municipalityLabel ?? "");
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchState, setSearchState] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+  const [showAllDistricts, setShowAllDistricts] = useState(false);
+  const [selectedBoundaryId, setSelectedBoundaryId] = useState(null);
+  const colorByCode = useMemo(
+    () =>
+      new Map(
+        districts.map((district, index) => [
+          String(district.code ?? "").trim().toUpperCase(),
+          BOUNDARY_COLORS[index % BOUNDARY_COLORS.length],
+        ])
+      ),
+    [districts]
+  );
+  const selectedFeatures = useMemo(() => {
+    const selected = String(districtCode ?? "").trim().toUpperCase();
+    return features.filter(
+      (feature) =>
+        String(feature?.properties?.district_code ?? "").trim().toUpperCase() === selected
+    );
+  }, [districtCode, features]);
+  const displayedFeatures = showAllDistricts ? features : selectedFeatures;
+  const selectedBoundary = features.find(
+    (feature) => String(feature.id) === String(selectedBoundaryId)
+  ) ?? null;
+  const districtCounts = useMemo(() => {
+    const counts = new Map();
+    for (const feature of features) {
+      const code = String(feature?.properties?.district_code ?? "").trim().toUpperCase();
+      if (code) counts.set(code, (counts.get(code) ?? 0) + 1);
+    }
+    return counts;
+  }, [features]);
+
+  useEffect(() => {
+    // Unfinished corners belong to the district that was selected when they
+    // were placed. Clear them on a switch so they cannot be saved under the
+    // newly selected district by accident.
+    setPoints([]);
+    setSelectedBoundaryId(null);
+  }, [districtCode]);
+
+  useEffect(() => {
+    onDrawingChange?.(points.length > 0);
+  }, [onDrawingChange, points.length]);
+
+  useEffect(() => {
+    if (
+      selectedBoundaryId != null &&
+      !features.some((feature) => String(feature.id) === String(selectedBoundaryId))
+    ) {
+      setSelectedBoundaryId(null);
+    }
+  }, [features, selectedBoundaryId]);
+
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return undefined;
+    const map = L.map(containerRef.current).setView([40.25, -74.55], 9);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors",
+      maxZoom: 20,
+    }).addTo(map);
+    map.on("click", (event) => {
+      setPoints((current) => [...current, [event.latlng.lng, event.latlng.lat]]);
+    });
+    mapRef.current = map;
+    const timer = window.setTimeout(() => map.invalidateSize(), 0);
+    return () => {
+      window.clearTimeout(timer);
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mapRef.current) return;
+    if (lineRef.current) lineRef.current.remove();
+    if (!points.length) {
+      lineRef.current = null;
+      return;
+    }
+    lineRef.current = L.polyline(points.map(([lng, lat]) => [lat, lng]), {
+      color: "#9a7617",
+      weight: 3,
+    }).addTo(mapRef.current);
+  }, [points]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    boundariesLayerRef.current?.remove();
+    boundariesLayerRef.current = null;
+    if (!displayedFeatures.length) return;
+
+    const layer = L.geoJSON(
+      { type: "FeatureCollection", features: displayedFeatures },
+      {
+        style: (feature) => {
+          const code = String(feature?.properties?.district_code ?? "").trim().toUpperCase();
+          const color = colorByCode.get(code) ?? BOUNDARY_COLORS[0];
+          const selected = String(feature?.id) === String(selectedBoundaryId);
+          return {
+            color,
+            weight: selected ? 6 : 3,
+            fillColor: color,
+            fillOpacity: selected ? 0.34 : 0.16,
+          };
+        },
+        onEachFeature: (feature, polygon) => {
+          const code = String(feature?.properties?.district_code ?? "").trim();
+          if (code) polygon.bindTooltip(`District ${code} · click to select`);
+          polygon.on("click", (event) => {
+            L.DomEvent.stopPropagation(event.originalEvent ?? event);
+            setSelectedBoundaryId(feature.id);
+          });
+        },
+      }
+    ).addTo(map);
+    boundariesLayerRef.current = layer;
+    const viewKey = `${showAllDistricts ? "all" : districtCode}:${displayedFeatures
+      .map((feature) => feature.id)
+      .join("|")}`;
+    if (lastFittedViewRef.current !== viewKey && layer.getBounds().isValid()) {
+      map.fitBounds(layer.getBounds(), { padding: [24, 24], maxZoom: 17 });
+      lastFittedViewRef.current = viewKey;
+    }
+  }, [colorByCode, displayedFeatures, districtCode, selectedBoundaryId, showAllDistricts]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") setExpanded(false);
+    };
+    if (expanded) {
+      document.body.style.overflow = "hidden";
+      window.addEventListener("keydown", onKeyDown);
+    }
+    const timer = window.setTimeout(() => mapRef.current?.invalidateSize(), 80);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [expanded]);
+
+  const finishPolygon = () => {
+    if (points.length < 3 || !districtCode) return;
+    const ring = [...points, points[0]];
+    callbackRef.current({
+      type: "Feature",
+      properties: { district_code: districtCode },
+      geometry: { type: "Polygon", coordinates: [ring] },
+    });
+    setPoints([]);
+  };
+
+  const searchTown = async (event) => {
+    event.preventDefault();
+    if (!searchText.trim() || !mapRef.current) return;
+    setSearchBusy(true);
+    setSearchState(null);
+    try {
+      const result = await searchMapLocation(searchText);
+      if (!result || !Number.isFinite(result.lat) || !Number.isFinite(result.lon)) {
+        setSearchState({ kind: "error", text: "No matching town or address was found." });
+        return;
+      }
+      if (searchHighlightRef.current) searchHighlightRef.current.remove();
+      const hasAreaBoundary =
+        result.geometry?.type === "Polygon" || result.geometry?.type === "MultiPolygon";
+      searchHighlightRef.current = hasAreaBoundary
+        ? L.geoJSON(result.geometry, {
+            style: {
+              color: "#d84a3a",
+              weight: 3,
+              dashArray: "7 5",
+              fillColor: "#d84a3a",
+              fillOpacity: 0.08,
+            },
+          }).addTo(mapRef.current)
+        : L.circleMarker([result.lat, result.lon], {
+            radius: 7,
+            color: "#2f6f4e",
+            fillColor: "#fff",
+            fillOpacity: 1,
+            weight: 3,
+          }).addTo(mapRef.current);
+      if (result.bounds?.length === 4 && result.bounds.every(Number.isFinite)) {
+        const [south, north, west, east] = result.bounds;
+        mapRef.current.fitBounds([[south, west], [north, east]], { padding: [24, 24], maxZoom: 17 });
+      } else {
+        mapRef.current.setView([result.lat, result.lon], 15);
+      }
+      setSearchState({
+        kind: "ok",
+        text: `${hasAreaBoundary ? "Boundary highlighted" : "Location marked"}: ${result.label}`,
+      });
+    } catch (error) {
+      setSearchState({ kind: "error", text: error.message ?? String(error) });
+    } finally {
+      setSearchBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className={expanded ? "boundary-draw-workspace expanded" : "boundary-draw-workspace"}
+      role={expanded ? "dialog" : undefined}
+      aria-modal={expanded ? "true" : undefined}
+      aria-label={expanded ? "Expanded zoning boundary drawing map" : undefined}
+    >
+      {expanded && (
+        <button
+          type="button"
+          className="boundary-expanded-close"
+          aria-label="Close expanded map"
+          title="Close expanded map"
+          onClick={() => setExpanded(false)}
+        >
+          ×
+        </button>
+      )}
+      <form className="boundary-search-row" onSubmit={searchTown}>
+        <label>
+          Search town or address
+          <input
+            type="search"
+            value={searchText}
+            placeholder="Town, ZIP code, or street address"
+            onChange={(event) => setSearchText(event.target.value)}
+          />
+        </label>
+        <button type="submit" className="secondary compact" disabled={searchBusy || searchText.trim().length < 2}>
+          {searchBusy ? "Searching…" : "Search map"}
+        </button>
+      </form>
+      {searchState && (
+        <p className={searchState.kind === "ok" ? "boundary-search-result" : "status-line error-text"}>
+          {searchState.text}
+        </p>
+      )}
+      <div className="boundary-draw-toolbar">
+        <label>
+          Draw for district
+          <select value={districtCode} onChange={(event) => setDistrictCode(event.target.value)}>
+            {districts.map((district) => <option value={district.code} key={district.id}>{district.code}</option>)}
+          </select>
+        </label>
+        <span>
+          Click the map to place corners · {points.length} points · {selectedFeatures.length} saved for {districtCode || "this district"} · {features.length} total
+        </span>
+        <button
+          type="button"
+          className={showAllDistricts ? "secondary compact active" : "secondary compact"}
+          onClick={() => {
+            setShowAllDistricts((value) => !value);
+            setSelectedBoundaryId(null);
+          }}
+        >
+          {showAllDistricts ? "View selected district" : "View all districts"}
+        </button>
+        <button type="button" className="secondary compact" disabled={!points.length} onClick={() => setPoints((current) => current.slice(0, -1))}>Undo point</button>
+        <button type="button" className="primary compact" disabled={points.length < 3 || !districtCode} onClick={finishPolygon}>Finish polygon</button>
+      </div>
+      {!showAllDistricts && districtCode && selectedFeatures.length === 0 && (
+        <p className="boundary-search-result">
+          No saved boundary for district {districtCode} yet. Draw and finish its first polygon below.
+        </p>
+      )}
+      {features.length > 0 && (
+        <div className="boundary-district-legend" aria-label="Registered zoning districts">
+          {districts.map((district) => {
+            const code = String(district.code ?? "").trim().toUpperCase();
+            const count = districtCounts.get(code) ?? 0;
+            return (
+              <button
+                type="button"
+                className={districtCode === district.code && !showAllDistricts ? "active" : ""}
+                onClick={() => {
+                  setDistrictCode(district.code);
+                  setShowAllDistricts(false);
+                }}
+                key={district.id}
+              >
+                <i style={{ background: colorByCode.get(code) }} aria-hidden="true" />
+                {district.code} · {count} boundar{count === 1 ? "y" : "ies"}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {selectedBoundary && (
+        <div className="boundary-selection" role="status">
+          <span>
+            Selected boundary · District <strong>{selectedBoundary.properties?.district_code}</strong>
+          </span>
+          <button
+            type="button"
+            className="text-danger compact"
+            onClick={() => {
+              onRemoveFeature?.(selectedBoundary.id);
+              setSelectedBoundaryId(null);
+            }}
+          >
+            Delete selected boundary
+          </button>
+        </div>
+      )}
+      <div className="boundary-map-shell">
+        <div className="boundary-draw-map" ref={containerRef} />
+        {!expanded && (
+          <button
+            type="button"
+            className="boundary-map-expand"
+            aria-label="Expand map"
+            title="Expand map"
+            onClick={() => setExpanded(true)}
+          >
+            ⛶
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /**
  * Landing view: where every configured town stands, and the shortest route to
  * whatever is still missing.
  */
-function AdminDashboard({ munis, zoningCounts, onOpen, onView }) {
+function AdminDashboard({ munis, zoningCounts, onOpen, onSetup, onView }) {
   const rows = munis.map((item) => ({
     muni: item,
     status: municipalityStatus(item, zoningCounts ? zoningCounts.get(item.id) ?? 0 : null),
@@ -1825,21 +2723,14 @@ function AdminDashboard({ munis, zoningCounts, onOpen, onView }) {
       ) : (
         <ul className="muni-list">
           {pending.map(({ muni: item, status }) => (
-            <li key={item.id}>
-              <button type="button" className="muni-card" onClick={() => onOpen(item.id)}>
-                <span className="muni-avatar" aria-hidden="true">{initialsFor(item.name)}</span>
-                <span className="muni-card-body">
-                  <span className="muni-card-title">
-                    <strong>{item.name}, {item.state_code}</strong>
-                    <em className={`muni-status ${status.key}`}>{status.label}</em>
-                  </span>
-                  <span className="muni-card-meta">
-                    Updated {formatUpdated(item.last_updated)}
-                  </span>
-                </span>
-                <span className="muni-card-chevron" aria-hidden="true">›</span>
-              </button>
-            </li>
+            <MunicipalityCard
+              key={item.id}
+              item={item}
+              status={status}
+              onOpen={onOpen}
+              onSetup={onSetup}
+              compact
+            />
           ))}
         </ul>
       )}
@@ -1854,17 +2745,12 @@ function AdminDashboard({ munis, zoningCounts, onOpen, onView }) {
           <strong>Save draft</strong> keeps changes in this browser only. Nothing reaches the live
           database used by the public calculator until you <strong>Publish configuration</strong>.
         </p>
-        <p>
-          After publishing, run <code>scripts/export_town.py</code> and commit the diff — the
-          config file stays the source of truth, and the next town load would otherwise revert
-          what you changed here.
-        </p>
       </div>
     </div>
   );
 }
 
-function Num({ label, value, onChange, step = "1", imported = false }) {
+function Num({ label, value, onChange, step = "1", imported = false, hint = null }) {
   return (
     <label className={imported ? "pdf-imported" : undefined}>
       {label}
@@ -1875,6 +2761,7 @@ function Num({ label, value, onChange, step = "1", imported = false }) {
         value={value}
         onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
       />
+      {hint && <small>{hint}</small>}
     </label>
   );
 }

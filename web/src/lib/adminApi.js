@@ -53,6 +53,33 @@ function assertWritten(rows, what) {
   }
 }
 
+/**
+ * Every zoning district owns its rule values. Keep the complete blank shape in
+ * the insert payload instead of relying on database defaults, so a district
+ * created after another one can never appear to inherit that district's
+ * setbacks, build limits, permitted uses, notes, or ADU configuration.
+ */
+function blankDistrictFields() {
+  return {
+    permitted_uses: [],
+    notes: null,
+    min_lot_area_sqft: null,
+    min_lot_width_ft: null,
+    min_lot_depth_ft: null,
+    front_yard_min_ft: null,
+    front_yard_prevailing_rule: false,
+    side_yard_one_min_ft: null,
+    side_yard_total_min_ft: null,
+    rear_yard_min_ft: null,
+    max_height_ft: null,
+    max_stories: null,
+    max_building_coverage_pct: null,
+    max_impervious_coverage_pct: null,
+    max_far: null,
+    extra_rules: {},
+  };
+}
+
 export async function saveDistrict(districtId, fields) {
   const { data, error } = await supabase
     .from("zoning_districts")
@@ -77,8 +104,9 @@ export async function touchMunicipality(municipalityId) {
 /**
  * Save the cost model + its three tiers. The DB provenance_fields CHECK
  * requires baseline/factor to be set for estimated models and NULL for
- * verified ones. Each tier row carries {rate_per_sqft, rate_per_sqft_max,
- * notes, formula_reference}; max/notes are NULL for estimated tiers.
+ * legacy verified ones. Each tier row carries {rate_per_sqft,
+ * rate_per_sqft_max, notes, formula_reference}; projected tiers may use a
+ * min–max range and client-facing notes.
  */
 export async function saveCostModel(municipalityId, existingModelId, model, tierRows) {
   let modelId = existingModelId;
@@ -141,7 +169,7 @@ export async function createMunicipality({ name, stateCode, county, slug, distri
       municipality_id: municipalityId,
       code: districtCode,
       name: districtName || null,
-      extra_rules: {},
+      ...blankDistrictFields(),
     })
     .select("id");
   if (districtError) throw districtError;
@@ -188,6 +216,25 @@ export async function zoningAreaCounts() {
   return counts;
 }
 
+/** Replace one municipality's zoning polygons after the setup wizard has
+ * validated their codes. Geometry arrives as WGS84 GeoJSON and is transformed
+ * to the database's NJ State Plane storage projection by the RPC. */
+export async function publishZoningLayer(
+  municipalityId,
+  features,
+  { sourceUrl, sourceDate = null, srid = 4326 } = {}
+) {
+  const { data, error } = await supabase.rpc("admin_publish_zoning_layer", {
+    p_municipality_id: municipalityId,
+    p_features: features,
+    p_source_url: sourceUrl || "Admin zoning setup",
+    p_source_date: sourceDate,
+    p_srid: srid,
+  });
+  if (error) throw error;
+  return Number(data ?? 0);
+}
+
 /**
  * Delete a municipality and everything hanging off it.
  *
@@ -230,7 +277,12 @@ export async function deleteDistrict(districtId) {
 export async function createDistrict(municipalityId, code, name) {
   const { data, error } = await supabase
     .from("zoning_districts")
-    .insert({ municipality_id: municipalityId, code, name: name || null, extra_rules: {} })
+    .insert({
+      municipality_id: municipalityId,
+      code,
+      name: name || null,
+      ...blankDistrictFields(),
+    })
     .select("id");
   if (error) throw error;
   assertWritten(data, "district");

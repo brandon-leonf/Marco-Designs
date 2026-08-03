@@ -30,9 +30,15 @@ const DISTRICT_COLORS = {
   "R-1": "#f7ef9e",
   "R-2": "#efd97a",
 };
-const FALLBACK_COLOR = "#9e9e9e";
+const FALLBACK_COLORS = ["#2f6f4e", "#b45f36", "#4f67a8", "#9a5a9e", "#a07b16", "#287d89", "#8b4b55"];
 const normalizeCode = (code) => String(code ?? "").trim().toUpperCase();
-const districtColor = (code) => DISTRICT_COLORS[normalizeCode(code)] ?? FALLBACK_COLOR;
+const districtColor = (code) => {
+  const normalized = normalizeCode(code);
+  if (DISTRICT_COLORS[normalized]) return DISTRICT_COLORS[normalized];
+  let hash = 0;
+  for (const character of normalized) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
+};
 
 // Matches the calculation guard in lib/envelope.js. Merely creating a
 // district row makes it visible, but does not imply that enough rules have
@@ -60,6 +66,7 @@ export default function ZoningMap({
   muniSlug,
   muniName,
   districts = [],
+  selectedDistrictCode = null,
   parcelGeojson,
   parcelLabel,
   // A lon/lat point for a property we could locate but have no parcel polygon
@@ -202,9 +209,10 @@ export default function ZoningMap({
           return {
             color: districtColor(code),
             weight: overlay ? 2 : 1,
+            opacity: parcelGeojson ? 0 : 1,
             // Overlays sit on top of a base district, so they are outlined
             // rather than filled — the district underneath stays readable.
-            fillOpacity: overlay ? 0.05 : 0.45,
+            fillOpacity: parcelGeojson ? 0 : overlay ? 0.05 : 0.45,
             dashArray: overlay ? "5 4" : undefined,
           };
         },
@@ -234,7 +242,7 @@ export default function ZoningMap({
     zoningLayerRef.current = layer;
     muniBoundsRef.current = layer.getBounds();
     if (!parcelGeojson && !focusPoint) map.fitBounds(layer.getBounds(), { padding: [12, 12] });
-  }, [zoning, districts]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [zoning, districts, parcelGeojson]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Zoom to the chosen property — its parcel polygon when one exists, otherwise
   // the geocoded point — and fall back to the whole town when cleared.
@@ -249,11 +257,20 @@ export default function ZoningMap({
 
     // An out-of-coverage property is outlined in the same red as its flag, so
     // the map and the warning under it read as one statement.
-    const outlineColor = unverified ? "#b3261e" : "#2b2b2b";
+    const outlineColor = unverified
+      ? "#b3261e"
+      : selectedDistrictCode
+        ? districtColor(selectedDistrictCode)
+        : "#2b2b2b";
 
     if (parcelGeojson) {
       const layer = L.geoJSON(parcelGeojson, {
-        style: { color: outlineColor, weight: 2.5, fillColor: "#ffffff", fillOpacity: 0.55 },
+        style: {
+          color: outlineColor,
+          weight: 3,
+          fillColor: outlineColor,
+          fillOpacity: unverified ? 0.12 : 0.36,
+        },
       }).addTo(map);
       parcelLayerRef.current = layer;
       map.fitBounds(layer.getBounds(), { padding: [40, 40], maxZoom: 19 });
@@ -283,7 +300,7 @@ export default function ZoningMap({
 
     setZoomedToParcel(false);
     if (muniBoundsRef.current) map.fitBounds(muniBoundsRef.current, { padding: [12, 12] });
-  }, [parcelGeojson, focusPoint, unverified]);
+  }, [parcelGeojson, focusPoint, selectedDistrictCode, unverified]);
 
   // The detected building footprint, drawn over the parcel. Hatched rather
   // than solid: it is a published outline, not a surveyed one, and should not
