@@ -19,7 +19,7 @@ import {
   checkIsAdmin,
   saveDistrict,
   replaceZoningRules,
-  saveMunicipalityMeta,
+  touchMunicipality,
   saveCostModel,
   createState,
   createMunicipality,
@@ -34,14 +34,7 @@ import {
 import Logo from "./components/Logo.jsx";
 import { computeBuildable, missingDistrictRules } from "./lib/envelope.js";
 import {
-  BASELINE_RULE_SOURCE,
   RULE_APPLIES_TO,
-  RULE_CATEGORIES,
-  RULE_COMBINE_METHODS,
-  RULE_OPERATORS,
-  RULE_SIDES,
-  RULE_TYPES,
-  RULE_UNITS,
   applyZoningRules,
   normalizeZoningRule,
   synchronizeBaselineRules,
@@ -482,9 +475,11 @@ function MunicipalityCard({
 // The rule groups, as tabs. Setbacks opens first because it is the section a
 // district cannot be calculated without; Pricing is here rather than in its own
 // nav section because it is edited in the same draft-and-publish cycle.
+// No "Rule logic" tab. Normalized rules are still what the calculator reads,
+// but they are derived from the Setbacks & limits numbers on publish rather
+// than hand-authored — see `synchronizedRules`.
 const RULE_TABS = [
   { id: "setbacks", label: "Setbacks & limits" },
-  { id: "logic", label: "Rule logic" },
   { id: "adu", label: "ADU" },
   { id: "pricing", label: "Pricing" },
   { id: "import", label: "Import PDF" },
@@ -888,182 +883,6 @@ const enumLabel = (value) =>
     .replaceAll("_", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 
-function StructuredRuleEditor({ rule, onChange, onRemove, disabled }) {
-  const baseline = rule.sourceSection === BASELINE_RULE_SOURCE;
-  const conditional = ["CONDITIONAL", "PIECEWISE"].includes(rule.ruleType);
-  const issues = validateZoningRule(rule);
-  const notes = zoningRuleNotes(rule);
-  const patch = (changes) => onChange({ ...rule, ...changes });
-  const patchCalculation = (changes) =>
-    patch({ calculation: { ...rule.calculation, ...changes } });
-  const patchCondition = (changes) =>
-    patch({
-      condition: {
-        metric: "GROSS_BUILDING_AREA",
-        operator: ">",
-        value: 0,
-        secondValue: null,
-        ...(rule.condition ?? {}),
-        ...changes,
-      },
-    });
-
-  return (
-    <article className={baseline ? "structured-rule baseline" : "structured-rule"}>
-      <div className="structured-rule-head">
-        <div>
-          <strong>{enumLabel(rule.category)}{rule.side ? ` · ${enumLabel(rule.side)}` : ""}</strong>
-          <span>{baseline ? "Synced from Setbacks & limits" : `Rule ${rule.id.slice(0, 8)}`}</span>
-        </div>
-        {!baseline && (
-          <button type="button" className="text-danger compact" onClick={onRemove} disabled={disabled}>
-            Delete rule
-          </button>
-        )}
-      </div>
-      <fieldset disabled={disabled || baseline}>
-        <div className="structured-rule-grid">
-          <label>
-            Category
-            <select
-              value={rule.category}
-              onChange={(event) => {
-                const category = event.target.value;
-                patch({ category, side: category === "SETBACK" ? rule.side ?? "FRONT" : null });
-              }}
-            >
-              {RULE_CATEGORIES.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
-            </select>
-          </label>
-          <label>
-            Applies to
-            <select value={rule.appliesTo} onChange={(event) => patch({ appliesTo: event.target.value })}>
-              {RULE_APPLIES_TO.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
-            </select>
-          </label>
-          {rule.category === "SETBACK" && (
-            <label>
-              Side
-              <select value={rule.side ?? "FRONT"} onChange={(event) => patch({ side: event.target.value })}>
-                {RULE_SIDES.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
-              </select>
-            </label>
-          )}
-          <label>
-            Rule type
-            <select
-              value={rule.ruleType}
-              onChange={(event) => {
-                const ruleType = event.target.value;
-                patch({
-                  ruleType,
-                  condition: ["CONDITIONAL", "PIECEWISE"].includes(ruleType)
-                    ? rule.condition ?? { metric: "GROSS_BUILDING_AREA", operator: ">", value: 0, secondValue: null }
-                    : null,
-                });
-              }}
-            >
-              {RULE_TYPES.map((value) => <option key={value} value={value}>{enumLabel(value)}</option>)}
-            </select>
-          </label>
-          <label>
-            Value
-            <input
-              type="number"
-              step="any"
-              value={rule.calculation.value ?? ""}
-              onChange={(event) => patchCalculation({ value: event.target.value })}
-              placeholder="e.g. 25"
-            />
-          </label>
-          <label>
-            Formula
-            <input
-              type="text"
-              value={rule.calculation.formula ?? ""}
-              onChange={(event) => patchCalculation({ formula: event.target.value })}
-              placeholder="grossBuildingArea * 0.008"
-            />
-          </label>
-          <label>
-            Unit
-            <select value={rule.calculation.unit} onChange={(event) => patchCalculation({ unit: event.target.value })}>
-              {RULE_UNITS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-          </label>
-          <label>
-            Combine method
-            <select value={rule.combineMethod} onChange={(event) => patch({ combineMethod: event.target.value })}>
-              {RULE_COMBINE_METHODS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-          </label>
-          <label>
-            Priority
-            <input type="number" step="1" value={rule.priority} onChange={(event) => patch({ priority: Number(event.target.value) })} />
-          </label>
-        </div>
-
-        {conditional && (
-          <div className="structured-condition">
-            <strong>Condition</strong>
-            <div className="structured-rule-grid">
-              <label>
-                Metric
-                <input type="text" value={rule.condition?.metric ?? ""} onChange={(event) => patchCondition({ metric: event.target.value })} placeholder="GROSS_BUILDING_AREA" />
-              </label>
-              <label>
-                Operator
-                <select value={rule.condition?.operator ?? ">"} onChange={(event) => patchCondition({ operator: event.target.value })}>
-                  {RULE_OPERATORS.map((value) => <option key={value} value={value}>{value}</option>)}
-                </select>
-              </label>
-              <label>
-                Value
-                <input type="number" step="any" value={rule.condition?.value ?? ""} onChange={(event) => patchCondition({ value: event.target.value })} />
-              </label>
-              {rule.condition?.operator === "BETWEEN" && (
-                <label>
-                  Second value
-                  <input type="number" step="any" value={rule.condition?.secondValue ?? ""} onChange={(event) => patchCondition({ secondValue: event.target.value })} />
-                </label>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="structured-rule-grid provenance">
-          <label>
-            Source section
-            <input type="text" value={rule.sourceSection} onChange={(event) => patch({ sourceSection: event.target.value })} />
-          </label>
-          <label>
-            Source URL
-            <input type="url" value={rule.sourceUrl} onChange={(event) => patch({ sourceUrl: event.target.value })} placeholder="https://…" />
-          </label>
-          <label>
-            Effective date
-            <input type="date" value={rule.effectiveDate} onChange={(event) => patch({ effectiveDate: event.target.value })} />
-          </label>
-          <label>
-            Expiration date
-            <input type="date" value={rule.expirationDate} onChange={(event) => patch({ expirationDate: event.target.value })} />
-          </label>
-        </div>
-      </fieldset>
-      {notes.length > 0 && (
-        <ul className="structured-rule-notes">
-          {notes.map((note) => <li key={note}>{note}</li>)}
-        </ul>
-      )}
-      {issues.length > 0 && (
-        <ul className="structured-rule-issues">
-          {issues.map((issue) => <li key={issue}>{issue}</li>)}
-        </ul>
-      )}
-    </article>
-  );
-}
-
 function ConfigEditor({ adminEmail, ready }) {
   const [munis, setMunis] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -1081,13 +900,8 @@ function ConfigEditor({ adminEmail, ready }) {
   const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, sourceUrl, lastUpdated}
   // Same identifying fields as the create form, reopened against a town that
   // already exists. Its slug rides along read-only so the form can say which
-  // config id the edits are landing on. Provenance is `muniMeta` below, which
-  // saves on its own button rather than with the name.
+  // config id the edits are landing on.
   const [editMuni, setEditMuni] = useState(null); // null | {id, name, state, county, slug}
-  // Town-level provenance, edited in place on the districts panel. Held apart
-  // from the district draft because it saves on its own button, not on Publish.
-  const [muniMeta, setMuniMeta] = useState(null); // null | {sourceUrl, lastUpdated}
-  const [metaSaving, setMetaSaving] = useState(false);
   const [newDistrict, setNewDistrict] = useState(null); // null | {code, name}
   const [editDist, setEditDist] = useState(null); // null | {id, code, name}
   // Destructive actions confirm by typing the name back, and state their
@@ -1095,7 +909,6 @@ function ConfigEditor({ adminEmail, ready }) {
   const [deleteMuni, setDeleteMuni] = useState(null); // null | {id, name, typed, impact|null}
   const [deleteDist, setDeleteDist] = useState(null); // null | {id, code, typed}
   const [draftInfo, setDraftInfo] = useState(null); // {savedAt} when an unpublished local draft is loaded
-  const [validation, setValidation] = useState(null); // {issues: [], ok: []}
   const [testLot, setTestLot] = useState({
     width: 25,
     depth: 102,
@@ -1326,36 +1139,6 @@ function ConfigEditor({ adminEmail, ready }) {
 
   const muni = munis?.find((m) => m.id === muniId) ?? null;
 
-  // Reset the provenance form whenever the town changes or is reloaded, so it
-  // always shows what is actually stored rather than a stale edit.
-  useEffect(() => {
-    setMuniMeta(
-      muni
-        ? { sourceUrl: muni.source_url ?? "", lastUpdated: muni.last_updated ?? "" }
-        : null
-    );
-  }, [muni?.id, muni?.source_url, muni?.last_updated]);
-
-  const metaDirty =
-    muniMeta != null &&
-    muni != null &&
-    (muniMeta.sourceUrl !== (muni.source_url ?? "") ||
-      muniMeta.lastUpdated !== (muni.last_updated ?? ""));
-
-  const saveMeta = async () => {
-    if (!muni || !muniMeta) return;
-    setMetaSaving(true);
-    setSaveState(null);
-    try {
-      await saveMunicipalityMeta(muni.id, muniMeta);
-      await reload();
-      setSaveState({ kind: "ok", text: "Municipality details saved." });
-    } catch (err) {
-      setSaveState({ kind: "error", text: err.message ?? String(err) });
-    } finally {
-      setMetaSaving(false);
-    }
-  };
   const district = muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
   const stateName = stateNameFor(stateCode);
 
@@ -1448,7 +1231,6 @@ function ConfigEditor({ adminEmail, ready }) {
       setDraftInfo(null);
     }
     setSaveState(null);
-    setValidation(null);
     setTestResult(null);
     setPdfImport(null);
     setPdfProgress("");
@@ -1612,8 +1394,6 @@ function ConfigEditor({ adminEmail, ready }) {
     return { issues, notes, ok };
   };
 
-  const runValidation = () => setValidation(collectValidation());
-
   /** District-shaped object from the DRAFT values, exactly as publish would store them. */
   const districtFromDraft = () => applyZoningRules(
     {
@@ -1701,10 +1481,18 @@ function ConfigEditor({ adminEmail, ready }) {
 
   const save = async () => {
     if (!district || !draft) return;
+    // The Validate button is gone, but the check it ran still guards publishing —
+    // it is what stops an unsatisfiable side-yard pair or a coverage over 100%
+    // from reaching the live calculator. With no panel to point at, the issues
+    // are named in the status line itself.
     const check = collectValidation();
-    setValidation(check);
     if (check.issues.length > 0) {
-      setSaveState({ kind: "error", text: "Fix the validation issues below before publishing." });
+      setSaveState({
+        kind: "error",
+        text: `Cannot publish — ${check.issues.length} issue${
+          check.issues.length > 1 ? "s" : ""
+        } to fix: ${check.issues.join(" ")}`,
+      });
       return;
     }
     setSaving(true);
@@ -1766,7 +1554,12 @@ function ConfigEditor({ adminEmail, ready }) {
         );
       }
 
-      // `last_updated` is not touched here on purpose — see saveMunicipalityMeta.
+      // Publishing is a claim that these are the rules that were checked, so
+      // the town's "Updated" date moves with it. "Zoning last verified" writes
+      // the same column, so a back-dated verification has to be entered after
+      // publishing rather than before.
+      await touchMunicipality(muni.id);
+
       localStorage.removeItem(draftKey(district.id));
       setDraftInfo(null);
       await reload();
@@ -2080,7 +1873,6 @@ function ConfigEditor({ adminEmail, ready }) {
     }));
     setPdfImportedKeys(selectedFields.map((field) => field.key));
     setPdfImport(null);
-    setValidation(null);
     setTestResult(null);
     setSaveState({
       kind: "ok",
@@ -2105,33 +1897,6 @@ function ConfigEditor({ adminEmail, ready }) {
     setDraft((d) => ({ ...d, [key]: value }));
     setPdfImportedKeys((keys) => keys.filter((item) => item !== key));
   };
-  const addStructuredRule = () => {
-    setRuleDraft((rules) => [
-      ...rules,
-      normalizeZoningRule({
-        municipalityId: muni.id,
-        districtId: district.id,
-        category: "SETBACK",
-        appliesTo: "PRINCIPAL_BUILDING",
-        side: "EACH_SIDE",
-        ruleType: "CONDITIONAL",
-        condition: {
-          metric: "GROSS_BUILDING_AREA",
-          operator: ">",
-          value: 0,
-        },
-        calculation: { value: null, formula: "", unit: "FT" },
-        combineMethod: "MAX",
-        priority: 200,
-        sourceSection: "",
-        sourceUrl: muni.source_url ?? "",
-      }),
-    ]);
-  };
-  const updateStructuredRule = (id, next) =>
-    setRuleDraft((rules) => rules.map((rule) => (rule.id === id ? next : rule)));
-  const removeStructuredRule = (id) =>
-    setRuleDraft((rules) => rules.filter((rule) => rule.id !== id));
   const setTierField = (name, key) => (value) =>
     setCostDraft((d) => ({
       ...d,
@@ -2468,60 +2233,6 @@ function ConfigEditor({ adminEmail, ready }) {
             </div>
           </div>
         {muniForms}
-        {muniMeta && (
-          <fieldset className="admin-section" disabled={!ready}>
-            <legend>
-              <span className="admin-section-icon" aria-hidden="true">ⓘ</span> Municipality details
-            </legend>
-            <p className="admin-hint">
-              Where these rules came from. The public app labels every number by provenance, so a
-              town with no source is a town whose figures cannot be traced back to an ordinance.
-            </p>
-            <label>
-              Ordinance source URL
-              <input
-                type="url"
-                value={muniMeta.sourceUrl}
-                placeholder="https://… (link to the zoning ordinance)"
-                onChange={(e) => setMuniMeta({ ...muniMeta, sourceUrl: e.target.value })}
-              />
-            </label>
-            <label>
-              Zoning last verified
-              <input
-                type="date"
-                value={muniMeta.lastUpdated}
-                onChange={(e) => setMuniMeta({ ...muniMeta, lastUpdated: e.target.value })}
-              />
-            </label>
-            <p className="admin-side-note">
-              This date is when someone last checked these rules against the ordinance — set it by
-              hand. Publishing a rule change does not move it.
-            </p>
-            {/* The editor's shared status line lives in the rules view, which is
-                not rendered here — this panel reports its own result. */}
-            {saveState && (
-              <p
-                className={
-                  saveState.kind === "ok" ? "status-line save-ok" : "status-line error-text"
-                }
-                role="status"
-              >
-                {saveState.text}
-              </p>
-            )}
-            <div className="inline-create-actions">
-              <button
-                type="button"
-                className="primary compact"
-                disabled={!metaDirty || metaSaving}
-                onClick={saveMeta}
-              >
-                {metaSaving ? "Saving…" : "Save details"}
-              </button>
-            </div>
-          </fieldset>
-        )}
         <input
           type="search"
           placeholder="Filter districts…"
@@ -2713,17 +2424,6 @@ function ConfigEditor({ adminEmail, ready }) {
               {district?.code} — {draft.name.trim() || "Unnamed district"}
             </p>
           </div>
-          <span className="admin-updated">
-            Zoning verified: {muni?.last_updated ?? "not recorded"}
-            {muni?.source_url && (
-              <>
-                {" · "}
-                <a href={muni.source_url} target="_blank" rel="noreferrer">
-                  source
-                </a>
-              </>
-            )}
-          </span>
           {draftInfo && (
             <span className="draft-badge" title={`Draft saved ${draftInfo.savedAt}`}>
               ● Unpublished draft
@@ -2904,41 +2604,6 @@ function ConfigEditor({ adminEmail, ready }) {
         </>
         )}
 
-        {ruleTab === "logic" && (
-        <fieldset className="admin-section structured-rules-section" disabled={!ready || saving}>
-          <legend>
-            <span className="admin-section-icon" aria-hidden="true">ƒ</span> Structured zoning rules
-          </legend>
-          <div className="structured-rules-intro">
-            <div>
-              <p>
-                Base setbacks and limits are synchronized from the first tab. Add conditional,
-                formula, piecewise, or structure-specific rules here; the calculator combines all
-                applicable results by priority and combine method.
-              </p>
-              <small>
-                Formula example: <code>grossBuildingArea * 0.008</code>. Supported metrics include
-                GROSS_BUILDING_AREA, LOT_AREA, LOT_WIDTH, LOT_DEPTH, BUILDING_HEIGHT, and STORIES.
-              </small>
-            </div>
-            <button type="button" className="secondary compact" onClick={addStructuredRule}>
-              ＋ Add zoning rule
-            </button>
-          </div>
-          <div className="structured-rule-list">
-            {synchronizedRules.map((rule) => (
-              <StructuredRuleEditor
-                key={rule.id}
-                rule={rule}
-                disabled={!ready || saving}
-                onChange={(next) => updateStructuredRule(rule.id, next)}
-                onRemove={() => removeStructuredRule(rule.id)}
-              />
-            ))}
-          </div>
-        </fieldset>
-        )}
-
         {ruleTab === "adu" && (
         <>
         <fieldset className="admin-section" disabled={!ready || saving}>
@@ -3094,31 +2759,6 @@ function ConfigEditor({ adminEmail, ready }) {
         </>
         )}
 
-        {validation && (
-          <div
-            className={validation.issues.length ? "validate-panel bad" : "validate-panel good"}
-            role={validation.issues.length ? "alert" : "status"}
-          >
-            <strong>
-              {validation.issues.length
-                ? `✕ ${validation.issues.length} issue${validation.issues.length > 1 ? "s" : ""} must be fixed before publishing`
-                : "✓ Configuration passes validation"}
-            </strong>
-            <ul>
-              {validation.issues.map((text) => (
-                <li className="validate-bad" key={text}>✕ {text}</li>
-              ))}
-              {/* Reported, not enforced — these never hold up a publish. */}
-              {(validation.notes ?? []).map((text) => (
-                <li className="validate-note" key={text}>• {text}</li>
-              ))}
-              {validation.ok.map((text) => (
-                <li key={text}>✓ {text}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
         {saveState && (
           <p className={saveState.kind === "ok" ? "status-line save-ok" : "status-line error-text"} role="status">
             {saveState.text}
@@ -3143,8 +2783,7 @@ function ConfigEditor({ adminEmail, ready }) {
               );
               setCostDraft(draftFromCostModel(costModel));
               setSaveState(null);
-              setValidation(null);
-              setTestResult(null);
+                        setTestResult(null);
               setPdfImportedKeys([]);
             }}
           >
@@ -3152,9 +2791,6 @@ function ConfigEditor({ adminEmail, ready }) {
           </button>
           <button type="button" className="secondary" disabled={saving || !ready} onClick={saveDraftLocal}>
             Save draft
-          </button>
-          <button type="button" className="secondary" disabled={saving || !ready} onClick={runValidation}>
-            Validate
           </button>
           <button type="button" className="secondary" disabled={saving || !ready} onClick={previewCalculation}>
             Preview calculation
@@ -3457,7 +3093,10 @@ function ZoningLayerSetup({
 
   return (
     <div className="card admin-setup-page">
-      <div className="admin-panel-head">
+      {/* `admin-editor-head`, not `admin-panel-head`: this is a tab of the
+          District Rules screen, and the panel head sizes its h2 differently,
+          so the heading changed size and position when the tab changed. */}
+      <div className="admin-editor-head">
         <div>
           <AdminCrumbs
             items={[
@@ -3470,7 +3109,6 @@ function ZoningLayerSetup({
           <h2>District Rules</h2>
           <p>{district ? `${district.code} — ${district.name ?? "District"}` : "Choose a district to edit its rules."}</p>
         </div>
-        <span className="admin-updated">Last updated: {muni.last_updated ?? "—"}</span>
       </div>
 
       <RuleTabBar activeTab="zoning-setup" onSelect={onSelectRuleTab} />

@@ -1271,20 +1271,6 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 }
 .capacity-figures > div.invalid strong,
 .remaining-buildable-area.invalid strong { color: #8c1d18; }
-.lot-dimension-status {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.55rem 1rem;
-  margin: -0.65rem 0 1.5rem;
-  padding: 0.75rem 0.9rem;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-}
-.lot-dimension-status > div { display: flex; align-items: baseline; gap: 0.4rem; }
-.lot-dimension-status span { color: var(--muted); font-size: 0.69rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }
-.lot-dimension-status strong { color: var(--nav); font-size: 0.85rem; }
-.lot-dimension-status small { grid-column: 1 / -1; color: var(--muted); font-size: 0.63rem; line-height: 1.4; }
 .lot-dimensions-unavailable {
   display: grid;
   place-content: center;
@@ -1907,7 +1893,10 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .admin-dashboard h3 { margin: 0.2rem 0 0; font-size: 1rem; }
 
 /* ---------- Admin: zoning layer setup ---------- */
-.admin-setup-page { display: grid; gap: 1rem; padding: 1.25rem; }
+/* Padding matches .admin-editor exactly. Zoning setup is a tab of the same
+   District Rules screen, so its heading and crumbs have to land on the same
+   pixel — 1.25rem here shifted the whole header when the tab changed. */
+.admin-setup-page { display: grid; gap: 1rem; padding: 1.3rem 1.5rem; }
 .admin-setup-page > .rule-tabs { margin-bottom: 0; }
 .zoning-setup-title { display: grid; gap: 0.15rem; }
 .zoning-setup-title h3 { margin: 0; font-size: 1.15rem; }
@@ -2254,15 +2243,6 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .admin-editor-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .admin-editor-head h2 { margin: 0 0 0.2rem; }
 .admin-editor-head p { margin: 0; color: var(--muted); }
-.admin-updated {
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.35rem 0.7rem;
-  font-size: 0.78rem;
-  color: var(--muted);
-  font-weight: 700;
-}
 .admin-section {
   border: 1px solid var(--line);
   border-radius: 12px;
