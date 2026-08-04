@@ -283,11 +283,25 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
   let body = await query(pointQuery, signal);
   let features = body.features ?? [];
 
+  // A polygon that names no property cannot confirm one. NJGIN's composite
+  // layer carries shapes with no MOD-IV record joined behind them — condominium
+  // sub-lots and unjoined fragments that sit over the real tax parcel — and
+  // they are indistinguishable from a lot until the attributes are read. The
+  // point for 511 8th St, Union City lands in one: a 1,448 sq ft sliver with no
+  // address, class or LAND_DESC. With no recorded frontage to read, the lot
+  // dimensions get measured off that fragment (58 x 25 ft rather than the
+  // lot's 24 x 100), and a 25 ft depth cannot hold the 7 ft front and 20 ft
+  // rear setbacks — so the property was reported as unbuildable without a
+  // variance on the strength of a shape that was never its boundary.
+  const identifies = (feature) => Boolean(feature?.properties?.PROP_LOC);
+  const unidentified = features.length > 0 && !features.some(identifies);
+
   // Census address coordinates are interpolated along the street centerline.
-  // When that point falls in the right-of-way instead of inside a tax parcel,
-  // retain point-in-polygon as the first attempt, then make one tightly bounded
-  // proximity query and rank those parcels by the matched street address.
-  if (features.length === 0) {
+  // When that point falls in the right-of-way instead of inside a tax parcel —
+  // or inside a parcel that identifies nothing — retain point-in-polygon as the
+  // first attempt, then make one tightly bounded proximity query and rank those
+  // parcels by the matched street address.
+  if (features.length === 0 || unidentified) {
     body = await query(
       {
         ...pointQuery,
@@ -297,18 +311,25 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
       },
       signal
     );
-    features = (body.features ?? []).sort(
+    let ranked = (body.features ?? []).sort(
       (a, b) =>
         addressMatchScore(b?.properties?.PROP_LOC, addressText) -
           addressMatchScore(a?.properties?.PROP_LOC, addressText) ||
         turf.area(a) - turf.area(b)
     );
-    const bestScore = addressMatchScore(features[0]?.properties?.PROP_LOC, addressText);
+    const bestScore = addressMatchScore(ranked[0]?.properties?.PROP_LOC, addressText);
     if (bestScore >= 10) {
-      features = features.filter(
+      // The house number matched: this is the addressed lot, not a neighbour.
+      features = ranked.filter(
         (feature) => addressMatchScore(feature?.properties?.PROP_LOC, addressText) === bestScore
       );
+    } else if (features.length === 0) {
+      features = ranked;
     }
+    // Otherwise the containing polygon stands. A weak match on a neighbouring
+    // lot is not a better answer than the shape the point actually fell in —
+    // that applies to map clicks in particular, which carry no address to
+    // match on.
   } else {
     features = features.sort((a, b) => turf.area(a) - turf.area(b));
   }
