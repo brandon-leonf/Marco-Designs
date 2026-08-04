@@ -113,21 +113,21 @@ export async function replaceZoningRules(municipalityId, districtId, rules) {
 }
 
 /**
- * Town-level provenance: where the rules were transcribed from and when they
- * were last checked against it.
+ * Stamp `last_updated` with today, on publish.
  *
- * `last_updated` is deliberately NOT stamped on publish. It means "when the
- * zoning data was last verified" (migration 0002), not "when someone last
- * touched a field" — auto-stamping it would turn a provenance claim into a
- * record of typing. It is entered by hand alongside the source URL.
+ * Publishing is a claim that the rules now on file are the ones that were
+ * checked, so the date moves with it and the town list stops reporting a
+ * currency that a publish has already overtaken.
  *
- * This replaces the old `touchMunicipality`, which stamped today's date on
- * every publish — the behavior the comment above argues against.
+ * This is now the only writer of the column. `source_url` is set when the town
+ * is created and has no editor after that — there was one, and it was removed
+ * along with the panel it lived in.
  */
-export async function saveMunicipalityMeta(municipalityId, { sourceUrl, lastUpdated }) {
+export async function touchMunicipality(municipalityId) {
+  const today = new Date().toISOString().slice(0, 10);
   const { data, error } = await supabase
     .from("municipalities")
-    .update({ source_url: sourceUrl || null, last_updated: lastUpdated || null })
+    .update({ last_updated: today })
     .eq("id", municipalityId)
     .select("id");
   if (error) throw error;
