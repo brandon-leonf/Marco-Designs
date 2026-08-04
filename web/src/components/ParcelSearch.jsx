@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { geocodeAddress, locateCurrentPosition } from "../lib/geocode.js";
 import {
   findNjginParcelAtPoint,
@@ -44,14 +44,6 @@ export default function ParcelSearch({
   const locationControllerRef = useRef(null);
   const addressInputId = useId();
 
-  useEffect(
-    () => () => {
-      controllerRef.current?.abort();
-      locationControllerRef.current?.abort();
-    },
-    []
-  );
-
   const clearSelection = () => {
     controllerRef.current?.abort();
     setQuery("");
@@ -60,14 +52,11 @@ export default function ParcelSearch({
     onClear();
   };
 
-  const useCurrentLocation = async () => {
-    if (location) {
-      setLocation(null);
-      setLocationError(null);
-      return;
-    }
-    if (locating) return;
-
+  const requestCurrentLocation = useCallback(async () => {
+    if (
+      locationControllerRef.current &&
+      !locationControllerRef.current.signal.aborted
+    ) return;
     locationControllerRef.current?.abort();
     const controller = new AbortController();
     locationControllerRef.current = controller;
@@ -81,8 +70,32 @@ export default function ParcelSearch({
         setLocationError(lookupError.message ?? String(lookupError));
       }
     } finally {
-      if (!controller.signal.aborted) setLocating(false);
+      if (locationControllerRef.current === controller) {
+        locationControllerRef.current = null;
+        if (!controller.signal.aborted) setLocating(false);
+      }
     }
+  }, []);
+
+  // Ask as soon as the public property search appears. Browsers own the
+  // permission prompt and remember the visitor's choice; a denial leaves the
+  // normal full-address search available and the button below provides a retry.
+  useEffect(() => {
+    requestCurrentLocation();
+    return () => {
+      controllerRef.current?.abort();
+      locationControllerRef.current?.abort();
+    };
+  }, [requestCurrentLocation]);
+
+  const useCurrentLocation = () => {
+    if (location) {
+      locationControllerRef.current?.abort();
+      setLocation(null);
+      setLocationError(null);
+      return;
+    }
+    requestCurrentLocation();
   };
 
   const submit = async (event) => {
@@ -143,7 +156,7 @@ export default function ParcelSearch({
             >
               <span aria-hidden="true">⌖</span>{" "}
               {locating
-                ? "Finding location…"
+                ? "Allow location…"
                 : location
                   ? "Location priority on"
                   : "Use current location"}
