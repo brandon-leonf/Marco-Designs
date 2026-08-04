@@ -178,7 +178,7 @@ export async function searchNjginParcelsAnywhere(text, limit = 10, proximity = n
   const prioritizeNearby = hasPoint(proximity);
 
   const body = await query({
-    where: `UPPER(PROP_LOC) LIKE '%${needle}%'`,
+    where: statewideAddressWhere(needle),
     outFields: OUT_FIELDS,
     orderByFields: "PROP_LOC",
     returnGeometry: prioritizeNearby,
@@ -204,6 +204,32 @@ export async function searchNjginParcelsAnywhere(text, limit = 10, proximity = n
   return rows
     .slice(0, Math.min(limit, 50))
     .map((row) => ({ ...row, kind: "parcel", scope: "statewide" }));
+}
+
+/**
+ * MOD-IV road names are not standardized: the same road can be stored as
+ * ROUTE 35, HWY 35, STATE HWY 35, or RT 35. Anchor numbered addresses to the
+ * exact house number plus the first meaningful street token so all of those
+ * variants enter the local distance ranking. The leading-space pattern also
+ * prevents a search for 203 from being flooded by 1203, 2203, and 5203.
+ */
+function statewideAddressWhere(needle) {
+  const words = needle.split(/\s+/).filter(Boolean);
+  const houseNumber = words[0];
+  if (!/^\d+[A-Z]?$/.test(houseNumber)) {
+    return `UPPER(PROP_LOC) LIKE '%${needle}%'`;
+  }
+
+  const genericRoadWords = new Set([
+    "N", "S", "E", "W", "NORTH", "SOUTH", "EAST", "WEST",
+    "ROUTE", "RT", "HIGHWAY", "HWY", "STATE", "US",
+    "ST", "STREET", "RD", "ROAD", "AVE", "AVENUE", "BLVD", "BOULEVARD",
+    "DR", "DRIVE", "LN", "LANE", "CT", "COURT", "PL", "PLACE",
+  ]);
+  const streetToken = words.slice(1).find((word) => !genericRoadWords.has(word));
+  return streetToken
+    ? `UPPER(PROP_LOC) LIKE '${houseNumber} %${streetToken}%'`
+    : `UPPER(PROP_LOC) LIKE '${houseNumber} %'`;
 }
 
 function hasPoint(value) {

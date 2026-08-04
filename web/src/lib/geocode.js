@@ -109,7 +109,10 @@ export function locateCurrentPosition(signal) {
           accuracy: Number(position.coords.accuracy) || null,
         }),
       (error) => finish(reject, new Error(locationErrorMessage(error))),
-      { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
+      // Desktop location providers can take longer than ten seconds to wake
+      // up. Prefer a precise reading, accept a previously cached fix
+      // immediately, and leave enough time for Wi-Fi positioning to answer.
+      { enableHighAccuracy: true, timeout: 30000, maximumAge: Infinity }
     );
   });
 }
