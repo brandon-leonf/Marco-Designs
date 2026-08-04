@@ -395,12 +395,36 @@ select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed;
   gap: 0.65rem;
   align-items: end;
 }
-.address-search-form label { min-width: 0; }
+.address-search-field { min-width: 0; }
+.address-search-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+.location-button {
+  padding: 0;
+  border: 0;
+  color: var(--primary-fill);
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.69rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.location-button:hover { text-decoration: underline; }
+.location-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.location-button:disabled { color: var(--muted); cursor: wait; text-decoration: none; }
+.location-button.active { color: var(--green); }
 .address-search-form .primary {
   min-height: 42px;
   padding-inline: 1rem;
   white-space: nowrap;
 }
+.location-bias-status,
+.location-error { margin: 0.45rem 0 0; }
+.location-bias-status { color: var(--green); }
+.location-error { color: #7b5412; }
 .lookup-progress {
   display: flex;
   flex-wrap: wrap;

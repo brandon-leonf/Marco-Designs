@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { geocodeAddress } from "../lib/geocode.js";
+import { useEffect, useId, useRef, useState } from "react";
+import { geocodeAddress, locateCurrentPosition } from "../lib/geocode.js";
 import {
   findNjginParcelAtPoint,
   searchNjginParcelsAnywhere,
@@ -37,11 +37,17 @@ export default function ParcelSearch({
   const [searching, setSearching] = useState(false);
   const [stage, setStage] = useState("geocode");
   const [error, setError] = useState(null);
+  const [location, setLocation] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [locationError, setLocationError] = useState(null);
   const controllerRef = useRef(null);
+  const locationControllerRef = useRef(null);
+  const addressInputId = useId();
 
   useEffect(
     () => () => {
       controllerRef.current?.abort();
+      locationControllerRef.current?.abort();
     },
     []
   );
@@ -52,6 +58,31 @@ export default function ParcelSearch({
     setResults(null);
     setError(null);
     onClear();
+  };
+
+  const useCurrentLocation = async () => {
+    if (location) {
+      setLocation(null);
+      setLocationError(null);
+      return;
+    }
+    if (locating) return;
+
+    locationControllerRef.current?.abort();
+    const controller = new AbortController();
+    locationControllerRef.current = controller;
+    setLocating(true);
+    setLocationError(null);
+    try {
+      const position = await locateCurrentPosition(controller.signal);
+      if (!controller.signal.aborted) setLocation(position);
+    } catch (lookupError) {
+      if (!controller.signal.aborted) {
+        setLocationError(lookupError.message ?? String(lookupError));
+      }
+    } finally {
+      if (!controller.signal.aborted) setLocating(false);
+    }
   };
 
   const submit = async (event) => {
@@ -71,7 +102,8 @@ export default function ParcelSearch({
       const rows = await lookupAddress(
         address,
         (next) => !controller.signal.aborted && setStage(next),
-        controller.signal
+        controller.signal,
+        location
       );
       if (!controller.signal.aborted) setResults(rows);
     } catch (lookupError) {
@@ -99,16 +131,35 @@ export default function ParcelSearch({
   return (
     <div className="parcel-search address-first-search">
       <form className="address-search-form" onSubmit={submit}>
-        <label>
-          Property address
+        <div className="address-search-field">
+          <span className="address-search-label-row">
+            <label htmlFor={addressInputId}>Property address</label>
+            <button
+              type="button"
+              className={location ? "location-button active" : "location-button"}
+              onClick={useCurrentLocation}
+              disabled={locating}
+              aria-pressed={Boolean(location)}
+            >
+              <span aria-hidden="true">⌖</span>{" "}
+              {locating
+                ? "Finding location…"
+                : location
+                  ? "Location priority on"
+                  : "Use current location"}
+            </button>
+          </span>
           <input
+            id={addressInputId}
             type="search"
-            placeholder="Street, city, state, ZIP"
+            placeholder={
+              location ? "Street address (nearby matches first)" : "Street, city, state, ZIP"
+            }
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             autoComplete="street-address"
           />
-        </label>
+        </div>
         <button
           type="submit"
           className="primary"
@@ -117,6 +168,17 @@ export default function ParcelSearch({
           {searching ? "Finding property…" : "Find property"}
         </button>
       </form>
+      {location && (
+        <p className="fine location-bias-status" role="status">
+          <span aria-hidden="true">⌖</span> Nearby address matches will appear first. Your location
+          stays in this browser.
+        </p>
+      )}
+      {locationError && (
+        <p className="fine location-error" role="status">
+          {locationError} Entering the city, state, or ZIP still works.
+        </p>
+      )}
       {showScopeHint && (
         <p className="fine search-scope-hint">
           Enter the address directly—no municipality selection is required. New Jersey parcel
@@ -196,8 +258,8 @@ function resultDetail(row) {
   return `${where ? `${where} · ` : ""}Block ${row.block ?? "—"} / Lot ${row.lot ?? "—"} · ${fmt(row.lot_area_sqft)} sq ft`;
 }
 
-async function lookupAddress(address, onStage, signal) {
-  const places = await geocodeAddress(address, 5, signal);
+async function lookupAddress(address, onStage, signal, location) {
+  const places = await geocodeAddress(address, 5, signal, location);
   if (places.length > 0) {
     onStage("parcel");
     const resolved = await Promise.all(
@@ -235,5 +297,5 @@ async function lookupAddress(address, onStage, signal) {
   // Preserve statewide access with a text search, but only after the requested
   // coordinate-first path has returned no address match.
   onStage("fallback");
-  return searchNjginParcelsAnywhere(address, 10);
+  return searchNjginParcelsAnywhere(address, 10, location);
 }
