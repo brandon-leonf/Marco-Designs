@@ -84,11 +84,20 @@ LIMITATIONS = (
 )
 
 # Union of parcels fronting one corridor street segment.
+#
+# MOD-IV writes a multi-address property as a hyphenated range -- "1000-1008
+# SUMMIT AVE" is one parcel, not one address. Matching only a single leading
+# house number silently drops those parcels from the corridor, and because R is
+# defined subtractively they fall through to R: a commercial lot returning a
+# *matched* residential district, which is worse than any refusal. So accept a
+# whole run of house numbers before the street name. The range test compares the
+# LOW number, which is what the official map's block ranges are read against.
 CORRIDOR_SQL = """
     SELECT p.geom
     FROM parcels p
     WHERE p.municipality_id = %(muni_id)s
-      AND upper(trim(p.mod_iv->>'PROP_LOC')) ~ ('^[0-9]+[A-Z]?[\\s.-]+' || %(street)s || '$')
+      AND upper(trim(p.mod_iv->>'PROP_LOC')) ~
+              ('^[0-9]+[A-Z]?(?:[\\s.-]+[0-9]+[A-Z]?)*[\\s.-]+' || %(street)s || '$')
       AND (%(lo)s::int IS NULL
            OR substring(trim(p.mod_iv->>'PROP_LOC') from '^[0-9]+')::int
                   BETWEEN %(lo)s AND %(hi)s)

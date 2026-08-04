@@ -22,6 +22,7 @@ import {
   njginParcelFromFeature,
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
+import { crossCheckPropertyClass, propertyUseLabel } from "./lib/zoningLookup.js";
 import { detectExistingBuilding } from "./lib/buildings.js";
 import { resolveMunicipalGisZoning } from "./lib/municipalGis.js";
 import { northAngleFromParcel } from "./lib/orientation.js";
@@ -339,6 +340,10 @@ export default function App() {
   const [detectingBuilding, setDetectingBuilding] = useState(false);
   const [footprintChoice, setFootprintChoice] = useState(null); // null | "detected" | "adjust" | "manual"
   const [parcel, setParcel] = useState(null);
+  // Latest parcel geometry, readable from effects that must not re-run when the
+  // row is rebuilt at a new inset. Holds the value, never triggers on it.
+  const parcelRef = useRef(null);
+  parcelRef.current = parcel;
   const [streetEdge, setStreetEdge] = useState(null);
   const [parcelError, setParcelError] = useState(null);
   const [zoningCheck, setZoningCheck] = useState(null);
@@ -510,6 +515,18 @@ export default function App() {
           return;
         }
 
+        // The layer and the assessor must agree about this parcel's use before
+        // its setbacks are trusted. A disagreement blocks instead of resolving.
+        const crossChecked = crossCheckPropertyClass(
+          check,
+          parcelPick.prop_class,
+          matchedDistrict
+        );
+        if (crossChecked.status !== "matched") {
+          setZoningCheck(crossChecked);
+          return;
+        }
+
         setDistrictId(matchedDistrict.id);
         const loadedParcel = await fetchParcelEnvelope(
           parcelPick.parcel_id,
@@ -568,7 +585,19 @@ export default function App() {
           setZoningCheck({ ...check, status: "rules_missing" });
           return;
         }
-        setZoningCheck({ ...check, district_id: matchedDistrict.id });
+        // Same cross-check as the imported-parcel path: the live NJGIN record
+        // carries PROP_CLASS, so a commercial lot resolving to a residential
+        // district is caught here rather than silently calculated.
+        const crossChecked = crossCheckPropertyClass(
+          check,
+          loaded.prop_class ?? parcelPick.prop_class,
+          matchedDistrict
+        );
+        if (crossChecked.status !== "matched") {
+          setZoningCheck(crossChecked);
+          return;
+        }
+        setZoningCheck({ ...crossChecked, district_id: matchedDistrict.id });
       })
       .catch((e) => {
         if (stale) return;
@@ -591,20 +620,35 @@ export default function App() {
     setZoningCheck({ status: "outside_coverage" });
   }, [pickKind, parcelPick]);
 
-  // Re-inset the live parcel whenever the chosen district changes. Cheap enough
-  // to run on every district switch: the geometry is already in memory.
+  // Re-inset the live parcel whenever the setbacks change. Cheap enough to run
+  // on every district switch: the geometry is already in memory.
+  //
+  // The dependency is the inset *distance*, not the district object. `district`
+  // is rebuilt by applyZoningRules on every pass through ruleMetrics, which in
+  // turn reads the parcel this effect writes — so depending on the object made
+  // the effect its own trigger and it re-ran until React's update-depth cap
+  // stopped it. The number is stable once the setbacks are, which breaks the
+  // cycle without changing when a genuine setback change re-insets the parcel.
+  const parcelInsetFt = district ? conservativeInsetFt(district) : 0;
   useEffect(() => {
     if (pickKind !== "njgin" || !njginFeature) return;
-    setParcel(njginParcelFromFeature(njginFeature, district ? conservativeInsetFt(district) : 0));
-  }, [district, njginFeature, pickKind]);
+    setParcel(njginParcelFromFeature(njginFeature, parcelInsetFt));
+  }, [parcelInsetFt, njginFeature, pickKind]);
 
   // Resolve the real front of the parcel from NJ road centerlines. The
   // centerline service is an enhancement rather than a loading gate: on a
   // network failure or an isolated lot, previews retain the parcel-axis
   // orientation used before this feature.
+  //
+  // Keyed on the parcel's identity rather than its geometry object. Re-insetting
+  // rebuilds the row — and with it a new `parcel_geojson_wgs84` reference — but
+  // the outline itself is unchanged, so depending on the object sent an
+  // identical request to the centerline service on every rebuild. The boundary
+  // only moves when the parcel does.
+  const parcelIdentity = parcel?.pams_pin ?? parcel?.parcel_id ?? null;
   useEffect(() => {
-    const geometry = parcel?.parcel_geojson_wgs84;
-    if (!geometry) {
+    const geometry = parcelRef.current?.parcel_geojson_wgs84;
+    if (!parcelIdentity || !geometry) {
       setStreetEdge(null);
       return undefined;
     }
@@ -614,7 +658,7 @@ export default function App() {
       if (!controller.signal.aborted) setStreetEdge(match);
     });
     return () => controller.abort();
-  }, [parcel?.parcel_geojson_wgs84]);
+  }, [parcelIdentity]);
 
   /**
    * Look for a published building footprint on the parcel — but only for the
@@ -1883,10 +1927,13 @@ function ProjectSetup({
                     label="Existing building footprint (sq ft) *"
                     value={existingStructure.footprint_sqft}
                     onChange={(value) => {
-                      // Typing over a detected figure makes it the client's
-                      // number, not the source's — the note must stop crediting
-                      // NJDEP or OSM for a value they did not produce.
-                      if (footprintChoice === "detected") onAdjustOutline();
+                      // Typing makes the figure the client's, not the source's.
+                      // This has to claim the field even when no detection has
+                      // landed yet: the lookup can resolve seconds after they
+                      // type, and an unclaimed field is one the late result will
+                      // overwrite. The note must also stop crediting NJDEP or
+                      // OSM for a value they did not produce.
+                      if (footprintChoice !== "manual") onAdjustOutline();
                       onExistingStructure({ ...existingStructure, footprint_sqft: value });
                     }}
                     help="Required. Ground area occupied by the current structure."
@@ -2054,6 +2101,23 @@ function LookupLayerStatus({
         : "Not available for this municipality",
     },
   ];
+
+  // What the assessor records this property as. Stated on its own line because
+  // it is an independent fact about the parcel — it is the answer to "is this
+  // commercial?", which the zoning row cannot give when the layer disagrees.
+  const recordedUse = propertyUseLabel(parcel?.prop_class ?? parcelPick?.prop_class);
+  if (recordedUse) {
+    rows.splice(2, 0, {
+      label: "Recorded property use",
+      ready: !recordedUse.blocks_residential_plan,
+      state: recordedUse.blocks_residential_plan ? "out_of_scope" : undefined,
+      value: `${recordedUse.label} · MOD-IV class ${recordedUse.class_code}${
+        recordedUse.blocks_residential_plan
+          ? " — this tool plans residential projects"
+          : ""
+      }`,
+    });
+  }
   return (
     <div className="lookup-layer-status" role="status">
       <div className="lookup-mode-head">
@@ -2071,9 +2135,11 @@ function LookupLayerStatus({
                 ? "▶"
                 : row.state === "identified"
                   ? "B"
-                  : row.state === "unavailable" || (!row.ready && !row.state)
-                    ? "—"
-                    : "✓"}
+                  : row.state === "out_of_scope"
+                    ? "!"
+                    : row.state === "unavailable" || (!row.ready && !row.state)
+                      ? "—"
+                      : "✓"}
             </span>
             <div>
               <strong>{row.label}</strong>
@@ -2416,6 +2482,9 @@ function zoningStatusLabel(check) {
   }
   if (check.status === "rules_missing") return `${check.district_code ?? "District found"} — rules not loaded`;
   if (check.status === "boundary_conflict") return "Multiple districts intersect parcel";
+  if (check.status === "class_conflict") {
+    return `${check.district_code ?? "District"} conflicts with recorded class ${check.recorded_class}`;
+  }
   if (check.status === "unmapped") return "Parcel is outside mapped zoning polygons";
   if (check.status === "no_layer") return "Municipal zoning layer not loaded";
   return "Automatic zoning check unavailable";
@@ -2498,6 +2567,10 @@ function ZoningCheckNotice({ check, live, muni, ready, outsideCoverage }) {
     unmapped: "This parcel does not intersect the loaded municipal zoning layer. Calculation is disabled pending review.",
     boundary_conflict: `This parcel intersects multiple districts${check.competing_codes?.length ? ` (${check.competing_codes.join(", ")})` : ""}. Municipal review is required.`,
     rules_missing: `The parcel is in district ${check.district_code ?? "unknown"}, but that district’s rules are not loaded yet.`,
+    class_conflict:
+      check.recorded_use === "commercial" || check.recorded_use === "public"
+        ? `The assessor records this as a ${check.recorded_use} property (MOD-IV class ${check.recorded_class}). This tool plans residential projects, and only ${check.district_code ?? "the resolved district"}’s residential rules are loaded, so no plan is produced for it.`
+        : `The zoning layer places this parcel in ${check.district_code ?? "an unknown district"} (${check.zoned_use}), but its MOD-IV record is class ${check.recorded_class} — ${check.recorded_use}. The two sources disagree about this parcel, so no setbacks are applied pending review.`,
     error: "The automatic zoning check could not be completed. Calculation is disabled; a manual district will not be substituted.",
   };
   return (
