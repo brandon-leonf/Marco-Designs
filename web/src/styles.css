@@ -573,6 +573,10 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .lookup-layer-status li.unavailable > span { color: var(--muted); background: #ece9e1; }
 .lookup-layer-status li.identified > span { color: #fff; background: #9b6e15; }
 .lookup-layer-status li.preview > span { color: #fff; background: #6d4b9b; }
+/* Out of scope is not a pending step — it will not resolve by waiting, so it
+   reads in the same red as a refusal rather than the amber of "rules pending". */
+.lookup-layer-status li.out_of_scope > span { color: #fff; background: #8c1d18; }
+.lookup-layer-status li.out_of_scope small { color: #8c1d18; }
 .lookup-layer-status li div { display: flex; min-width: 0; flex-direction: column; gap: 0.08rem; }
 .lookup-layer-status li strong { color: var(--nav); font-size: 0.7rem; }
 .lookup-layer-status li small {

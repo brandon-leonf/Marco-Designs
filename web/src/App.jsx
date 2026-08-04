@@ -22,6 +22,7 @@ import {
   njginParcelFromFeature,
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
+import { crossCheckPropertyClass, propertyUseLabel } from "./lib/zoningLookup.js";
 import { detectExistingBuilding } from "./lib/buildings.js";
 import { resolveMunicipalGisZoning } from "./lib/municipalGis.js";
 import { northAngleFromParcel } from "./lib/orientation.js";
@@ -510,6 +511,18 @@ export default function App() {
           return;
         }
 
+        // The layer and the assessor must agree about this parcel's use before
+        // its setbacks are trusted. A disagreement blocks instead of resolving.
+        const crossChecked = crossCheckPropertyClass(
+          check,
+          parcelPick.prop_class,
+          matchedDistrict
+        );
+        if (crossChecked.status !== "matched") {
+          setZoningCheck(crossChecked);
+          return;
+        }
+
         setDistrictId(matchedDistrict.id);
         const loadedParcel = await fetchParcelEnvelope(
           parcelPick.parcel_id,
@@ -568,7 +581,19 @@ export default function App() {
           setZoningCheck({ ...check, status: "rules_missing" });
           return;
         }
-        setZoningCheck({ ...check, district_id: matchedDistrict.id });
+        // Same cross-check as the imported-parcel path: the live NJGIN record
+        // carries PROP_CLASS, so a commercial lot resolving to a residential
+        // district is caught here rather than silently calculated.
+        const crossChecked = crossCheckPropertyClass(
+          check,
+          loaded.prop_class ?? parcelPick.prop_class,
+          matchedDistrict
+        );
+        if (crossChecked.status !== "matched") {
+          setZoningCheck(crossChecked);
+          return;
+        }
+        setZoningCheck({ ...crossChecked, district_id: matchedDistrict.id });
       })
       .catch((e) => {
         if (stale) return;
@@ -2054,6 +2079,23 @@ function LookupLayerStatus({
         : "Not available for this municipality",
     },
   ];
+
+  // What the assessor records this property as. Stated on its own line because
+  // it is an independent fact about the parcel — it is the answer to "is this
+  // commercial?", which the zoning row cannot give when the layer disagrees.
+  const recordedUse = propertyUseLabel(parcel?.prop_class ?? parcelPick?.prop_class);
+  if (recordedUse) {
+    rows.splice(2, 0, {
+      label: "Recorded property use",
+      ready: !recordedUse.blocks_residential_plan,
+      state: recordedUse.blocks_residential_plan ? "out_of_scope" : undefined,
+      value: `${recordedUse.label} · MOD-IV class ${recordedUse.class_code}${
+        recordedUse.blocks_residential_plan
+          ? " — this tool plans residential projects"
+          : ""
+      }`,
+    });
+  }
   return (
     <div className="lookup-layer-status" role="status">
       <div className="lookup-mode-head">
@@ -2071,9 +2113,11 @@ function LookupLayerStatus({
                 ? "▶"
                 : row.state === "identified"
                   ? "B"
-                  : row.state === "unavailable" || (!row.ready && !row.state)
-                    ? "—"
-                    : "✓"}
+                  : row.state === "out_of_scope"
+                    ? "!"
+                    : row.state === "unavailable" || (!row.ready && !row.state)
+                      ? "—"
+                      : "✓"}
             </span>
             <div>
               <strong>{row.label}</strong>
@@ -2416,6 +2460,9 @@ function zoningStatusLabel(check) {
   }
   if (check.status === "rules_missing") return `${check.district_code ?? "District found"} — rules not loaded`;
   if (check.status === "boundary_conflict") return "Multiple districts intersect parcel";
+  if (check.status === "class_conflict") {
+    return `${check.district_code ?? "District"} conflicts with recorded class ${check.recorded_class}`;
+  }
   if (check.status === "unmapped") return "Parcel is outside mapped zoning polygons";
   if (check.status === "no_layer") return "Municipal zoning layer not loaded";
   return "Automatic zoning check unavailable";
@@ -2498,6 +2545,10 @@ function ZoningCheckNotice({ check, live, muni, ready, outsideCoverage }) {
     unmapped: "This parcel does not intersect the loaded municipal zoning layer. Calculation is disabled pending review.",
     boundary_conflict: `This parcel intersects multiple districts${check.competing_codes?.length ? ` (${check.competing_codes.join(", ")})` : ""}. Municipal review is required.`,
     rules_missing: `The parcel is in district ${check.district_code ?? "unknown"}, but that district’s rules are not loaded yet.`,
+    class_conflict:
+      check.recorded_use === "commercial" || check.recorded_use === "public"
+        ? `The assessor records this as a ${check.recorded_use} property (MOD-IV class ${check.recorded_class}). This tool plans residential projects, and only ${check.district_code ?? "the resolved district"}’s residential rules are loaded, so no plan is produced for it.`
+        : `The zoning layer places this parcel in ${check.district_code ?? "an unknown district"} (${check.zoned_use}), but its MOD-IV record is class ${check.recorded_class} — ${check.recorded_use}. The two sources disagree about this parcel, so no setbacks are applied pending review.`,
     error: "The automatic zoning check could not be completed. Calculation is disabled; a manual district will not be substituted.",
   };
   return (
