@@ -1,4 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
+import { resolveZoningAreas } from "./zoningLookup.js";
+import { normalizeZoningRule, rulesFromLegacyDistrict } from "./zoningRules.js";
 
 const url = import.meta.env.VITE_SUPABASE_URL;
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -8,23 +10,67 @@ const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 export const supabase = url && anonKey ? createClient(url, anonKey) : null;
 
 /**
+ * The states municipalities can be filed under.
+ *
+ * Read separately from the towns rather than derived from them, because a state
+ * is created before its first municipality exists — deriving the list would
+ * make a new state vanish until something was added to it.
+ */
+export async function fetchStates() {
+  const { data, error } = await supabase.from("states").select("code, name").order("name");
+  if (error) throw error;
+  return data ?? [];
+}
+
+/**
  * One municipality with its districts, cost model, and tiers in a single
  * nested PostgREST query. RLS (migration 0006) makes all of this read-only.
  */
 export async function fetchMunicipalities() {
-  const { data, error } = await supabase
+  const costSelect = `build_cost_models (
+    id, provenance, regional_baseline_per_sqft, local_cost_factor, effective_date, cost_scope,
+    build_cost_tiers ( tier, rate_per_sqft, rate_per_sqft_max, notes, provenance, formula_reference )
+  )`;
+  const run = (withStructuredRules) => supabase
     .from("municipalities")
     .select(
       `id, name, slug, county, state_code, last_updated, source_url,
-       zoning_districts (*),
-       build_cost_models (
-         id, provenance, regional_baseline_per_sqft, local_cost_factor, effective_date, cost_scope,
-         build_cost_tiers ( tier, rate_per_sqft, rate_per_sqft_max, notes, provenance, formula_reference )
-       )`
+       zoning_districts (${withStructuredRules ? "*, zoning_rules (*)" : "*"}),
+       ${costSelect}`
     )
     .order("name");
+
+  let { data, error } = await run(true);
+  if (error && /zoning_rules/i.test(`${error.message ?? ""} ${error.details ?? ""}`)) {
+    // The application remains deployable immediately before migration 0019 is
+    // applied. Flat rows become normalized in memory and no zoning behavior is
+    // lost during that short rollout window.
+    ({ data, error } = await run(false));
+  }
   if (error) throw error;
-  return data;
+  return (data ?? []).map((municipality) => ({
+    ...municipality,
+    zoning_districts: (municipality.zoning_districts ?? []).map((rawDistrict) => {
+      const district = {
+        ...rawDistrict,
+      // The editor and calculator use whole floors. Older 2.5-story records
+      // become 3 floors while max_height_ft remains the total-building cap.
+      max_stories:
+        rawDistrict.max_stories == null && rawDistrict.extra_rules?.max_stories_exact == null
+          ? null
+          : Math.ceil(
+              Number(rawDistrict.extra_rules?.max_stories_exact ?? rawDistrict.max_stories)
+            ),
+      };
+      const storedRules = rawDistrict.zoning_rules ?? [];
+      return {
+        ...district,
+        zoning_rules: storedRules.length
+          ? storedRules.map((rule) => normalizeZoningRule(rule))
+          : rulesFromLegacyDistrict(district),
+      };
+    }),
+  }));
 }
 
 /**
@@ -124,6 +170,16 @@ export async function fetchZoningGeojson(muniSlug) {
   });
   if (error) throw error;
   return data ?? [];
+}
+
+/**
+ * Verify a live statewide NJGIN parcel against Marco's published zoning layer.
+ * The parcel remains in NJGIN; only its WGS84 geometry crosses this read-only
+ * boundary, so a separate local parcel import is not required.
+ */
+export async function resolvePublishedZoning(muniSlug, parcelGeojson) {
+  const areas = await fetchZoningGeojson(muniSlug);
+  return resolveZoningAreas(areas, parcelGeojson);
 }
 
 /** Where the zoning layer came from and what it does not cover. */

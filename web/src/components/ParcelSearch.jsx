@@ -19,7 +19,19 @@ const fmt = (n) =>
  * A statewide NJGIN address-text search is retained only as a last resort when
  * Census cannot match an otherwise valid New Jersey property address.
  */
-export default function ParcelSearch({ selected, onSelect, onClear }) {
+/**
+ * `alwaysShowForm` keeps the address field mounted even once a property is
+ * selected. Step 1 collapses to a single button because the chosen property
+ * already occupies that row; the expanded map dialog is a search surface in its
+ * own right, so there the field has to stay usable.
+ */
+export default function ParcelSearch({
+  selected,
+  onSelect,
+  onClear,
+  alwaysShowForm = false,
+  showScopeHint = true,
+}) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
   const [searching, setSearching] = useState(false);
@@ -71,7 +83,7 @@ export default function ParcelSearch({ selected, onSelect, onClear }) {
     }
   };
 
-  if (selected) {
+  if (selected && !alwaysShowForm) {
     return (
       <div className="parcel-search selected-mode">
         <button type="button" className="ghost" onClick={clearSelection}>
@@ -105,10 +117,12 @@ export default function ParcelSearch({ selected, onSelect, onClear }) {
           {searching ? "Finding property…" : "Find property"}
         </button>
       </form>
-      <p className="fine search-scope-hint">
-        Enter the address directly—no municipality selection is required. New Jersey parcel
-        boundaries are matched statewide after the address is geocoded.
-      </p>
+      {showScopeHint && (
+        <p className="fine search-scope-hint">
+          Enter the address directly—no municipality selection is required. New Jersey parcel
+          boundaries are matched statewide after the address is geocoded.
+        </p>
+      )}
 
       {error && <p className="fine error-text">Property lookup failed: {error}</p>}
       {searching && (

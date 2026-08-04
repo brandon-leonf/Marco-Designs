@@ -30,9 +30,15 @@ const DISTRICT_COLORS = {
   "R-1": "#f7ef9e",
   "R-2": "#efd97a",
 };
-const FALLBACK_COLOR = "#9e9e9e";
+const FALLBACK_COLORS = ["#2f6f4e", "#b45f36", "#4f67a8", "#9a5a9e", "#a07b16", "#287d89", "#8b4b55"];
 const normalizeCode = (code) => String(code ?? "").trim().toUpperCase();
-const districtColor = (code) => DISTRICT_COLORS[normalizeCode(code)] ?? FALLBACK_COLOR;
+const districtColor = (code) => {
+  const normalized = normalizeCode(code);
+  if (DISTRICT_COLORS[normalized]) return DISTRICT_COLORS[normalized];
+  let hash = 0;
+  for (const character of normalized) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
+};
 
 // Matches the calculation guard in lib/envelope.js. Merely creating a
 // district row makes it visible, but does not imply that enough rules have
@@ -60,6 +66,7 @@ export default function ZoningMap({
   muniSlug,
   muniName,
   districts = [],
+  selectedDistrictCode = null,
   parcelGeojson,
   parcelLabel,
   // A lon/lat point for a property we could locate but have no parcel polygon
@@ -69,6 +76,16 @@ export default function ZoningMap({
   // The located property sits outside the zoning Marco Designs has imported,
   // so no district applies to it. Raises the red flag above the legend.
   unverified = false,
+  // The published outline of the building standing on the parcel, drawn inside
+  // it so the client can see what the detected footprint was measured from.
+  buildingGeojson = null,
+  // Click-to-identify. Given a handler, clicking anywhere on the map reports
+  // the clicked lat/lon so the caller can look up whatever parcel is there.
+  onPickPoint = null,
+  // True while that lookup is in flight, so the map can say so and refuse to
+  // stack a second query on top of the first.
+  picking = false,
+  pickError = null,
   headingLabel = "Property preview",
   note,
   onExpand,
@@ -79,7 +96,13 @@ export default function ZoningMap({
   const zoningLayerRef = useRef(null);
   const parcelLayerRef = useRef(null);
   const pointLayerRef = useRef(null);
+  const buildingLayerRef = useRef(null);
   const muniBoundsRef = useRef(null);
+  const pickMarkerRef = useRef(null);
+  // The map is built once, so its click handler would capture the first render's
+  // props forever. Route the click through a ref that every render refreshes.
+  const pickRef = useRef({ onPickPoint, picking });
+  pickRef.current = { onPickPoint, picking };
 
   const [zoning, setZoning] = useState(null);
   const [provenance, setProvenance] = useState(null);
@@ -108,9 +131,38 @@ export default function ZoningMap({
     }).addTo(map);
     map.on("click", () => map.scrollWheelZoom.enable());
     map.on("mouseout", () => map.scrollWheelZoom.disable());
+
+    // Click-to-identify listens on the container, not on the map's own `click`.
+    // Leaflet delivers a click to the topmost interactive layer and only falls
+    // back to the map when nothing was hit — so with zoning polygons covering
+    // the town, `map.on("click")` never fires where it matters most.
+    const container = map.getContainer();
+    const onContainerClick = (event) => {
+      // Zoom buttons, attribution links and popup chrome are controls, not lots.
+      if (event.target?.closest?.(".leaflet-control, .leaflet-popup")) return;
+      // A pan ends in a click event; choosing a property does not.
+      if (map.dragging?.moved()) return;
+      const { onPickPoint: pick, picking: busy } = pickRef.current;
+      if (!pick || busy) return;
+      const { lat, lng } = map.mouseEventToLatLng(event);
+      // Mark the spot straight away. The lookup takes a second or two, and the
+      // click should be acknowledged where it landed, not after the answer.
+      pickMarkerRef.current?.remove();
+      pickMarkerRef.current = L.circleMarker([lat, lng], {
+        radius: 6,
+        color: "#8a6d1f",
+        weight: 2,
+        fillColor: "#ffffff",
+        fillOpacity: 0.9,
+        interactive: false,
+      }).addTo(map);
+      pick(lat, lng);
+    };
+    container.addEventListener("click", onContainerClick);
     map.setView([40.7795, -74.0246], 13); // Union City, until bounds arrive
     mapRef.current = map;
     return () => {
+      container.removeEventListener("click", onContainerClick);
       map.remove();
       mapRef.current = null;
     };
@@ -157,13 +209,19 @@ export default function ZoningMap({
           return {
             color: districtColor(code),
             weight: overlay ? 2 : 1,
+            opacity: parcelGeojson ? 0 : 1,
             // Overlays sit on top of a base district, so they are outlined
             // rather than filled — the district underneath stays readable.
-            fillOpacity: overlay ? 0.05 : 0.45,
+            fillOpacity: parcelGeojson ? 0 : overlay ? 0.05 : 0.45,
             dashArray: overlay ? "5 4" : undefined,
           };
         },
         onEachFeature: (feature, lyr) => {
+          // With click-to-identify armed, a click means "what property is
+          // this?" — a district popup would open over the parcel it just
+          // selected, and the district is already named in the panel and the
+          // legend. Leave the click to the lookup.
+          if (pickRef.current.onPickPoint) return;
           const p = feature.properties;
           // A newly-created district may exist before an older polygon has
           // been backfilled with its district_id. Match by normalized code as
@@ -184,7 +242,7 @@ export default function ZoningMap({
     zoningLayerRef.current = layer;
     muniBoundsRef.current = layer.getBounds();
     if (!parcelGeojson && !focusPoint) map.fitBounds(layer.getBounds(), { padding: [12, 12] });
-  }, [zoning, districts]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [zoning, districts, parcelGeojson]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Zoom to the chosen property — its parcel polygon when one exists, otherwise
   // the geocoded point — and fall back to the whole town when cleared.
@@ -199,17 +257,29 @@ export default function ZoningMap({
 
     // An out-of-coverage property is outlined in the same red as its flag, so
     // the map and the warning under it read as one statement.
-    const outlineColor = unverified ? "#b3261e" : "#2b2b2b";
+    const outlineColor = unverified
+      ? "#b3261e"
+      : selectedDistrictCode
+        ? districtColor(selectedDistrictCode)
+        : "#2b2b2b";
 
     if (parcelGeojson) {
       const layer = L.geoJSON(parcelGeojson, {
-        style: { color: outlineColor, weight: 2.5, fillColor: "#ffffff", fillOpacity: 0.55 },
+        style: {
+          color: outlineColor,
+          weight: 3,
+          fillColor: outlineColor,
+          fillOpacity: unverified ? 0.12 : 0.36,
+        },
       }).addTo(map);
       parcelLayerRef.current = layer;
       map.fitBounds(layer.getBounds(), { padding: [40, 40], maxZoom: 19 });
       setZoomedToParcel(true);
       return;
     }
+
+    // The detected building is drawn by its own effect below, since it can
+    // appear and disappear without the parcel changing.
 
     if (focusPoint) {
       // A circle marker rather than L.marker: no icon asset to resolve through
@@ -230,7 +300,28 @@ export default function ZoningMap({
 
     setZoomedToParcel(false);
     if (muniBoundsRef.current) map.fitBounds(muniBoundsRef.current, { padding: [12, 12] });
-  }, [parcelGeojson, focusPoint, unverified]);
+  }, [parcelGeojson, focusPoint, selectedDistrictCode, unverified]);
+
+  // The detected building footprint, drawn over the parcel. Hatched rather
+  // than solid: it is a published outline, not a surveyed one, and should not
+  // read with the same authority as the parcel boundary.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    buildingLayerRef.current?.remove();
+    buildingLayerRef.current = null;
+    if (!buildingGeojson) return;
+    buildingLayerRef.current = L.geoJSON(buildingGeojson, {
+      interactive: false,
+      style: {
+        color: "#8a6d1f",
+        weight: 2,
+        dashArray: "4 3",
+        fillColor: "#c8a94a",
+        fillOpacity: 0.42,
+      },
+    }).addTo(map);
+  }, [buildingGeojson]);
 
   // Union the polygon layer with the municipality's configured districts.
   // A configured district without geometry still belongs in the legend; it
@@ -293,7 +384,33 @@ export default function ZoningMap({
         </div>
       </div>
 
-      <div ref={containerRef} className="zoning-map-canvas" role="application" aria-label="Municipal zoning map" />
+      <div
+        ref={containerRef}
+        className={`zoning-map-canvas${onPickPoint ? " pickable" : ""}${picking ? " picking" : ""}`}
+        role="application"
+        aria-label={
+          onPickPoint
+            ? "Municipal zoning map — click a property to identify its address"
+            : "Municipal zoning map"
+        }
+      />
+
+      {onPickPoint && (
+        <p className={picking ? "map-pick-hint busy" : "map-pick-hint"} role="status">
+          {picking ? (
+            <>
+              <span className="map-pick-spinner" aria-hidden="true" />
+              Identifying the property you clicked…
+            </>
+          ) : (
+            <>
+              <span aria-hidden="true">✛</span>
+              Click any property on the map to look up its address.
+            </>
+          )}
+        </p>
+      )}
+      {pickError && !picking && <p className="status-line error-text">{pickError}</p>}
 
       {error && <p className="status-line error-text">Zoning layer failed to load: {error}</p>}
       {zoning && visibleZoning.length === 0 && (

@@ -1,8 +1,24 @@
 import assert from "node:assert/strict";
+import { resolveZoningAreas } from "../src/lib/zoningLookup.js";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { computeBuildable, missingDistrictRules } from "../src/lib/envelope.js";
+import {
+  computeBuildable,
+  missingDistrictRules,
+  resolveStories,
+} from "../src/lib/envelope.js";
+import { standardizedPropertyAddress } from "../src/lib/address.js";
+import { buildParcelPlanFrame, estimateParcelRectDims } from "../src/lib/roads.js";
+import { rectFitsGeometry } from "../src/lib/placement.js";
+import {
+  buildSetbackEnvelope,
+  planarGeometryArea,
+} from "../src/lib/setbackGeometry.js";
+import {
+  applyZoningRules,
+  evaluateFormula,
+} from "../src/lib/zoningRules.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const configPath = resolve(here, "../../config/towns/union-city-nj.json");
@@ -43,6 +59,186 @@ assert.equal(result.footprint, 1460);
 assert.equal(result.stories, 3);
 assert.equal(result.buildable, 4380);
 
+assert.deepEqual(
+  resolveStories({ max_stories: 2.5, max_height_ft: 35 }),
+  {
+    stories: 3,
+    permittedStories: 3,
+    heightLimited: false,
+    storiesByHeight: 3,
+  },
+  "Legacy half-story values must normalize to whole floors"
+);
+
+const aaaStructuredRules = [
+  {
+    id: "00000000-0000-4000-8000-000000000001",
+    municipalityId: "1",
+    districtId: "1",
+    category: "SETBACK",
+    appliesTo: "PRINCIPAL_BUILDING",
+    side: "EACH_SIDE",
+    ruleType: "FIXED",
+    calculation: { value: 25, unit: "FT" },
+    combineMethod: "MAX",
+    priority: 100,
+    sourceSection: "AAA base side yard",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000002",
+    municipalityId: "1",
+    districtId: "1",
+    category: "SETBACK",
+    appliesTo: "PRINCIPAL_BUILDING",
+    side: "EACH_SIDE",
+    ruleType: "CONDITIONAL",
+    condition: { metric: "GROSS_BUILDING_AREA", operator: ">", value: 3000 },
+    calculation: { formula: "grossBuildingArea * 0.008", unit: "FT" },
+    combineMethod: "MAX",
+    priority: 200,
+    sourceSection: "AAA gross-area formula",
+  },
+  {
+    id: "00000000-0000-4000-8000-000000000003",
+    municipalityId: "1",
+    districtId: "1",
+    category: "SETBACK",
+    appliesTo: "PRINCIPAL_BUILDING",
+    side: "EACH_SIDE",
+    ruleType: "CONDITIONAL",
+    condition: { metric: "GROSS_BUILDING_AREA", operator: ">", value: 5000 },
+    calculation: { value: 40, unit: "FT" },
+    combineMethod: "MAX",
+    priority: 300,
+    sourceSection: "AAA over-5000 minimum",
+  },
+];
+const aaaDistrict = { ...rules, code: "AAA", zoning_rules: aaaStructuredRules };
+assert.equal(
+  applyZoningRules(aaaDistrict, { GROSS_BUILDING_AREA: 2500 }).side_yard_one_min_ft,
+  25,
+  "AAA must retain its fixed 25 ft side yard at 3,000 sq ft or less"
+);
+assert.equal(
+  applyZoningRules(aaaDistrict, { GROSS_BUILDING_AREA: 4000 }).side_yard_one_min_ft,
+  32,
+  "AAA must evaluate the gross-area formula above 3,000 sq ft"
+);
+assert.equal(
+  applyZoningRules(aaaDistrict, { GROSS_BUILDING_AREA: 5001 }).side_yard_one_min_ft,
+  40.008,
+  "AAA must combine the formula and over-5,000 minimum using MAX"
+);
+assert.equal(evaluateFormula("grossBuildingArea * 0.008", { grossBuildingArea: 4000 }), 32);
+assert.throws(
+  () => evaluateFormula("globalThis.process.exit()", {}),
+  /unsupported characters/,
+  "Rule formulas must never execute arbitrary JavaScript"
+);
+
+assert.deepEqual(
+  estimateParcelRectDims(
+    {
+      type: "Polygon",
+      coordinates: [[[0, 0], [25, 0], [25, 100], [0, 100], [0, 0]]],
+    },
+    { edgeIndex: 0 }
+  ),
+  {
+    width_ft: 25,
+    depth_ft: 100,
+    source: "parcel_geometry",
+    method: "street_oriented",
+  },
+  "A street-facing NJGIN parcel edge must orient estimated frontage and depth"
+);
+
+const irregularPlanFrame = buildParcelPlanFrame(
+  {
+    type: "Polygon",
+    coordinates: [[[0, 0], [30, 0], [30, 100], [18, 70], [0, 100], [0, 0]]],
+  },
+  { edgeIndex: 0 }
+);
+assert.equal(irregularPlanFrame.geometry.coordinates[0].length, 6);
+assert.equal(
+  rectFitsGeometry(
+    { x0: 19, y0: 72, x1: 27, y1: 90 },
+    irregularPlanFrame.geometry
+  ),
+  false,
+  "A floor in an irregular parcel cutout must not pass the polygon placement check"
+);
+
+const curvedFrontParcel = {
+  type: "Polygon",
+  coordinates: [[
+    [0, 22],
+    [18, 19],
+    [34, 10],
+    [48, 2],
+    [62, 0],
+    [100, 0],
+    [100, 160],
+    [0, 160],
+    [0, 22],
+  ]],
+};
+const curvedEnvelope = buildSetbackEnvelope(curvedFrontParcel, {
+  front: 35,
+  rear: 50,
+  sideOne: 15,
+  sideTotal: 30,
+});
+assert(curvedEnvelope, "Edge-specific setbacks must leave a buildable envelope");
+const curvedEnvelopePolygons = curvedEnvelope.type === "Polygon"
+  ? [curvedEnvelope.coordinates]
+  : curvedEnvelope.coordinates;
+assert(
+  curvedEnvelopePolygons.every((poly) => poly.every((ring) =>
+    ring.length >= 4 &&
+    ring[0][0] === ring[ring.length - 1][0] &&
+    ring[0][1] === ring[ring.length - 1][1]
+  )),
+  "Every buildable-envelope ring must be visibly closed"
+);
+assert(
+  planarGeometryArea(curvedEnvelope) > 1000,
+  "Distinct front, rear, and side setbacks must preserve the realistically buildable parcel area"
+);
+assert(
+  rectFitsGeometry({ x0: 0, y0: 60, x1: 14, y1: 80 }, curvedEnvelope) === false &&
+    rectFitsGeometry({ x0: 86, y0: 60, x1: 100, y1: 80 }, curvedEnvelope) === false,
+  "Both side-yard boundaries must be enforced"
+);
+
+assert.equal(
+  standardizedPropertyAddress(
+    { address: "712 22ND ST" },
+    {
+      matched_address: "712 22ND ST, UNION, NJ, 07087",
+      muni_name: "Union City",
+      state_code: "NJ",
+    },
+    { name: "Union City", state_code: "NJ" }
+  ),
+  "712 22nd St, Union City, NJ 07087",
+  "NJGIN municipality metadata must override an imprecise geocoder city label"
+);
+
+assert.equal(
+  standardizedPropertyAddress(
+    { address: "57 SHERI DR" },
+    {
+      matched_address: "57 SHERI DR, ALLENDALE, NJ, 07401",
+      muni_name: "Allendale",
+      state_code: "NJ",
+    },
+    { name: "Allendale Borough", state_code: "NJ" }
+  ),
+  "57 Sheri Dr, Allendale, NJ 07401"
+);
+
 assert.throws(
   () => computeBuildable({ width_ft: 25, depth_ft: 100, area_sqft: 2500 }, {
     ...rules,
@@ -50,6 +246,68 @@ assert.throws(
   }),
   /missing zoning rules/,
   "The engine must refuse incomplete configs instead of using a zero/default rule"
+);
+
+const square = (west, south, east, north) => ({
+  type: "Polygon",
+  coordinates: [[
+    [west, south],
+    [east, south],
+    [east, north],
+    [west, north],
+    [west, south],
+  ]],
+});
+const liveParcel = square(-74.14, 41.02, -74.139, 41.021);
+const matchedLiveParcel = resolveZoningAreas(
+  [{
+    district_code: "AAA",
+    district_name: "District",
+    is_overlay: false,
+    has_rules: true,
+    geojson: square(-74.15, 41.01, -74.13, 41.03),
+  }],
+  liveParcel
+);
+assert.equal(matchedLiveParcel.status, "matched");
+assert.equal(matchedLiveParcel.district_code, "AAA");
+assert(matchedLiveParcel.overlap_pct > 99.9);
+
+const multiDistrictLayer = [
+  {
+    district_code: "AAA",
+    is_overlay: false,
+    has_rules: true,
+    geojson: square(-74.15, 41.01, -74.14, 41.03),
+  },
+  {
+    district_code: "AA",
+    is_overlay: false,
+    has_rules: true,
+    geojson: square(-74.14, 41.01, -74.13, 41.03),
+  },
+];
+assert.equal(
+  resolveZoningAreas(
+    multiDistrictLayer,
+    square(-74.139, 41.02, -74.138, 41.021)
+  ).district_code,
+  "AA",
+  "A parcel inside the second published polygon must resolve to that polygon's district"
+);
+
+assert.equal(resolveZoningAreas([], liveParcel).status, "no_layer");
+assert.equal(
+  resolveZoningAreas(
+    [{
+      district_code: "AAA",
+      is_overlay: false,
+      has_rules: false,
+      geojson: square(-74.15, 41.01, -74.13, 41.03),
+    }],
+    liveParcel
+  ).status,
+  "rules_missing"
 );
 
 console.log("Zoning source-of-truth checks passed.");

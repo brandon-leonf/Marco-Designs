@@ -10,6 +10,8 @@
  * placement the calculation does not score, so they share one implementation.
  */
 
+import { booleanWithin, feature, polygon } from "@turf/turf";
+
 const num = (value, fallback = 0) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -28,6 +30,23 @@ export function envelopeRect(lotWidthFt, lotDepthFt, setbacks) {
     x1: Math.max(side, lotWidth - side),
     y1: Math.max(front, lotDepth - rear),
   };
+}
+
+/** A proposed rectangular floor must be fully inside the actual parcel/envelope polygon. */
+export function rectFitsGeometry(rect, geometry) {
+  if (!rect || !geometry) return null;
+  try {
+    const shape = polygon([[
+      [rect.x0, rect.y0],
+      [rect.x1, rect.y0],
+      [rect.x1, rect.y1],
+      [rect.x0, rect.y1],
+      [rect.x0, rect.y0],
+    ]]);
+    return booleanWithin(shape, feature(geometry));
+  } catch {
+    return false;
+  }
 }
 
 /**

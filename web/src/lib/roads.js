@@ -53,6 +53,138 @@ function outerRing(geometry) {
   return null;
 }
 
+/**
+ * Planning-only rectangular dimensions for a parcel whose MOD-IV record does
+ * not contain frontage × depth. Coordinates must already be in a local feet
+ * frame (the shape exposed as parcel_geojson by the NJGIN adapter).
+ *
+ * When a road match exists, its fronting edge defines the frontage axis. The
+ * full parcel is projected onto that axis and its perpendicular to obtain an
+ * enclosing width/depth. Without a road match, use the smallest edge-aligned
+ * bounding rectangle and call its shorter side frontage. These are explicitly
+ * estimates for the interactive diagram, never deed or survey dimensions.
+ */
+export function buildParcelPlanFrame(parcelGeojson, streetEdge = null) {
+  const geometry = parcelGeojson?.type === "Feature" ? parcelGeojson.geometry : parcelGeojson;
+  const ring = outerRing(geometry);
+  if (!ring || ring.length < 4) return null;
+  const points =
+    ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]
+      ? ring.slice(0, -1)
+      : ring;
+  if (points.length < 3) return null;
+
+  const axisFromEdge = (a, b) => {
+    const dx = Number(b?.[0]) - Number(a?.[0]);
+    const dy = Number(b?.[1]) - Number(a?.[1]);
+    const length = Math.hypot(dx, dy);
+    if (!(length > 1)) return null;
+    const ux = dx / length;
+    const uy = dy / length;
+    const vx = -uy;
+    const vy = ux;
+    const along = points.map(([x, y]) => Number(x) * ux + Number(y) * uy);
+    const across = points.map(([x, y]) => Number(x) * vx + Number(y) * vy);
+    const width = Math.max(...along) - Math.min(...along);
+    const depth = Math.max(...across) - Math.min(...across);
+    if (!(width > 1) || !(depth > 1)) return null;
+    return { ux, uy, vx, vy, width, depth, boxArea: width * depth, a, b };
+  };
+
+  const frontIndex = Number(streetEdge?.edgeIndex);
+  let selected =
+    Number.isInteger(frontIndex) && frontIndex >= 0 && frontIndex < points.length
+      ? axisFromEdge(points[frontIndex], points[(frontIndex + 1) % points.length])
+      : null;
+  let streetOriented = Boolean(selected);
+
+  if (!selected) {
+    for (let index = 0; index < points.length; index += 1) {
+      const candidate = axisFromEdge(points[index], points[(index + 1) % points.length]);
+      if (candidate && (!selected || candidate.boxArea < selected.boxArea)) selected = candidate;
+    }
+    streetOriented = false;
+  }
+  if (!selected) return null;
+
+  let { ux, uy, vx, vy } = selected;
+  if (streetOriented) {
+    const center = centroidOf(points);
+    const midpoint = [
+      (Number(selected.a[0]) + Number(selected.b[0])) / 2,
+      (Number(selected.a[1]) + Number(selected.b[1])) / 2,
+    ];
+    // +Y is always into the lot, away from the matched street edge.
+    if ((center[0] - midpoint[0]) * vx + (center[1] - midpoint[1]) * vy < 0) {
+      vx *= -1;
+      vy *= -1;
+    }
+  } else if (selected.width > selected.depth) {
+    // With no street match, keep the conventional shorter-side frontage.
+    [ux, uy, vx, vy] = [vx, vy, ux, uy];
+  }
+
+  const rawPoint = ([x, y]) => ({
+    x: Number(x) * ux + Number(y) * uy,
+    y: Number(x) * vx + Number(y) * vy,
+  });
+  const allCoordinates =
+    geometry.type === "Polygon"
+      ? geometry.coordinates.flat(1)
+      : geometry.type === "MultiPolygon"
+        ? geometry.coordinates.flat(2)
+        : [];
+  const projected = allCoordinates.map(rawPoint);
+  if (!projected.length) return null;
+  const minX = Math.min(...projected.map((point) => point.x));
+  const maxX = Math.max(...projected.map((point) => point.x));
+  const minY = Math.min(...projected.map((point) => point.y));
+  const maxY = Math.max(...projected.map((point) => point.y));
+  const projectCoordinate = (coordinate) => {
+    const point = rawPoint(coordinate);
+    return [point.x - minX, point.y - minY];
+  };
+  const projectGeometry = (input) => {
+    const source = input?.type === "Feature" ? input.geometry : input;
+    if (!source) return null;
+    if (source.type === "Polygon") {
+      return {
+        type: "Polygon",
+        coordinates: source.coordinates.map((sourceRing) => sourceRing.map(projectCoordinate)),
+      };
+    }
+    if (source.type === "MultiPolygon") {
+      return {
+        type: "MultiPolygon",
+        coordinates: source.coordinates.map((polygon) =>
+          polygon.map((sourceRing) => sourceRing.map(projectCoordinate))
+        ),
+      };
+    }
+    return null;
+  };
+
+  return {
+    width_ft: Math.round((maxX - minX) * 10) / 10,
+    depth_ft: Math.round((maxY - minY) * 10) / 10,
+    source: "parcel_geometry",
+    method: streetOriented ? "street_oriented" : "minimum_bounding_rectangle",
+    geometry: projectGeometry(geometry),
+    projectGeometry,
+  };
+}
+
+export function estimateParcelRectDims(parcelGeojson, streetEdge = null) {
+  const frame = buildParcelPlanFrame(parcelGeojson, streetEdge);
+  if (!frame) return null;
+  return {
+    width_ft: frame.width_ft,
+    depth_ft: frame.depth_ft,
+    source: frame.source,
+    method: frame.method,
+  };
+}
+
 function centroidOf(ring) {
   const points =
     ring.length > 1 &&
