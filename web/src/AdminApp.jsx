@@ -3093,7 +3093,10 @@ function ZoningLayerSetup({
 
   return (
     <div className="card admin-setup-page">
-      <div className="admin-panel-head">
+      {/* `admin-editor-head`, not `admin-panel-head`: this is a tab of the
+          District Rules screen, and the panel head sizes its h2 differently,
+          so the heading changed size and position when the tab changed. */}
+      <div className="admin-editor-head">
         <div>
           <AdminCrumbs
             items={[
@@ -3106,7 +3109,6 @@ function ZoningLayerSetup({
           <h2>District Rules</h2>
           <p>{district ? `${district.code} — ${district.name ?? "District"}` : "Choose a district to edit its rules."}</p>
         </div>
-        <span className="admin-updated">Last updated: {muni.last_updated ?? "—"}</span>
       </div>
 
       <RuleTabBar activeTab="zoning-setup" onSelect={onSelectRuleTab} />

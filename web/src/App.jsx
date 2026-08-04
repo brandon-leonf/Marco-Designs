@@ -3040,26 +3040,6 @@ function CapacityStep({
             )}
           </div>
 
-          <div className="lot-dimension-status" role="status">
-            <div>
-              <span>Frontage:</span>
-              <strong>{lotWidthFt == null ? "Not available" : `${fmt(lotWidthFt, 1)} ft`}</strong>
-            </div>
-            <div>
-              <span>Depth:</span>
-              <strong>{lotDepthFt == null ? "Not available" : `${fmt(lotDepthFt, 1)} ft`}</strong>
-            </div>
-            <small>
-              {orientedLot.source === "land_desc"
-                ? "Parsed from the parcel’s LAND_DESC record."
-                : orientedLot.source === "imported_mod_iv"
-                  ? "Loaded from the imported MOD-IV parcel record."
-                  : orientedLot.source === "parcel_geometry"
-                    ? "Estimated from the NJGIN parcel polygon and matched street edge; confirm with a survey."
-                  : "No recorded frontage or depth was found for this parcel."}
-            </small>
-          </div>
-
           <div className="planned-size">
             <div className="method-title">
               <div>
