@@ -17,7 +17,7 @@ export const GEOCODER_URL =
  * picker's shape, but `kind: "place"` is important: coordinates establish a
  * location only until NJGIN independently returns a containing polygon.
  */
-export async function geocodeAddress(text, limit = 5, signal) {
+export async function geocodeAddress(text, limit = 5, signal, proximity = null) {
   const address = String(text ?? "").trim();
   if (address.length < 5) return [];
 
@@ -34,7 +34,6 @@ export async function geocodeAddress(text, limit = 5, signal) {
   if (!Array.isArray(matches)) return [];
 
   return matches
-    .slice(0, Math.min(limit, 10))
     .map((match, index) => {
       const lon = Number(match?.coordinates?.x);
       const lat = Number(match?.coordinates?.y);
@@ -72,7 +71,70 @@ export async function geocodeAddress(text, limit = 5, signal) {
         source: "census",
       };
     })
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort((a, b) => distanceFrom(a, proximity) - distanceFrom(b, proximity))
+    .slice(0, Math.min(limit, 10));
+}
+
+/**
+ * Obtain the user's position for local result ranking. These coordinates stay
+ * in the browser: neither the Census request nor the NJGIN request receives
+ * them. Only address candidates returned by those services are compared with
+ * this point after they arrive.
+ */
+export function locateCurrentPosition(signal) {
+  if (!globalThis.navigator?.geolocation) {
+    return Promise.reject(new Error("Location is not available in this browser."));
+  }
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException("Location request was cancelled.", "AbortError"));
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      handler(value);
+    };
+    const onAbort = () =>
+      finish(reject, new DOMException("Location request was cancelled.", "AbortError"));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    navigator.geolocation.getCurrentPosition(
+      (position) =>
+        finish(resolve, {
+          lat: Number(position.coords.latitude),
+          lon: Number(position.coords.longitude),
+          accuracy: Number(position.coords.accuracy) || null,
+        }),
+      (error) => finish(reject, new Error(locationErrorMessage(error))),
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
+    );
+  });
+}
+
+function locationErrorMessage(error) {
+  if (error?.code === 1) return "Location permission was not granted.";
+  if (error?.code === 2) return "Your current location could not be determined.";
+  if (error?.code === 3) return "The location request timed out.";
+  return error?.message || "Your current location could not be determined.";
+}
+
+function distanceFrom(row, proximity) {
+  if (!proximity) return 0;
+  const lat1 = Number(row?.lat);
+  const lon1 = Number(row?.lon);
+  const lat2 = Number(proximity?.lat);
+  const lon2 = Number(proximity?.lon);
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return Number.POSITIVE_INFINITY;
+  const radians = (degrees) => (degrees * Math.PI) / 180;
+  const dLat = radians(lat2 - lat1);
+  const dLon = radians(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(radians(lat1)) * Math.cos(radians(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function requestJsonp(url, signal) {

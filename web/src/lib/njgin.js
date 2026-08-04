@@ -172,22 +172,55 @@ export async function searchNjginParcels(muni, text, limit = 15) {
  * parcel; what is missing is a zoning layer to intersect it with, which is why
  * these rows are marked `scope: "statewide"` and flagged as unverified in the UI.
  */
-export async function searchNjginParcelsAnywhere(text, limit = 10) {
+export async function searchNjginParcelsAnywhere(text, limit = 10, proximity = null) {
   const needle = sqlLiteral(text);
   if (needle.length < 3) return [];
+  const prioritizeNearby = hasPoint(proximity);
 
   const body = await query({
     where: `UPPER(PROP_LOC) LIKE '%${needle}%'`,
     outFields: OUT_FIELDS,
     orderByFields: "PROP_LOC",
-    returnGeometry: false,
-    resultRecordCount: Math.min(limit, 50),
+    returnGeometry: prioritizeNearby,
+    ...(prioritizeNearby ? { outSR: 4326, geometryPrecision: 5 } : {}),
+    // Pull a broader candidate set only while ranking locally. No browser
+    // coordinates are included in this request.
+    resultRecordCount: prioritizeNearby
+      ? Math.max(Math.min(limit * 10, 100), 50)
+      : Math.min(limit, 50),
   });
 
-  return (body.features ?? [])
-    .map((feature) => toRow(feature.properties ?? {}, null))
-    .filter((row) => row.pams_pin)
+  const rows = (body.features ?? [])
+    .map((feature) => {
+      const row = toRow(feature.properties ?? {}, null);
+      if (!prioritizeNearby || !feature?.geometry) return row;
+      const [lon, lat] = turf.centroid(feature).geometry.coordinates;
+      return { ...row, lat, lon };
+    })
+    .filter((row) => row.pams_pin);
+  if (prioritizeNearby) {
+    rows.sort((a, b) => distanceFrom(a, proximity) - distanceFrom(b, proximity));
+  }
+  return rows
+    .slice(0, Math.min(limit, 50))
     .map((row) => ({ ...row, kind: "parcel", scope: "statewide" }));
+}
+
+function hasPoint(value) {
+  return Number.isFinite(Number(value?.lat)) && Number.isFinite(Number(value?.lon));
+}
+
+function distanceFrom(row, proximity) {
+  if (!hasPoint(row) || !hasPoint(proximity)) return Number.POSITIVE_INFINITY;
+  const radians = (degrees) => (degrees * Math.PI) / 180;
+  const lat1 = radians(Number(row.lat));
+  const lat2 = radians(Number(proximity.lat));
+  const dLat = lat2 - lat1;
+  const dLon = radians(Number(proximity.lon) - Number(row.lon));
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 /**
