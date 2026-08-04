@@ -33,6 +33,8 @@ const OUT_FIELDS = [
   "LAND_DESC",
   "CALC_ACRE",
   "YR_CONSTR",
+  "BLDG_DESC",
+  "DWELL",
   "MUN_NAME",
   "COUNTY",
 ].join(",");
@@ -134,6 +136,8 @@ function toRow(properties, feature) {
     block: properties.PCLBLOCK || null,
     lot: properties.PCLLOT || null,
     prop_class: properties.PROP_CLASS || null,
+    building_desc: properties.BLDG_DESC || null,
+    dwelling_units: Number(properties.DWELL) > 0 ? Number(properties.DWELL) : null,
     lot_area_sqft: lotAreaSqft(properties, feature),
     // Carried through so a statewide hit can say which town it is in, and so
     // the app can switch to that municipality when it happens to be loaded.
@@ -318,6 +322,44 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
       scope: "statewide",
       lat: y,
       lon: x,
+    }))
+    .filter((row) => row.pams_pin);
+}
+
+/**
+ * Every parcel intersecting a WGS84 bounding box, geometry included.
+ *
+ * The building comparables need the lot each mapped outline stands on: a
+ * footprint is only meaningful next to its lot area and the assessor's
+ * description of what was built there.
+ */
+export async function fetchNjginParcelsInBbox([west, south, east, north], signal, limit = 400) {
+  const body = await query(
+    {
+      geometry: JSON.stringify({
+        xmin: west,
+        ymin: south,
+        xmax: east,
+        ymax: north,
+        spatialReference: { wkid: 4326 },
+      }),
+      geometryType: "esriGeometryEnvelope",
+      inSR: 4326,
+      spatialRel: "esriSpatialRelIntersects",
+      outFields: OUT_FIELDS,
+      returnGeometry: true,
+      outSR: 4326,
+      resultRecordCount: Math.min(limit, 1000),
+    },
+    signal
+  );
+
+  return (body.features ?? [])
+    .filter((feature) => feature?.geometry)
+    .map((feature) => ({
+      ...toRow(feature.properties ?? {}, feature),
+      land_desc: feature.properties?.LAND_DESC || null,
+      geometry: feature.geometry,
     }))
     .filter((row) => row.pams_pin);
 }

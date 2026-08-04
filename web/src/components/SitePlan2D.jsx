@@ -86,6 +86,12 @@ export default function SitePlan2D({
   const lotWidth = Math.max(1, Number(lotWidthFt) || 25);
   const lotDepth = Math.max(1, Number(lotDepthFt) || 100);
   const envelope = envelopeRect(lotWidth, lotDepth, setbacks);
+  // envelopeRect clamps a collapsed envelope to keep the rectangle well formed,
+  // which would make the callouts report a smaller setback than the ordinance
+  // states. The labels quote the rule; only the drawing is clamped.
+  const setbackFront = Math.max(0, Number(setbacks?.front) || 0);
+  const setbackRear = Math.max(0, Number(setbacks?.rear) || 0);
+  const setbackSide = Math.max(0, Number(setbacks?.side) || 0);
   const existing = existingRect(
     lotWidth,
     lotDepth,
@@ -494,23 +500,23 @@ export default function SitePlan2D({
             </text>
           </>
         )}
-        {envelope.y0 > 0 && (
+        {setbackFront > 0 && (
           <text x={sx(lotWidth / 2)} y={sy(envelope.y0) - 6} className="plan-setback" textAnchor="middle">
-            Front {fmtFt(envelope.y0)}′
+            Front {fmtFt(setbackFront)}′
           </text>
         )}
-        {lotDepth - envelope.y1 > 0 && (
+        {setbackRear > 0 && (
           <text x={sx(lotWidth / 2)} y={sy(envelope.y1) + 14} className="plan-setback" textAnchor="middle">
-            Rear {fmtFt(lotDepth - envelope.y1)}′
+            Rear {fmtFt(setbackRear)}′
           </text>
         )}
-        {envelope.x0 > 0 && (
+        {setbackSide > 0 && (
           <>
             <text x={sx(envelope.x0) + 4} y={sy(lotDepth * 0.72)} className="plan-setback" textAnchor="start">
-              Side {fmtFt(envelope.x0)}′
+              Side {fmtFt(setbackSide)}′
             </text>
             <text x={sx(envelope.x1) - 4} y={sy(lotDepth * 0.72)} className="plan-setback" textAnchor="end">
-              Side {fmtFt(lotWidth - envelope.x1)}′
+              Side {fmtFt(setbackSide)}′
             </text>
           </>
         )}

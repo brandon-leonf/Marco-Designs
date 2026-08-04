@@ -18,12 +18,17 @@ import {
 } from "./lib/envelope.js";
 import {
   fetchNjginParcel,
+  fetchNjginParcelsInBbox,
   findNjginParcelAtPoint,
   njginParcelFromFeature,
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
 import { crossCheckPropertyClass, propertyUseLabel } from "./lib/zoningLookup.js";
-import { detectExistingBuilding } from "./lib/buildings.js";
+import { pairBuildingsToParcels, surveyParcelBuildings } from "./lib/buildings.js";
+import {
+  estimateExistingBuilding,
+  lotCoveragePercent,
+} from "./lib/existingBuildingFacts.js";
 import { resolveMunicipalGisZoning } from "./lib/municipalGis.js";
 import { northAngleFromParcel } from "./lib/orientation.js";
 import {
@@ -210,16 +215,25 @@ function pickKindOf(pick) {
   return pick.parcel_id != null ? "db" : "njgin";
 }
 
-/** Recorded-address fallback while the live centerline match is unavailable. */
-function streetNameFor(parcel, streetEdge) {
-  if (streetEdge?.streetName) return streetEdge.streetName;
-  const address = String(parcel?.address ?? "").trim();
-  if (!address) return null;
-  const street = address
+/**
+ * The street a property is addressed on, from its recorded address line —
+ * "1515 CENTRAL AVE, UNION CITY, NJ" is on CENTRAL AVE. On a corner lot this
+ * is what tells the road matcher which of the two fronting streets the front
+ * yard faces, so the setbacks land on the right axis.
+ */
+function addressStreetName(parcel) {
+  const line = String(parcel?.address ?? "").split(",")[0].trim();
+  if (!line) return null;
+  const street = line
     .replace(/^\d+[A-Z]?(?:\s*-\s*\d+[A-Z]?)?\s+/i, "")
     .replace(/\s+(?:APT|UNIT|#)\s*.*$/i, "")
     .trim();
   return street || null;
+}
+
+/** Recorded-address fallback while the live centerline match is unavailable. */
+function streetNameFor(parcel, streetEdge) {
+  return streetEdge?.streetName ?? addressStreetName(parcel);
 }
 
 /**
@@ -337,6 +351,10 @@ export default function App() {
   // one. `footprintChoice` records what the client did with it, so the offer is
   // not re-made after they have chosen manual entry.
   const [detectedBuilding, setDetectedBuilding] = useState(null);
+  // Footprint, stories and total area as the public records answer them, with
+  // the confidence that evidence earns. Present whenever the parcel can be
+  // reasoned about — an outline on the lot is the best case, not the only one.
+  const [buildingEstimate, setBuildingEstimate] = useState(null);
   const [detectingBuilding, setDetectingBuilding] = useState(false);
   const [footprintChoice, setFootprintChoice] = useState(null); // null | "detected" | "adjust" | "manual"
   const [parcel, setParcel] = useState(null);
@@ -644,8 +662,10 @@ export default function App() {
   // rebuilds the row — and with it a new `parcel_geojson_wgs84` reference — but
   // the outline itself is unchanged, so depending on the object sent an
   // identical request to the centerline service on every rebuild. The boundary
-  // only moves when the parcel does.
+  // only moves when the parcel does. The addressed street travels with that
+  // identity and is what breaks a corner lot's front-edge tie.
   const parcelIdentity = parcel?.pams_pin ?? parcel?.parcel_id ?? null;
+  const parcelAddressStreet = addressStreetName(parcel);
   useEffect(() => {
     const geometry = parcelRef.current?.parcel_geojson_wgs84;
     if (!parcelIdentity || !geometry) {
@@ -654,59 +674,112 @@ export default function App() {
     }
     const controller = new AbortController();
     setStreetEdge(null);
-    matchParcelToRoad(geometry, controller.signal).then((match) => {
+    matchParcelToRoad(geometry, controller.signal, parcelAddressStreet).then((match) => {
       if (!controller.signal.aborted) setStreetEdge(match);
     });
     return () => controller.abort();
-  }, [parcelIdentity]);
+  }, [parcelIdentity, parcelAddressStreet]);
 
   /**
-   * Look for a published building footprint on the parcel — but only for the
-   * projects that need one. A new house does not care what is standing there
-   * now, so the query is not made.
+   * Work out what is already standing on the parcel — but only for the projects
+   * that need it. A new house does not care what is there now, so no query is
+   * made.
    *
-   * Only the footprint is offered. Storeys and total finished area are left
-   * alone deliberately: a footprint layer is an outline seen from above and
-   * knows nothing about what is under the roof, so filling those from it would
-   * be inventing figures the source does not hold.
+   * An addition cannot be started until the footprint field is filled in, so
+   * the answer has to come from somewhere other than the client's memory. Three
+   * sources are combined: the published outline on this lot, the outlines on
+   * the lots around it, and the MOD-IV record's own building description, whose
+   * floor code (for example 2.5F) supplies the story count. `estimateExistingBuilding`
+   * turns those into footprint, stories and total area, and grades how much the
+   * evidence is worth so the client is never handed a number without its
+   * provenance.
    */
   useEffect(() => {
     const geometry = parcel?.parcel_geojson_wgs84;
     const wantsExisting = projectType === "addition" || projectType === "adu";
     if (!geometry || !wantsExisting) {
       setDetectedBuilding(null);
+      setBuildingEstimate(null);
       setDetectingBuilding(false);
       return undefined;
     }
     const controller = new AbortController();
     setDetectingBuilding(true);
     setDetectedBuilding(null);
-    detectExistingBuilding(geometry, controller.signal)
-      .then((found) => {
-        if (controller.signal.aborted) return;
-        setDetectedBuilding(found);
-        // Fill the footprint as soon as it is known, unless the client has
-        // already taken the field over by hand.
-        setFootprintChoice((choice) => {
-          if (choice === "manual" || choice === "adjust") return choice;
-          if (found) {
-            setExistingStructure((current) => ({
-              ...current,
-              footprint_sqft: found.areaSqft,
-            }));
-            return "detected";
+    setBuildingEstimate(null);
+
+    (async () => {
+      const survey = await surveyParcelBuildings(geometry, controller.signal);
+      if (controller.signal.aborted) return;
+
+      // The neighbouring outlines are only comparable once each is paired with
+      // the lot it stands on, which is a second, optional lookup. It sharpens
+      // the estimate; it never gates it.
+      let comparables = [];
+      if (survey?.neighbors?.length && survey.bbox) {
+        try {
+          const lots = await fetchNjginParcelsInBbox(survey.bbox, controller.signal);
+          comparables = pairBuildingsToParcels(survey.neighbors, lots);
+        } catch (comparableError) {
+          if (comparableError?.name === "AbortError") return;
+        }
+      }
+      if (controller.signal.aborted) return;
+
+      const estimate = estimateExistingBuilding({
+        detected: survey?.detected ?? null,
+        comparables,
+        parcel,
+      });
+      setDetectedBuilding(survey?.detected ?? null);
+      setBuildingEstimate(
+        estimate ? { ...estimate, unreachable: survey?.unreachable ?? [] } : null
+      );
+
+      // Fill every field the records can answer, unless the client has already
+      // taken the numbers over by hand.
+      setFootprintChoice((choice) => {
+        if (choice === "manual" || choice === "adjust") return choice;
+        if (!estimate) return choice;
+        setExistingStructure((current) => {
+          const footprint = estimate.footprintSqft;
+          const stories = estimate.stories ?? "";
+          const totalArea = estimate.totalAreaSqft ?? "";
+          if (
+            Number(current.footprint_sqft) === Number(footprint) &&
+            Number(current.stories) === Number(stories) &&
+            Number(current.total_area_sqft) === Number(totalArea)
+          ) {
+            return current;
           }
-          return choice;
+          return {
+            ...current,
+            footprint_sqft: footprint,
+            stories,
+            total_area_sqft: totalArea,
+          };
         });
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setDetectedBuilding(null);
+        return "detected";
+      });
+    })()
+      .catch((surveyError) => {
+        if (controller.signal.aborted || surveyError?.name === "AbortError") return;
+        setDetectedBuilding(null);
+        setBuildingEstimate(null);
       })
       .finally(() => {
         if (!controller.signal.aborted) setDetectingBuilding(false);
       });
     return () => controller.abort();
-  }, [parcel?.parcel_geojson_wgs84, projectType]);
+  }, [
+    parcel?.parcel_geojson_wgs84,
+    parcel?.building_desc,
+    parcel?.land_desc,
+    parcel?.lot_area_sqft,
+    parcel?.dwelling_units,
+    parcel?.prop_class,
+    projectType,
+  ]);
 
   // Level B only starts after Level A has either been ruled out or completed
   // without a verified Marco district. The municipality's own GIS can identify
@@ -1343,10 +1416,17 @@ export default function App() {
     // real parcel selection while its own records are being resolved.
     setPlannedFloors([]);
     setFloorPositions([]);
-    setExistingStructure((current) => ({ ...current, position: null }));
+    setExistingStructure((current) => ({
+      ...current,
+      footprint_sqft: "",
+      stories: "",
+      total_area_sqft: "",
+      position: null,
+    }));
     // A detected footprint belongs to the parcel it was found on, and so does
     // the choice the client made about it.
     setDetectedBuilding(null);
+    setBuildingEstimate(null);
     setFootprintChoice(null);
 
     if (!picked) {
@@ -1405,12 +1485,14 @@ export default function App() {
     }
   };
 
-  /** Take the detected figure — the initial state, and the way back to it. */
+  /** Take the estimated figures — the initial state, and the way back to them. */
   const useDetectedBuilding = () => {
-    if (!detectedBuilding) return;
+    if (!buildingEstimate) return;
     setExistingStructure((current) => ({
       ...current,
-      footprint_sqft: detectedBuilding.areaSqft,
+      footprint_sqft: buildingEstimate.footprintSqft,
+      stories: buildingEstimate.stories ?? "",
+      total_area_sqft: buildingEstimate.totalAreaSqft ?? "",
     }));
     setFootprintChoice("detected");
   };
@@ -1423,7 +1505,12 @@ export default function App() {
 
   /** Start from nothing: clear the figure and take the outline off the map. */
   const enterFootprintManually = () => {
-    setExistingStructure((current) => ({ ...current, footprint_sqft: "" }));
+    setExistingStructure((current) => ({
+      ...current,
+      footprint_sqft: "",
+      stories: "",
+      total_area_sqft: "",
+    }));
     setFootprintChoice("manual");
   };
 
@@ -1525,6 +1612,7 @@ export default function App() {
           onProjectType={setProjectType}
           onExistingStructure={setExistingStructure}
           detectedBuilding={detectedBuilding}
+          buildingEstimate={buildingEstimate}
           detectingBuilding={detectingBuilding}
           footprintChoice={footprintChoice}
           onUseDetectedBuilding={useDetectedBuilding}
@@ -1750,6 +1838,7 @@ function ProjectSetup({
   onProjectType,
   onExistingStructure,
   detectedBuilding,
+  buildingEstimate,
   detectingBuilding,
   footprintChoice,
   onUseDetectedBuilding,
@@ -1760,6 +1849,10 @@ function ProjectSetup({
 }) {
   const hasExistingHouse = projectType === "addition" || projectType === "adu";
   const propertyResolved = Boolean(parcelPick && applicationMode !== "resolving");
+  const existingLotCoverage = lotCoveragePercent(
+    existingStructure.footprint_sqft,
+    parcel?.lot_area_sqft ?? parcelPick?.lot_area_sqft
+  );
 
   return (
     <section className={previewProps.visible ? "workspace-grid" : "workspace-grid solo"}>
@@ -1916,15 +2009,22 @@ function ProjectSetup({
                 <DetectedBuildingNotice
                   detecting={detectingBuilding}
                   detected={detectedBuilding}
+                  estimate={buildingEstimate}
                   choice={footprintChoice}
                   onUseDetected={onUseDetectedBuilding}
                   onAdjustOutline={onAdjustOutline}
                   onEnterManually={onEnterFootprintManually}
+                  existingStructure={existingStructure}
+                  lotAreaSqft={parcel?.lot_area_sqft ?? parcelPick?.lot_area_sqft}
                 />
 
                 <div className="form-grid existing-fields">
                   <NumberField
-                    label="Existing building footprint (sq ft) *"
+                    label={`Existing building footprint (sq ft) *${
+                      existingLotCoverage == null
+                        ? ""
+                        : ` — ${fmt(existingLotCoverage, 1)}% of lot`
+                    }`}
                     value={existingStructure.footprint_sqft}
                     onChange={(value) => {
                       // Typing makes the figure the client's, not the source's.
@@ -2360,34 +2460,58 @@ function ExpandedMapDialog({
   );
 }
 
+/** Headline for the estimate, which depends on how it was arrived at. */
+const FOOTPRINT_BASIS_TITLE = {
+  njdep: "Existing building detected",
+  osm: "Existing building detected",
+  comparables: "Existing building estimated from the block",
+  lot_model: "Existing building estimated from the lot record",
+};
+
 /**
- * What was found standing on the parcel, where it came from, and what the
+ * What is standing on the parcel, where each number came from, and what the
  * client can do about it.
  *
- * The source is always named. A footprint layer is published data of varying
- * age and completeness, not a survey, and the difference between "the State
- * measured this" and "a mapper drew this" is exactly the sort of thing a
- * client should be told rather than left to assume.
+ * The provenance is always named. A footprint layer is published data of
+ * varying age and completeness, not a survey, and the difference between "the
+ * State measured this", "a mapper drew this" and "the houses either side of it
+ * look like this" is exactly the sort of thing a client should be told rather
+ * than left to assume — which is what the confidence grade is for.
  */
 function DetectedBuildingNotice({
   detecting,
   detected,
+  estimate,
   choice,
   onUseDetected,
   onAdjustOutline,
   onEnterManually,
+  existingStructure,
+  lotAreaSqft,
 }) {
+  const coverage =
+    lotCoveragePercent(existingStructure?.footprint_sqft, lotAreaSqft) ??
+    estimate?.coveragePercent ??
+    null;
+  const estimateApplied = Boolean(
+    estimate &&
+      Number(existingStructure?.footprint_sqft) === Number(estimate.footprintSqft) &&
+      Number(existingStructure?.stories ?? "") === Number(estimate.stories ?? "") &&
+      Number(existingStructure?.total_area_sqft ?? "") === Number(estimate.totalAreaSqft ?? "")
+  );
+
   if (choice === "manual") {
     return (
       <p className="footprint-note manual" role="status">
         <span aria-hidden="true">✎</span>
         <span>
           Footprint entered by hand.
-          {detected && (
+          {estimate && (
             <>
               {" "}
               <button type="button" className="text-button compact" onClick={onUseDetected}>
-                Use the detected building ({fmt(detected.areaSqft)} sq ft) instead
+                Use the {estimate.confidence.toLowerCase()}-confidence estimate (
+                {fmt(estimate.footprintSqft)} sq ft) instead
               </button>
             </>
           )}
@@ -2400,58 +2524,113 @@ function DetectedBuildingNotice({
     return (
       <p className="footprint-note busy" role="status">
         <span className="footprint-spinner" aria-hidden="true" />
-        Looking for a published building footprint on this parcel…
+        Measuring the existing building from published records…
       </p>
     );
   }
 
-  if (!detected) {
+  if (!estimate) {
     return (
       <p className="footprint-note" role="status">
         <span aria-hidden="true">○</span>
         <span>
-          No published building footprint covers this parcel, so there is nothing to measure
-          automatically. Enter the footprint below.
+          Nothing is published about a building on this parcel, and the lot record carries no
+          dimensions to model one from. Enter the footprint below.
         </span>
       </p>
     );
   }
 
   const adjusting = choice === "adjust";
+  const modelled = estimate.footprintBasis === "comparables" || estimate.footprintBasis === "lot_model";
+  const unreachable = estimate.unreachable ?? [];
   return (
     <div className={adjusting ? "footprint-detected adjusting" : "footprint-detected"} role="status">
       <div className="footprint-detected-head">
         <strong>
-          {adjusting ? "Adjusting the detected outline" : "Existing building detected"}
+          {adjusting
+            ? "Adjusting the estimated building"
+            : FOOTPRINT_BASIS_TITLE[estimate.footprintBasis] ?? "Existing building estimated"}
         </strong>
-        <span className="footprint-area">{fmt(detected.areaSqft)} sq ft</span>
+        <span className="footprint-area">
+          {fmt(existingStructure?.footprint_sqft || estimate.footprintSqft)} sq ft
+          {coverage != null && <small>{fmt(coverage, 1)}% of lot covered</small>}
+        </span>
       </div>
-      <p className="footprint-source">
-        Measured from <strong>{detected.source.name}</strong> — {detected.source.detail}.{" "}
-        <a href={detected.source.url} target="_blank" rel="noreferrer">
-          Source →
-        </a>
-      </p>
-      {detected.clipped && (
+
+      <div className={`confidence-badge ${estimate.confidence.toLowerCase()}`}>
+        <span className="confidence-dot" aria-hidden="true" />
+        <strong>{estimate.confidence} confidence</strong>
+        {estimateApplied ? (
+          <span>
+            {fmt(estimate.footprintSqft)} sq ft footprint
+            {estimate.stories ? ` · ${fmt(estimate.stories)} stories` : ""}
+            {estimate.totalAreaSqft ? ` · ${fmt(estimate.totalAreaSqft)} sq ft total` : ""}
+          </span>
+        ) : (
+          <span>The fields below have been edited and now control the calculation.</span>
+        )}
+      </div>
+
+      {detected ? (
+        <p className="footprint-source">
+          Measured from <strong>{detected.source.name}</strong> — {detected.source.detail}.{" "}
+          <a href={detected.source.url} target="_blank" rel="noreferrer">
+            Source →
+          </a>
+        </p>
+      ) : (
+        <p className="footprint-source">
+          No outline is published on this lot, so the footprint is{" "}
+          {estimate.footprintBasis === "comparables"
+            ? `estimated from ${estimate.footprintSource}`
+            : `modelled from ${estimate.footprintSource}`}
+          .
+        </p>
+      )}
+
+      <ul className="confidence-reasons">
+        {estimate.reasons.map((reason, index) => (
+          <li key={index}>{reason}</li>
+        ))}
+      </ul>
+
+      {estimate.range.footprintHigh > estimate.range.footprintLow && (
         <p className="fine">
-          The outline crosses this lot's boundary. The {fmt(detected.areaSqft)} sq ft above is the
-          part standing on this parcel, out of {fmt(detected.fullAreaSqft)} sq ft in total — an
-          attached row house is normally drawn as one shape across several lots.
+          Likely range: {fmt(estimate.range.footprintLow)}–{fmt(estimate.range.footprintHigh)} sq ft
+          footprint
+          {estimate.range.totalAreaLow
+            ? `, ${fmt(estimate.range.totalAreaLow)}–${fmt(estimate.range.totalAreaHigh)} sq ft total`
+            : ""}
+          .
+        </p>
+      )}
+      {detected?.clipped && (
+        <p className="fine">
+          The mapped outline crosses this lot's boundary: {fmt(detected.areaSqft)} sq ft falls
+          inside this parcel, out of {fmt(detected.fullAreaSqft)} sq ft in the complete outline.
+        </p>
+      )}
+      {estimate.totalAreaExplanation && <p className="fine">{estimate.totalAreaExplanation}.</p>}
+      {unreachable.length > 0 && (
+        <p className="fine">
+          {unreachable.map((item) => item.source?.name).filter(Boolean).join(" and ")} could not be
+          reached, so {unreachable.length === 1 ? "that source" : "those sources"} was not consulted.
         </p>
       )}
       <p className="fine">
-        Outlines are published data of varying age and accuracy, not a survey. Storeys and total
-        finished area are not filled in: a footprint is an outline seen from above and says nothing
-        about what is under the roof.
+        Published outlines and assessor descriptions vary in age and accuracy. These values are
+        editable estimates, not a survey or measured floor plan
+        {modelled ? " — confirm them before the plan is relied on" : ""}.
       </p>
       <div className="footprint-actions">
         {adjusting ? (
           <button type="button" className="secondary compact" onClick={onUseDetected}>
-            Restore detected size
+            Restore estimated size
           </button>
         ) : (
           <button type="button" className="secondary compact" onClick={onAdjustOutline}>
-            Adjust outline
+            {detected ? "Adjust outline" : "Adjust these figures"}
           </button>
         )}
         <button type="button" className="text-button compact" onClick={onEnterManually}>
@@ -2707,6 +2886,61 @@ function SurveyNotice() {
  * footprint, floors, total buildable — and only then ask what the client wants
  * to build, checking it against those maximums as they type.
  */
+/**
+ * A full-screen dialog for a panel that is too small in place.
+ *
+ * Deliberately the same `map-dialog-*` markup, classes and behavior as the
+ * property map dialog — backdrop click, Escape, a focused close button and a
+ * locked body scroll — so the app has one kind of popup rather than two that
+ * are almost alike.
+ */
+function ExpandDialog({ eyebrow, title, labelledBy, onClose, children }) {
+  const closeRef = useRef(null);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="map-dialog-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section className="map-dialog" role="dialog" aria-modal="true" aria-labelledby={labelledBy}>
+        <header className="map-dialog-header">
+          <div>
+            <p className="eyebrow">{eyebrow}</p>
+            <h2 id={labelledBy}>{title}</h2>
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            className="map-dialog-close"
+            onClick={onClose}
+            aria-label={`Close expanded ${eyebrow.toLowerCase()}`}
+          >
+            ×
+          </button>
+        </header>
+        <div className="map-dialog-body expand-dialog-body">{children}</div>
+      </section>
+    </div>
+  );
+}
+
 function CapacityStep({
   project,
   district,
@@ -2734,6 +2968,7 @@ function CapacityStep({
   // The plan is the working view — it is the one the footprint is set in — so
   // it opens first, with the massing a click away.
   const [plan2d, setPlan2d] = useState(true);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
   const hasExistingHouse = project?.id === "addition" || project?.id === "adu";
   const verticalAddition = project?.id === "addition" && result.additionLocation === "above";
   const footprintValue =
@@ -2923,6 +3158,21 @@ function CapacityStep({
       ? Number(result.plannedAreaSoFar)
       : 0;
   const capacityRemaining = Math.max(0, capacityCeiling - capacityUsed);
+  // Setbacks that meet or cross each other leave no envelope at all. That is an
+  // answer — the lot needs a variance — but printed as a bare "0 sq ft" it reads
+  // as a failed calculation, so name the rule and the dimension it conflicts
+  // with instead. Undersized lots predate the ordinance and are common.
+  const setbackFrontFt = Number(district?.front_yard_min_ft) || 0;
+  const setbackRearFt = Number(district?.rear_yard_min_ft) || 0;
+  const setbackSideTotalFt =
+    district?.side_yard_total_min_ft != null
+      ? Number(district.side_yard_total_min_ft)
+      : (Number(district?.side_yard_one_min_ft) || 0) * 2;
+  const noBuildableEnvelope = Number(footprintValue) === 0 && envelopeAreaOf(result) === 0;
+  const envelopeShortOnDepth =
+    noBuildableEnvelope && lotDepthFt != null && setbackFrontFt + setbackRearFt >= lotDepthFt;
+  const envelopeShortOnWidth =
+    noBuildableEnvelope && lotWidthFt != null && setbackSideTotalFt >= lotWidthFt;
   const groundAddition = project?.id === "addition" && !verticalAddition;
   const remainingSetbackArea =
     project?.id !== "addition"
@@ -2986,6 +3236,362 @@ function CapacityStep({
     }
   }, [maxPlannedFloors, onPlannedFloors, plannedFloors]);
 
+  // One element, rendered either in the card or in the expand dialog —
+  // never both. Held as a variable so the two placements cannot drift.
+  // The size editor, so the expand dialog can host it beside the plan.
+  // Rendered in exactly one place at a time, like previewBody.
+  const plannedSizePanel = (
+            <div className="planned-size">
+              <div className="method-title">
+                <div>
+                  <h3>{plannedSizeLabel(project?.id)}</h3>
+                </div>
+              </div>
+              {project?.id === "addition" && (
+                <label className="addition-location-select">
+                  <span>Where will the addition be located?</span>
+                  <select
+                    value={existingStructure.addition_location}
+                    onChange={(event) => chooseAdditionLocation(event.target.value)}
+                  >
+                    <option value="side_left">Side — left</option>
+                    <option value="side_right">Side — right</option>
+                    <option value="front">Front addition</option>
+                    <option value="back">Back addition</option>
+                    <option value="above">Above the existing house — new floor</option>
+                  </select>
+                  <small>Click to choose where the new construction will be placed.</small>
+                </label>
+              )}
+              {(!groundAddition || project?.id !== "addition") && (
+                <div className="form-grid">
+                  <label className={floorsExceeded ? "field invalid" : "field"}>
+                    {project?.id === "addition" ? "Number of new floors to add" : "Number of floors you plan"}
+                    <input
+                      type="number"
+                      min="0"
+                      max={maxPlannedFloors}
+                      step="1"
+                      value={plannedFloors.length || ""}
+                      onChange={(e) => setFloorCount(e.target.value)}
+                      aria-invalid={floorsExceeded || undefined}
+                    />
+                    {floorsExceeded ? (
+                      <small className="field-error">
+                        {verticalAddition
+                          ? `${district.code} allows ${maxFloors} total stories. With ${existingStoryCount} existing, only ${maxPlannedFloors} additional ${maxPlannedFloors === 1 ? "floor is" : "floors are"} available.`
+                          : `${district.code} allows a maximum of ${maxFloors} floors.`}
+                      </small>
+                    ) : (
+                      <small>
+                        Adds width, depth, and height fields for each floor.
+                        {maxFloors != null
+                          ? verticalAddition
+                            ? ` Up to ${maxPlannedFloors} additional ${maxPlannedFloors === 1 ? "floor" : "floors"} allowed (${maxFloors} total minus ${existingStoryCount} existing).`
+                            : ` Up to ${maxFloors} allowed here.`
+                          : ""}
+                      </small>
+                    )}
+                  </label>
+                </div>
+              )}
+              {plannedFloors.length > 0 && (
+                <>
+                  <div className="floor-fields">
+                    {plannedFloors.map((floor, index) => {
+                      const displayFloorNumber =
+                        verticalAddition ? existingStoryCount + index + 1 : index + 1;
+                      const widthMax =
+                        index === 0
+                          ? maxHouseWidthFt
+                          : Number(plannedFloors[index - 1]?.width_ft) || maxHouseWidthFt || null;
+                      const depthMax =
+                        index === 0
+                          ? maxHouseDepthFt
+                          : Number(plannedFloors[index - 1]?.depth_ft) || maxHouseDepthFt || null;
+                      const floorArea =
+                        Number(floor?.width_ft) > 0 && Number(floor?.depth_ft) > 0
+                          ? Number(floor.width_ft) * Number(floor.depth_ft)
+                          : null;
+                      const otherFloorHeight = plannedFloors.reduce((sum, item, itemIndex) => {
+                        if (itemIndex === index) return sum;
+                        const itemHeight = Number(item?.height_ft);
+                        return itemHeight > 0 ? sum + itemHeight : sum;
+                      }, 0);
+                      const heightMax =
+                        heightCeiling == null
+                          ? FIELD_RULES.planned_floor_height.max
+                          : Math.max(0, heightCeiling - otherFloorHeight);
+                      const floorValid =
+                        floorArea != null &&
+                        (widthMax == null || Number(floor.width_ft) <= Number(widthMax)) &&
+                        (depthMax == null || Number(floor.depth_ft) <= Number(depthMax)) &&
+                        Number(floor.height_ft) > 0 &&
+                        Number(floor.height_ft) <= heightMax &&
+                        result.fitsHeight !== false &&
+                        (verticalAddition || result.fitsEnvelope !== false) &&
+                        (!groundAddition || result.fitsAttachment !== false) &&
+                        (project?.id !== "adu" || result.fitsSeparation !== false);
+                      const displayFloorLabel =
+                        groundAddition && index === 0
+                          ? "New ground-floor addition"
+                          : groundAddition
+                            ? `Addition floor ${index + 1}`
+                            : `Floor ${displayFloorNumber}`;
+                      return (
+                        <fieldset className="floor-row" key={index}>
+                          <legend className="sr-only">{displayFloorLabel}</legend>
+                          <div className="floor-row-id" aria-hidden="true">
+                            <span className="floor-row-num">{displayFloorNumber}</span>
+                            <span className="floor-row-label">{displayFloorLabel}</span>
+                          </div>
+                          <div className="floor-row-fields">
+                            <NumberField
+                              label="Width (ft)"
+                              value={floor?.width_ft ?? ""}
+                              onChange={(value) => setFloorDimension(index, "width_ft", value)}
+                              fieldKey="planned_floor_dimension"
+                              max={widthMax ?? undefined}
+                              step="0.5"
+                              help={
+                                index > 0
+                                  ? widthMax == null
+                                    ? "The floor below has no width yet."
+                                    : `Maximum ${fmt(widthMax, 1)} ft — cannot exceed the floor below.`
+                                  : zoningVerified
+                                    ? widthMax == null
+                                      ? "Frontage: Not available. Enter the planned width manually."
+                                      : `Maximum ${fmt(widthMax, 1)} ft.`
+                                    : widthMax == null
+                                      ? "Frontage: Not available. Enter the planned width manually."
+                                      : "Zoning setbacks are not applied."
+                              }
+                            />
+                            <NumberField
+                              label="Depth (ft)"
+                              value={floor?.depth_ft ?? ""}
+                              onChange={(value) => setFloorDimension(index, "depth_ft", value)}
+                              fieldKey="planned_floor_dimension"
+                              max={depthMax ?? undefined}
+                              step="0.5"
+                              help={
+                                index > 0
+                                  ? depthMax == null
+                                    ? "The floor below has no depth yet."
+                                    : `Maximum ${fmt(depthMax, 1)} ft — cannot exceed the floor below.`
+                                  : zoningVerified
+                                    ? depthMax == null
+                                      ? "Depth: Not available. Enter the planned depth manually."
+                                      : `Maximum ${fmt(depthMax, 1)} ft.`
+                                    : depthMax == null
+                                      ? "Depth: Not available. Enter the planned depth manually."
+                                      : "Zoning setbacks are not applied."
+                              }
+                            />
+                            <NumberField
+                              label={
+                                project?.id === "addition"
+                                  ? "Addition wall/level height (ft)"
+                                  : "Height (ft)"
+                              }
+                              value={floor?.height_ft ?? ""}
+                              onChange={(value) => setFloorDimension(index, "height_ft", value)}
+                              fieldKey="planned_floor_height"
+                              max={heightMax}
+                              step="0.5"
+                              help={
+                                zoningVerified
+                                  ? heightCeiling == null
+                                    ? `Default ${FLOOR_TO_FLOOR_FT} ft · no district height limit is loaded.`
+                                    // Matches the width and depth hints beside it.
+                                    // The combined-height check still runs; it is
+                                    // reported by "Height allowance left" below.
+                                    : `Maximum ${fmt(heightMax, 1)} ft.`
+                                  : `Default ${FLOOR_TO_FLOOR_FT} ft · zoning height is not checked.`
+                              }
+                            />
+                            {/* The maxima are not arbitrary: floor 1 is capped by
+                                zoning, every floor above by the one beneath it. */}
+                            <span
+                              className="floor-row-lock"
+                              title={
+                                index === 0
+                                  ? zoningVerified
+                                    ? lotDimensionsAvailable
+                                      ? `Limited by ${district.code} zoning: ${fmt(widthMax, 1)} × ${fmt(depthMax, 1)} ft.`
+                                      : "Recorded frontage and depth are not available."
+                                    : lotDimensionsAvailable
+                                      ? `Limited to the parcel workspace: ${fmt(widthMax, 1)} × ${fmt(depthMax, 1)} ft. Zoning setbacks are not applied.`
+                                      : "Recorded frontage and depth are not available."
+                                  : "Cannot exceed the floor below."
+                              }
+                              aria-hidden="true"
+                            >
+                              <LockGlyph />
+                            </span>
+                          </div>
+                          <div
+                            className={
+                              floorArea == null
+                                ? "floor-row-area"
+                                : floorValid
+                                  ? "floor-row-area done"
+                                  : "floor-row-area invalid"
+                            }
+                          >
+                            <span>Floor area</span>
+                            <strong>
+                              {floorArea == null ? "—" : fmt(floorArea)}
+                              {floorArea != null && <em> sq ft</em>}
+                            </strong>
+                            <span className="floor-row-status" aria-hidden="true">
+                              {floorArea == null ? "" : floorValid ? "✓" : "!"}
+                            </span>
+                          </div>
+                        </fieldset>
+                      );
+                    })}
+                  </div>
+                  <p className="planned-total">
+                    Planned total: <strong>{plannedTotal == null ? "—" : `${fmt(plannedTotal)} sq ft`}</strong>
+                    {result.plannedFootprint != null && (
+                      <> · largest floor {fmt(result.plannedFootprint)} sq ft</>
+                    )}
+                    {result.plannedHeight != null && <> · height {fmt(result.plannedHeight, 1)} ft</>}
+                  </p>
+                  {zoningVerified && heightCeiling != null && heightUsed != null && (
+                    <p
+                      className={`remaining-buildable-area height-allowance${
+                        result.fitsHeight === false ? " invalid" : ""
+                      }`}
+                      role={result.fitsHeight === false ? "alert" : "status"}
+                    >
+                      <span>Height allowance left</span>
+                      <strong>
+                        {heightExceededBy > 0
+                          ? `${fmt(heightExceededBy, 1)} ft over`
+                          : `${fmt(heightRemaining, 1)} ft`}
+                      </strong>
+                    </p>
+                  )}
+                  {zoningVerified && project?.id === "addition" && (
+                    <p className="remaining-buildable-area" role="status">
+                      <span>
+                        {verticalAddition
+                          ? "Remaining floor area allowed"
+                          : "Remaining ground footprint within setback rules"}
+                      </span>
+                      <strong>{remainingSetbackArea == null ? "—" : fmt(remainingSetbackArea)} sq ft</strong>
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+  );
+
+  // The two drawings, held separately so the dialog can show both at once
+  // while the card shows whichever the Plan/3D toggle selects.
+  const sitePlanEl = (
+            <SitePlan2D
+              lotWidthFt={lotWidthFt}
+              lotDepthFt={lotDepthFt}
+              zoningVerified={zoningVerified}
+              parcelGeometry={result.planParcelGeometry}
+              envelopeGeometry={result.planEnvelopeGeometry}
+              setbacks={{
+                front: district.front_yard_min_ft,
+                side:
+                  district.side_yard_total_min_ft != null
+                    ? district.side_yard_total_min_ft / 2
+                    : district.side_yard_one_min_ft,
+                rear: district.rear_yard_min_ft,
+              }}
+              existingBuilding={
+                hasExistingHouse
+                  ? {
+                      footprintSqft: result.existingFootprint,
+                      location: result.existingLocation,
+                      position: result.existingPosition,
+                      additionLocation: result.additionLocation,
+                    }
+                  : null
+              }
+              placementMode={
+                project?.id === "adu"
+                  ? "adu"
+                  : groundAddition
+                    ? "addition"
+                    : "free"
+              }
+              floors={result.plannedDimensions ?? []}
+              maxWidthFt={selectedFloor === 0 ? maxHouseWidthFt : selectedFloorMaxWidthFt}
+              maxDepthFt={selectedFloor === 0 ? maxHouseDepthFt : selectedFloorMaxDepthFt}
+              positions={floorPositions}
+              selectedFloor={selectedFloor}
+              streetName={streetNameFor(parcel, streetEdge)}
+              proposedLabel={
+                project?.id === "adu"
+                  ? "Proposed ADU"
+                  : groundAddition
+                    ? "Proposed addition"
+                    : "Proposed building"
+              }
+              onSelectFloor={setSelectedFloor}
+              onResize={setFootprint}
+              onMove={moveFloor}
+              onExistingMove={moveExistingStructure}
+              onAdditionSideChange={setDraggedAdditionSide}
+              onResetPosition={(index) => moveFloor(index, null)}
+              onFillEnvelope={fillEnvelope}
+            />
+  );
+  const preview3dEl = (
+          <BuildingPreview3D
+            lotWidthFt={lotWidthFt}
+            lotDepthFt={lotDepthFt}
+            floors={result.plannedDimensions ?? []}
+            plannedOriginsFt={result.floorRects}
+            defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
+            northAngleDeg={streetEdge?.northAngleDeg ?? northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
+            streetName={streetNameFor(parcel, streetEdge)}
+            parcelGeojson={parcel?.parcel_geojson_wgs84}
+            existingBuilding={
+              hasExistingHouse
+                ? {
+                    footprintSqft: result.existingFootprint,
+                    stories: result.existingStories,
+                    totalAreaSqft: result.existingArea,
+                    location: result.existingLocation,
+                    position: result.existingPosition,
+                    additionLocation: result.additionLocation,
+                    placementMode:
+                      project?.id === "adu"
+                        ? "adu"
+                        : result.additionLocation === "above"
+                          ? "vertical"
+                          : "addition",
+                  }
+                : null
+            }
+            setbacks={{
+              front: district.front_yard_min_ft,
+              side:
+                district.side_yard_total_min_ft != null
+                  ? district.side_yard_total_min_ft / 2
+                  : district.side_yard_one_min_ft,
+              rear: district.rear_yard_min_ft,
+            }}
+          />
+  );
+  const previewBody = !lotDimensionsAvailable ? (
+    <div className="preview-placeholder lot-dimensions-unavailable" role="status">
+      <strong>Lot dimensions not available</strong>
+      <span>Frontage: Not available</span>
+      <span>Depth: Not available</span>
+      <small>The initial 25 × 100 ft starter lot is not used for selected parcels.</small>
+    </div>
+  ) : plan2d ? sitePlanEl : preview3dEl;
+
   return (
     <>
       <section className="results-heading">
@@ -3044,9 +3650,30 @@ function CapacityStep({
               <>
                 <div className={footprintUsed > 0 ? "capacity-figure spent" : "capacity-figure"}>
                   <span>{footprintUsed > 0 ? "Building footprint left" : footprintLabel}</span>
-                  <strong>{fmt(footprintRemaining)} <em>sq ft</em></strong>
+                  {noBuildableEnvelope ? (
+                    <strong className="answer-pending">None without a variance</strong>
+                  ) : (
+                    <strong>{fmt(footprintRemaining)} <em>sq ft</em></strong>
+                  )}
                   <small>
-                    {footprintUsed > 0 ? (
+                    {noBuildableEnvelope ? (
+                      envelopeShortOnDepth ? (
+                        <>
+                          The {fmt(setbackFrontFt)} ft front and {fmt(setbackRearFt)} ft rear
+                          setbacks in {district.code} need {fmt(setbackFrontFt + setbackRearFt)} ft
+                          of depth, and this lot is {fmt(lotDepthFt)} ft deep. No conforming
+                          envelope remains.
+                        </>
+                      ) : envelopeShortOnWidth ? (
+                        <>
+                          The side setbacks in {district.code} need{" "}
+                          {fmt(setbackSideTotalFt)} ft of width, and this lot is{" "}
+                          {fmt(lotWidthFt)} ft wide. No conforming envelope remains.
+                        </>
+                      ) : (
+                        <>The setbacks in {district.code} leave no buildable area on this lot.</>
+                      )
+                    ) : footprintUsed > 0 ? (
                       <>
                         {fmt(footprintValue)} sq ft permitted, {fmt(footprintUsed)} sq ft taken by
                         your ground floor.
@@ -3093,12 +3720,16 @@ function CapacityStep({
                   <span>Total floor-area allowance left</span>
                   {result.maxArea == null ? (
                     <strong className="answer-pending">Enter existing floor area</strong>
+                  ) : noBuildableEnvelope ? (
+                    <strong className="answer-pending">None without a variance</strong>
                   ) : (
                     <strong>{fmt(capacityRemaining)} <em>sq ft</em></strong>
                   )}
                   <small>
                     {result.maxArea == null ? (
                       "Enter the existing floor area to calculate the total allowance."
+                    ) : noBuildableEnvelope ? (
+                      "Floor area follows the footprint, and the setbacks leave none to build on."
                     ) : capacityUsed > 0 ? (
                       <>
                         {fmt(capacityCeiling)} sq ft total allowance − {fmt(capacityUsed)} sq ft
@@ -3113,249 +3744,7 @@ function CapacityStep({
             )}
           </div>
 
-          <div className="planned-size">
-            <div className="method-title">
-              <div>
-                <h3>{plannedSizeLabel(project?.id)}</h3>
-              </div>
-            </div>
-            {project?.id === "addition" && (
-              <label className="addition-location-select">
-                <span>Where will the addition be located?</span>
-                <select
-                  value={existingStructure.addition_location}
-                  onChange={(event) => chooseAdditionLocation(event.target.value)}
-                >
-                  <option value="side_left">Side — left</option>
-                  <option value="side_right">Side — right</option>
-                  <option value="front">Front addition</option>
-                  <option value="back">Back addition</option>
-                  <option value="above">Above the existing house — new floor</option>
-                </select>
-                <small>Click to choose where the new construction will be placed.</small>
-              </label>
-            )}
-            {(!groundAddition || project?.id !== "addition") && (
-              <div className="form-grid">
-                <label className={floorsExceeded ? "field invalid" : "field"}>
-                  {project?.id === "addition" ? "Number of new floors to add" : "Number of floors you plan"}
-                  <input
-                    type="number"
-                    min="0"
-                    max={maxPlannedFloors}
-                    step="1"
-                    value={plannedFloors.length || ""}
-                    onChange={(e) => setFloorCount(e.target.value)}
-                    aria-invalid={floorsExceeded || undefined}
-                  />
-                  {floorsExceeded ? (
-                    <small className="field-error">
-                      {verticalAddition
-                        ? `${district.code} allows ${maxFloors} total stories. With ${existingStoryCount} existing, only ${maxPlannedFloors} additional ${maxPlannedFloors === 1 ? "floor is" : "floors are"} available.`
-                        : `${district.code} allows a maximum of ${maxFloors} floors.`}
-                    </small>
-                  ) : (
-                    <small>
-                      Adds width, depth, and height fields for each floor.
-                      {maxFloors != null
-                        ? verticalAddition
-                          ? ` Up to ${maxPlannedFloors} additional ${maxPlannedFloors === 1 ? "floor" : "floors"} allowed (${maxFloors} total minus ${existingStoryCount} existing).`
-                          : ` Up to ${maxFloors} allowed here.`
-                        : ""}
-                    </small>
-                  )}
-                </label>
-              </div>
-            )}
-            {plannedFloors.length > 0 && (
-              <>
-                <div className="floor-fields">
-                  {plannedFloors.map((floor, index) => {
-                    const displayFloorNumber =
-                      verticalAddition ? existingStoryCount + index + 1 : index + 1;
-                    const widthMax =
-                      index === 0
-                        ? maxHouseWidthFt
-                        : Number(plannedFloors[index - 1]?.width_ft) || maxHouseWidthFt || null;
-                    const depthMax =
-                      index === 0
-                        ? maxHouseDepthFt
-                        : Number(plannedFloors[index - 1]?.depth_ft) || maxHouseDepthFt || null;
-                    const floorArea =
-                      Number(floor?.width_ft) > 0 && Number(floor?.depth_ft) > 0
-                        ? Number(floor.width_ft) * Number(floor.depth_ft)
-                        : null;
-                    const otherFloorHeight = plannedFloors.reduce((sum, item, itemIndex) => {
-                      if (itemIndex === index) return sum;
-                      const itemHeight = Number(item?.height_ft);
-                      return itemHeight > 0 ? sum + itemHeight : sum;
-                    }, 0);
-                    const heightMax =
-                      heightCeiling == null
-                        ? FIELD_RULES.planned_floor_height.max
-                        : Math.max(0, heightCeiling - otherFloorHeight);
-                    const floorValid =
-                      floorArea != null &&
-                      (widthMax == null || Number(floor.width_ft) <= Number(widthMax)) &&
-                      (depthMax == null || Number(floor.depth_ft) <= Number(depthMax)) &&
-                      Number(floor.height_ft) > 0 &&
-                      Number(floor.height_ft) <= heightMax &&
-                      result.fitsHeight !== false &&
-                      (verticalAddition || result.fitsEnvelope !== false) &&
-                      (!groundAddition || result.fitsAttachment !== false) &&
-                      (project?.id !== "adu" || result.fitsSeparation !== false);
-                    const displayFloorLabel =
-                      groundAddition && index === 0
-                        ? "New ground-floor addition"
-                        : groundAddition
-                          ? `Addition floor ${index + 1}`
-                          : `Floor ${displayFloorNumber}`;
-                    return (
-                      <fieldset className="floor-row" key={index}>
-                        <legend className="sr-only">{displayFloorLabel}</legend>
-                        <div className="floor-row-id" aria-hidden="true">
-                          <span className="floor-row-num">{displayFloorNumber}</span>
-                          <span className="floor-row-label">{displayFloorLabel}</span>
-                        </div>
-                        <div className="floor-row-fields">
-                          <NumberField
-                            label="Width (ft)"
-                            value={floor?.width_ft ?? ""}
-                            onChange={(value) => setFloorDimension(index, "width_ft", value)}
-                            fieldKey="planned_floor_dimension"
-                            max={widthMax ?? undefined}
-                            step="0.5"
-                            help={
-                              index > 0
-                                ? widthMax == null
-                                  ? "The floor below has no width yet."
-                                  : `Maximum ${fmt(widthMax, 1)} ft — cannot exceed the floor below.`
-                                : zoningVerified
-                                  ? widthMax == null
-                                    ? "Frontage: Not available. Enter the planned width manually."
-                                    : `Maximum ${fmt(widthMax, 1)} ft.`
-                                  : widthMax == null
-                                    ? "Frontage: Not available. Enter the planned width manually."
-                                    : "Zoning setbacks are not applied."
-                            }
-                          />
-                          <NumberField
-                            label="Depth (ft)"
-                            value={floor?.depth_ft ?? ""}
-                            onChange={(value) => setFloorDimension(index, "depth_ft", value)}
-                            fieldKey="planned_floor_dimension"
-                            max={depthMax ?? undefined}
-                            step="0.5"
-                            help={
-                              index > 0
-                                ? depthMax == null
-                                  ? "The floor below has no depth yet."
-                                  : `Maximum ${fmt(depthMax, 1)} ft — cannot exceed the floor below.`
-                                : zoningVerified
-                                  ? depthMax == null
-                                    ? "Depth: Not available. Enter the planned depth manually."
-                                    : `Maximum ${fmt(depthMax, 1)} ft.`
-                                  : depthMax == null
-                                    ? "Depth: Not available. Enter the planned depth manually."
-                                    : "Zoning setbacks are not applied."
-                            }
-                          />
-                          <NumberField
-                            label={
-                              project?.id === "addition"
-                                ? "Addition wall/level height (ft)"
-                                : "Height (ft)"
-                            }
-                            value={floor?.height_ft ?? ""}
-                            onChange={(value) => setFloorDimension(index, "height_ft", value)}
-                            fieldKey="planned_floor_height"
-                            max={heightMax}
-                            step="0.5"
-                            help={
-                              zoningVerified
-                                ? heightCeiling == null
-                                  ? `Default ${FLOOR_TO_FLOOR_FT} ft · no district height limit is loaded.`
-                                  : `Maximum ${fmt(heightMax, 1)} ft for this floor · combined height checked against the ${fmt(heightCeiling, 1)} ft zoning limit.`
-                                : `Default ${FLOOR_TO_FLOOR_FT} ft · zoning height is not checked.`
-                            }
-                          />
-                          {/* The maxima are not arbitrary: floor 1 is capped by
-                              zoning, every floor above by the one beneath it. */}
-                          <span
-                            className="floor-row-lock"
-                            title={
-                              index === 0
-                                ? zoningVerified
-                                  ? lotDimensionsAvailable
-                                    ? `Limited by ${district.code} zoning: ${fmt(widthMax, 1)} × ${fmt(depthMax, 1)} ft.`
-                                    : "Recorded frontage and depth are not available."
-                                  : lotDimensionsAvailable
-                                    ? `Limited to the parcel workspace: ${fmt(widthMax, 1)} × ${fmt(depthMax, 1)} ft. Zoning setbacks are not applied.`
-                                    : "Recorded frontage and depth are not available."
-                                : "Cannot exceed the floor below."
-                            }
-                            aria-hidden="true"
-                          >
-                            <LockGlyph />
-                          </span>
-                        </div>
-                        <div
-                          className={
-                            floorArea == null
-                              ? "floor-row-area"
-                              : floorValid
-                                ? "floor-row-area done"
-                                : "floor-row-area invalid"
-                          }
-                        >
-                          <span>Floor area</span>
-                          <strong>
-                            {floorArea == null ? "—" : fmt(floorArea)}
-                            {floorArea != null && <em> sq ft</em>}
-                          </strong>
-                          <span className="floor-row-status" aria-hidden="true">
-                            {floorArea == null ? "" : floorValid ? "✓" : "!"}
-                          </span>
-                        </div>
-                      </fieldset>
-                    );
-                  })}
-                </div>
-                <p className="planned-total">
-                  Planned total: <strong>{plannedTotal == null ? "—" : `${fmt(plannedTotal)} sq ft`}</strong>
-                  {result.plannedFootprint != null && (
-                    <> · largest floor {fmt(result.plannedFootprint)} sq ft</>
-                  )}
-                  {result.plannedHeight != null && <> · height {fmt(result.plannedHeight, 1)} ft</>}
-                </p>
-                {zoningVerified && heightCeiling != null && heightUsed != null && (
-                  <p
-                    className={`remaining-buildable-area height-allowance${
-                      result.fitsHeight === false ? " invalid" : ""
-                    }`}
-                    role={result.fitsHeight === false ? "alert" : "status"}
-                  >
-                    <span>Height allowance left</span>
-                    <strong>
-                      {heightExceededBy > 0
-                        ? `${fmt(heightExceededBy, 1)} ft over`
-                        : `${fmt(heightRemaining, 1)} ft`}
-                    </strong>
-                  </p>
-                )}
-                {zoningVerified && project?.id === "addition" && (
-                  <p className="remaining-buildable-area" role="status">
-                    <span>
-                      {verticalAddition
-                        ? "Remaining floor area allowed"
-                        : "Remaining ground footprint within setback rules"}
-                    </span>
-                    <strong>{remainingSetbackArea == null ? "—" : fmt(remainingSetbackArea)} sq ft</strong>
-                  </p>
-                )}
-              </>
-            )}
-          </div>
+          {plannedSizePanel}
 
           <div className="actions">
             <button type="button" className="secondary" onClick={onBack}>← Back</button>
@@ -3411,104 +3800,35 @@ function CapacityStep({
                 : "Drag each floor to place it and its handles to size it inside the parcel. Zoning setbacks are not applied."
               : "Drag to orbit and use the mouse wheel to zoom. Dimensions are preliminary and are not a survey."}
           </p>
-          {!lotDimensionsAvailable ? (
-            <div className="preview-placeholder lot-dimensions-unavailable" role="status">
-              <strong>Lot dimensions not available</strong>
-              <span>Frontage: Not available</span>
-              <span>Depth: Not available</span>
-              <small>The initial 25 × 100 ft starter lot is not used for selected parcels.</small>
-            </div>
-          ) : plan2d ? (
-            <SitePlan2D
-              lotWidthFt={lotWidthFt}
-              lotDepthFt={lotDepthFt}
-              zoningVerified={zoningVerified}
-              parcelGeometry={result.planParcelGeometry}
-              envelopeGeometry={result.planEnvelopeGeometry}
-              setbacks={{
-                front: district.front_yard_min_ft,
-                side:
-                  district.side_yard_total_min_ft != null
-                    ? district.side_yard_total_min_ft / 2
-                    : district.side_yard_one_min_ft,
-                rear: district.rear_yard_min_ft,
-              }}
-              existingBuilding={
-                hasExistingHouse
-                  ? {
-                      footprintSqft: result.existingFootprint,
-                      location: result.existingLocation,
-                      position: result.existingPosition,
-                      additionLocation: result.additionLocation,
-                    }
-                  : null
-              }
-              placementMode={
-                project?.id === "adu"
-                  ? "adu"
-                  : groundAddition
-                    ? "addition"
-                    : "free"
-              }
-              floors={result.plannedDimensions ?? []}
-              maxWidthFt={selectedFloor === 0 ? maxHouseWidthFt : selectedFloorMaxWidthFt}
-              maxDepthFt={selectedFloor === 0 ? maxHouseDepthFt : selectedFloorMaxDepthFt}
-              positions={floorPositions}
-              selectedFloor={selectedFloor}
-              streetName={streetNameFor(parcel, streetEdge)}
-              proposedLabel={
-                project?.id === "adu"
-                  ? "Proposed ADU"
-                  : groundAddition
-                    ? "Proposed addition"
-                    : "Proposed building"
-              }
-              onSelectFloor={setSelectedFloor}
-              onResize={setFootprint}
-              onMove={moveFloor}
-              onExistingMove={moveExistingStructure}
-              onAdditionSideChange={setDraggedAdditionSide}
-              onResetPosition={(index) => moveFloor(index, null)}
-              onFillEnvelope={fillEnvelope}
-            />
-          ) : (
-          <BuildingPreview3D
-            lotWidthFt={lotWidthFt}
-            lotDepthFt={lotDepthFt}
-            floors={result.plannedDimensions ?? []}
-            plannedOriginsFt={result.floorRects}
-            defaultFloorHeightFt={FLOOR_TO_FLOOR_FT}
-            northAngleDeg={streetEdge?.northAngleDeg ?? northAngleFromParcel(parcel?.parcel_geojson_wgs84)}
-            streetName={streetNameFor(parcel, streetEdge)}
-            parcelGeojson={parcel?.parcel_geojson_wgs84}
-            existingBuilding={
-              hasExistingHouse
-                ? {
-                    footprintSqft: result.existingFootprint,
-                    stories: result.existingStories,
-                    totalAreaSqft: result.existingArea,
-                    location: result.existingLocation,
-                    position: result.existingPosition,
-                    additionLocation: result.additionLocation,
-                    placementMode:
-                      project?.id === "adu"
-                        ? "adu"
-                        : result.additionLocation === "above"
-                          ? "vertical"
-                          : "addition",
-                  }
-                : null
-            }
-            setbacks={{
-              front: district.front_yard_min_ft,
-              side:
-                district.side_yard_total_min_ft != null
-                  ? district.side_yard_total_min_ft / 2
-                  : district.side_yard_one_min_ft,
-              rear: district.rear_yard_min_ft,
-            }}
-          />
-          )}
+          {/* The expand control sits over the preview, same icon and placement
+              as the admin zoning map's.
+
+              While expanded the card holds a placeholder rather than a second
+              copy: mounting the preview twice would run two WebGL contexts for
+              the 3D view and two sets of drag handlers for the plan. */}
+          <div className="preview-shell">
+            {previewExpanded ? (
+              <div className="preview-placeholder preview-expanded-note" role="status">
+                <strong>Opened in the expanded view</strong>
+                <small>Close it to bring the preview back here.</small>
+              </div>
+            ) : (
+              <>
+                {previewBody}
+                {lotDimensionsAvailable && (
+                  <button
+                    type="button"
+                    className="boundary-map-expand preview-expand"
+                    aria-label={plan2d ? "Expand site plan" : "Expand 3D preview"}
+                    title="Expand"
+                    onClick={() => setPreviewExpanded(true)}
+                  >
+                    ⛶
+                  </button>
+                )}
+              </>
+            )}
+          </div>
           {!zoningVerified && (
             <div className="preview-zoning-flag-row">
               <button
@@ -3525,6 +3845,24 @@ function CapacityStep({
           )}
         </aside>
       </section>
+
+      {previewExpanded && (
+        <ExpandDialog
+          eyebrow={plan2d ? "2D site plan" : "3D property preview"}
+          title={propertyAddress || "Planned building"}
+          labelledBy="preview-dialog-title"
+          onClose={() => setPreviewExpanded(false)}
+        >
+          {/* Plan and massing together, which is the point of the extra room —
+              the card can only show one at a time. The plan keeps its drag
+              handles, so the building is still edited here.
+
+              The card renders a placeholder meanwhile, so neither drawing is
+              mounted twice and the 3D view keeps a single WebGL context. */}
+          <div className="expand-dialog-plan">{sitePlanEl}</div>
+          <div className="expand-dialog-massing">{preview3dEl}</div>
+        </ExpandDialog>
+      )}
     </>
   );
 }
@@ -4594,18 +4932,11 @@ function Review({ project, muni, district, lot, parcel, propertyAddress, streetE
           {result.plannedHeight != null && (
             <div><span>Planned total height</span><strong>{fmt(result.plannedHeight, 1)} ft</strong></div>
           )}
-          {/* The client's selected build level, carrying the provenance flag:
-              the printed report is where a reader is most likely to mistake a
-              projection for a quote, so the label travels with the price. */}
+          {/* No provenance flag beside the price. The field is already labelled
+              "cost estimate", which is what stops a reader taking it for a
+              quote; the red ✕ badge repeated that in alarming form. */}
           <div>
-            <span>
-              {TIER_LABELS[selectedTier]} cost estimate
-              {costModel && (
-                <span className={`provenance-flag inline ${costModel.provenance}`}>
-                  {costModel.provenance === "verified" ? "✓ Verified" : "✕ Estimated"}
-                </span>
-              )}
-            </span>
+            <span>{TIER_LABELS[selectedTier]} cost estimate</span>
             <strong>
               {chosenTier && result.estimateArea != null
                 ? chosenTier.rate_per_sqft_max != null

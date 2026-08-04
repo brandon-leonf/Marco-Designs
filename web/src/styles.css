@@ -1002,6 +1002,18 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 .engine-step.pending .engine-step-head b { color: var(--muted); }
 
 .floor-fields { display: grid; gap: 0.5rem; margin-top: 0.65rem; }
+/* Every floor row resolves the same three column widths, so the inputs and the
+   floor-area readout line up down the stack. Sizing column one to its content
+   would let one long floor name ("New ground-floor addition") shunt that row's
+   fields out of step with the rows above and below it.
+   The widths are proportional rather than fixed: every row is the same width,
+   so a percentage still resolves identically for all of them, while the inputs
+   keep a usable size in the narrow step 2 panel. (Subgrid would be the natural
+   fit, but each row is a bordered fieldset whose padding breaks the track
+   correspondence with the parent.) */
+.floor-fields .floor-row {
+  grid-template-columns: clamp(98px, 17%, 168px) minmax(0, 1fr) clamp(110px, 15%, 132px);
+}
 .floor-dimensions {
   margin: 0;
   padding: 0.8rem;
@@ -2095,6 +2107,30 @@ button.hit.active { box-shadow: inset 3px 0 0 var(--primary); }
 }
 .boundary-map-expand:hover { border-color: var(--primary); background: #fff; }
 .boundary-map-expand:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+/* The step-2 preview reuses the map's expand control, so the button needs a
+   positioned ancestor of its own. `top` clears the plan's street label band. */
+.preview-shell { position: relative; min-width: 0; }
+.preview-expand { top: 1rem; right: 1rem; }
+/* Keeps `.map-dialog-body`'s two-column grid — editor left, drawing right —
+   but widens the drawing side, since a site plan needs the room a search box
+   does not. Written as `.map-dialog-body.expand-dialog-body` on purpose: the
+   single-class form loses to `.map-dialog-body` on source order. */
+/* Plan and massing side by side, equal width. Written as
+   `.map-dialog-body.expand-dialog-body` on purpose: the single-class form
+   loses to `.map-dialog-body` on source order. */
+.map-dialog-body.expand-dialog-body {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+.expand-dialog-plan,
+.expand-dialog-massing { min-width: 0; }
+.expand-dialog-plan .site-plan-svg { width: 100%; }
+.expand-dialog-massing .building-preview-3d { margin-top: 0; }
+.preview-expanded-note { display: grid; gap: 0.3rem; place-items: center; text-align: center; }
+
+@media (max-width: 900px) {
+  .map-dialog-body.expand-dialog-body { grid-template-columns: 1fr; }
+}
 .boundary-draw-map { height: 360px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .boundary-draw-workspace.expanded .boundary-draw-map {
   height: min(74vh, calc(100vh - 215px));
@@ -2728,20 +2764,7 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
    on that first line. button.compact's padding would otherwise push it down
    between the eyebrow and the address heading. */
 .zoning-map-actions .text-button.compact { padding: 0; line-height: 1.2; }
-.map-expand-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.5rem 0.65rem;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  color: var(--primary-fill);
-  background: #fff;
-  font-size: 0.72rem;
-  font-weight: 800;
-  cursor: pointer;
-}
-.map-expand-button:hover { border-color: var(--primary); background: var(--active); }
+.zoning-map-canvas-shell { position: relative; min-width: 0; }
 .zoning-map-canvas {
   height: 340px;
   border: 1px solid var(--line);
@@ -2799,7 +2822,18 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   gap: 0.75rem;
 }
 .footprint-detected-head strong { color: var(--nav); font-size: 0.85rem; }
-.footprint-area { color: var(--primary-fill); font-size: 1rem; font-weight: 850; }
+.footprint-area {
+  display: grid;
+  justify-items: end;
+  color: var(--primary-fill);
+  font-size: 1rem;
+  font-weight: 850;
+}
+.footprint-area small {
+  color: var(--info-ink);
+  font-size: 0.65rem;
+  font-weight: 750;
+}
 .footprint-source {
   margin: 0.3rem 0 0;
   color: var(--info-ink);
@@ -2808,6 +2842,49 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .footprint-source a { color: var(--primary-fill); font-weight: 700; }
 .footprint-detected .fine { margin: 0.35rem 0 0; }
+/* How much the estimate is worth. The grade leads, because a footprint the
+   State measured and a footprint inferred from the houses next door are not
+   the same claim, and the client is the one who has to decide what to do
+   about the difference. */
+.confidence-badge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.5rem;
+  margin-top: 0.55rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.66);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.confidence-badge strong { font-size: 0.75rem; letter-spacing: 0.01em; }
+.confidence-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  align-self: center;
+  background: currentColor;
+}
+.confidence-badge.high { border-color: #bcd8c6; background: var(--green-soft); }
+.confidence-badge.high strong,
+.confidence-badge.high .confidence-dot { color: var(--green); }
+.confidence-badge.medium { border-color: var(--active-line); background: #fbf4e0; }
+.confidence-badge.medium strong,
+.confidence-badge.medium .confidence-dot { color: var(--info-ink); }
+.confidence-badge.low { border-color: #e8cdbb; background: #fdf1e8; }
+.confidence-badge.low strong,
+.confidence-badge.low .confidence-dot { color: #9c4a1a; }
+.confidence-reasons {
+  margin: 0.45rem 0 0;
+  padding-left: 1rem;
+  color: var(--muted);
+  font-size: 0.71rem;
+  line-height: 1.5;
+}
+.confidence-reasons li { margin-top: 0.15rem; }
 .footprint-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3035,7 +3112,7 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: 12px;
   background: #fff;
 }
-.floor-row-id { display: flex; align-items: center; gap: 0.45rem; }
+.floor-row-id { display: flex; align-items: center; gap: 0.45rem; min-width: 0; }
 .floor-row-num {
   display: grid;
   place-items: center;
@@ -3047,25 +3124,41 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   font-weight: 800;
   flex-shrink: 0;
 }
-.floor-row-label { font-weight: 800; font-size: 0.84rem; }
+.floor-row-label { font-weight: 800; font-size: 0.84rem; line-height: 1.25; }
+/* Three shared rows — caption, input, hint — so the inputs stay on one line
+   however many lines a caption takes. "Addition wall/level height (ft)" wraps
+   where "Width (ft)" does not, and without this the field beside it sits low. */
 .floor-row-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
-  align-items: start;
-  gap: 0.55rem;
+  grid-template-rows: auto auto auto;
+  column-gap: 0.55rem;
+  row-gap: 0.2rem;
   padding-left: 0.7rem;
   border-left: 1px solid var(--line);
 }
 /* Uppercase field captions, as in the reference layout. */
-.floor-row-fields label { gap: 0.2rem; font-size: 0.62rem; letter-spacing: 0.05em; text-transform: uppercase; }
+.floor-row-fields label {
+  display: grid;
+  grid-row: 1 / -1;
+  grid-template-rows: subgrid;
+  /* Captions sit on the baseline above their input rather than floating at the
+     top of a row a neighbouring caption made tall. */
+  align-items: end;
+  gap: 0.2rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
 .floor-row-fields label input { padding: 0.48rem 0.6rem; }
 .floor-row-fields label small {
+  align-self: start;
   font-size: 0.58rem;
   line-height: 1.25;
   text-transform: none;
   letter-spacing: 0;
 }
-.floor-row-lock { align-self: center; color: var(--line-strong); }
+.floor-row-lock { grid-row: 2; align-self: center; color: var(--line-strong); }
 .floor-row-area {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -3105,7 +3198,8 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   background: #fdecec;
 }
 @media (max-width: 900px) {
-  .floor-row { grid-template-columns: 1fr; gap: 0.75rem; }
+  /* Matches the specificity of the shared-column rule above so the stack wins. */
+  .floor-fields .floor-row { grid-template-columns: 1fr; gap: 0.75rem; }
   .floor-row-fields, .floor-row-area { padding-left: 0; border-left: 0; }
   .floor-row-area { border-top: 1px solid var(--line); padding-top: 0.6rem; }
 }

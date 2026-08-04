@@ -208,6 +208,41 @@ function roadSegments(feature) {
   return out;
 }
 
+// Street types and directionals carry no identity: "CENTRAL AVE" and
+// "Central Avenue" are the same street, and the address and the centerline
+// layer rarely spell it the same way. Comparing the remaining core name is
+// enough to tell one street from another at parcel scale.
+const STREET_TYPES = new Set([
+  "AVE", "AVENUE", "ST", "STREET", "RD", "ROAD", "DR", "DRIVE", "BLVD",
+  "BOULEVARD", "LN", "LANE", "CT", "COURT", "PL", "PLACE", "TER", "TERR",
+  "TERRACE", "PKWY", "PARKWAY", "CIR", "CIRCLE", "HWY", "HIGHWAY", "WAY",
+  "TPKE", "TURNPIKE", "PLZ", "PLAZA", "SQ", "SQUARE", "TRL", "TRAIL",
+]);
+const DIRECTIONALS = new Set([
+  "N", "S", "E", "W", "NE", "NW", "SE", "SW",
+  "NORTH", "SOUTH", "EAST", "WEST", "NORTHEAST", "NORTHWEST", "SOUTHEAST", "SOUTHWEST",
+]);
+
+/**
+ * The identifying part of a street name, upper-cased. Ordinals are reduced to
+ * their digits so "15th Street", "15 ST" and "FIFTEENTH ST" that arrive as
+ * "15TH ST" all compare equal.
+ */
+export function normalizeStreetName(value) {
+  const tokens = String(value ?? "")
+    .toUpperCase()
+    .replace(/[.,#]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => token.replace(/^(\d+)(ST|ND|RD|TH)$/, "$1"));
+  const core = tokens.filter(
+    (token, index) =>
+      !STREET_TYPES.has(token) &&
+      !(DIRECTIONALS.has(token) && (index === 0 || index === tokens.length - 1))
+  );
+  return (core.length ? core : tokens).join(" ");
+}
+
 /** Human-readable primary name supplied by the NENA road layer. */
 function roadName(props) {
   const name =
@@ -248,20 +283,29 @@ export async function fetchNearbyRoads([lng, lat], signal) {
  * The midpoint rather than the whole edge because a long side running toward
  * the street would otherwise beat the short edge actually fronting it.
  *
+ * On a corner lot every candidate edge faces some street, and distance alone
+ * picks the wrong one whenever the side street's centerline happens to be the
+ * closer of the two — a narrow side street beats a wide avenue, and the front
+ * setback then lands on the depth axis. `addressStreet` breaks that tie the
+ * way the ordinance does: the front yard faces the street the property is
+ * addressed on. Distance still decides when no edge faces that street.
+ *
  * Returns null when nothing is close enough to be the fronting street — a lot
  * with no road within the search radius should say so, not guess.
  */
-export function streetFacingEdge(parcelGeojson, roads) {
+export function streetFacingEdge(parcelGeojson, roads, addressStreet = null) {
   const geometry = parcelGeojson?.type === "Feature" ? parcelGeojson.geometry : parcelGeojson;
   const ring = outerRing(geometry);
   if (!ring || ring.length < 4 || !roads?.length) return null;
 
   const origin = centroidOf(ring);
+  const addressKey = addressStreet ? normalizeStreetName(addressStreet) : "";
   const segments = [];
   for (const feature of roads) {
     const name = roadName(feature.properties);
+    const addressed = Boolean(addressKey) && normalizeStreetName(name) === addressKey;
     for (const [a, b] of roadSegments(feature)) {
-      segments.push({ name, a: toFeet(a, origin), b: toFeet(b, origin) });
+      segments.push({ name, addressed, a: toFeet(a, origin), b: toFeet(b, origin) });
     }
   }
   if (!segments.length) return null;
@@ -277,9 +321,19 @@ export function streetFacingEdge(parcelGeojson, roads) {
     let nearest = null;
     for (const seg of segments) {
       const d = distanceToSegment(mid, seg.a, seg.b);
-      if (!nearest || d < nearest.distanceFt) nearest = { distanceFt: d, name: seg.name };
+      const better = !nearest
+        // An edge that faces the addressed street keeps that match even when
+        // another centerline runs closer to its midpoint.
+        || (seg.addressed && !nearest.addressed)
+        || (seg.addressed === nearest.addressed && d < nearest.distanceFt);
+      if (better) nearest = { distanceFt: d, name: seg.name, addressed: seg.addressed };
     }
-    if (nearest && (!best || nearest.distanceFt < best.distanceFt)) {
+    const preferred =
+      nearest &&
+      (!best ||
+        (nearest.addressed && !best.addressed) ||
+        (nearest.addressed === best.addressed && nearest.distanceFt < best.distanceFt));
+    if (preferred) {
       const center = toFeet(origin, origin);
       const inward = { x: center.x - mid.x, y: center.y - mid.y };
       const inwardLength = Math.hypot(inward.x, inward.y);
@@ -298,6 +352,7 @@ export function streetFacingEdge(parcelGeojson, roads) {
         lengthFt,
         distanceFt: nearest.distanceFt,
         streetName: nearest.name,
+        addressed: nearest.addressed,
         // Compass bearing of the edge, for orienting the massing.
         bearingDeg: ((Math.atan2(b.x - a.x, b.y - a.y) * 180) / Math.PI + 360) % 360,
         northAngleDeg:
@@ -307,16 +362,17 @@ export function streetFacingEdge(parcelGeojson, roads) {
   }
 
   // Beyond ~150 ft the "nearest" road is more likely the next street over than
-  // the one this lot fronts, so decline rather than mislead.
-  if (!best || best.distanceFt > 150) return null;
+  // the one this lot fronts, so decline rather than mislead. An edge matched to
+  // the addressed street is identified, not guessed, so distance cannot veto it.
+  if (!best || (best.distanceFt > 150 && !best.addressed)) return null;
   return best;
 }
 
 /** Fetch and match in one abortable operation for React callers. */
-export async function matchParcelToRoad(parcelGeojson, signal) {
+export async function matchParcelToRoad(parcelGeojson, signal, addressStreet = null) {
   const geometry = parcelGeojson?.type === "Feature" ? parcelGeojson.geometry : parcelGeojson;
   const ring = outerRing(geometry);
   if (!ring || ring.length < 4) return null;
   const roads = await fetchNearbyRoads(centroidOf(ring), signal);
-  return streetFacingEdge(geometry, roads);
+  return streetFacingEdge(geometry, roads, addressStreet);
 }

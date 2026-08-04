@@ -365,8 +365,8 @@ export default function ZoningMap({
           </h3>
           {note && <p className="zoning-map-note">{note}</p>}
         </div>
-        <div className="zoning-map-actions">
-          {zoomedToParcel && muniBoundsRef.current && (
+        {zoomedToParcel && muniBoundsRef.current && (
+          <div className="zoning-map-actions">
             <button
               type="button"
               className="text-button compact"
@@ -374,26 +374,33 @@ export default function ZoningMap({
             >
               View all {muniName ?? "town"}
             </button>
-          )}
-          {onExpand && (
-            <button type="button" className="map-expand-button" onClick={onExpand}>
-              <span aria-hidden="true">↗</span>
-              Expand map
-            </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
-      <div
-        ref={containerRef}
-        className={`zoning-map-canvas${onPickPoint ? " pickable" : ""}${picking ? " picking" : ""}`}
-        role="application"
-        aria-label={
-          onPickPoint
-            ? "Municipal zoning map — click a property to identify its address"
-            : "Municipal zoning map"
-        }
-      />
+      <div className="zoning-map-canvas-shell">
+        <div
+          ref={containerRef}
+          className={`zoning-map-canvas${onPickPoint ? " pickable" : ""}${picking ? " picking" : ""}`}
+          role="application"
+          aria-label={
+            onPickPoint
+              ? "Municipal zoning map — click a property to identify its address"
+              : "Municipal zoning map"
+          }
+        />
+        {onExpand && (
+          <button
+            type="button"
+            className="boundary-map-expand zoning-map-expand"
+            aria-label="Expand property map"
+            title="Expand"
+            onClick={onExpand}
+          >
+            ⛶
+          </button>
+        )}
+      </div>
 
       {onPickPoint && (
         <p className={picking ? "map-pick-hint busy" : "map-pick-hint"} role="status">
