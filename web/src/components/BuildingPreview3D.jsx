@@ -110,6 +110,18 @@ export default function BuildingPreview3D({
       ? existingBuilding.placementMode === "vertical"
       : existingBuilding?.additionLocation === "above";
   const detachedAdu = existingBuilding?.placementMode === "adu";
+  // What the planned dimensions describe. These chips always measure the floor
+  // the client just entered, never the building already standing — so on an
+  // addition "House width" names the wrong structure, and sits one chip away
+  // from "Existing footprint" where the two read as the same building. Matches
+  // the vocabulary of the height chip below.
+  const plannedNoun = detachedAdu
+    ? "ADU"
+    : verticalAddition
+      ? "New floor"
+      : existingBuilding
+        ? "Addition"
+        : "House";
   const totalHeight = verticalAddition
     ? existingHeight + plannedHeight
     : Math.max(existingHeight, plannedHeight);
@@ -554,8 +566,8 @@ export default function BuildingPreview3D({
         )}
         {completeFloors.length > 0 ? (
           <>
-            <span>{detachedAdu ? "ADU width" : "House width"} <strong>{groundWidth}′</strong></span>
-            <span>{detachedAdu ? "ADU depth" : "House depth"} <strong>{groundDepth}′</strong></span>
+            <span>{plannedNoun} width <strong>{groundWidth}′</strong></span>
+            <span>{plannedNoun} depth <strong>{groundDepth}′</strong></span>
             <span>Total height <strong>{fmtNumber(totalHeight)}′</strong></span>
             {existingFootprintSqft > 0 && (
               <span>

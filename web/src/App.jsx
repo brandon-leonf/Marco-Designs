@@ -340,6 +340,10 @@ export default function App() {
   const [detectingBuilding, setDetectingBuilding] = useState(false);
   const [footprintChoice, setFootprintChoice] = useState(null); // null | "detected" | "adjust" | "manual"
   const [parcel, setParcel] = useState(null);
+  // Latest parcel geometry, readable from effects that must not re-run when the
+  // row is rebuilt at a new inset. Holds the value, never triggers on it.
+  const parcelRef = useRef(null);
+  parcelRef.current = parcel;
   const [streetEdge, setStreetEdge] = useState(null);
   const [parcelError, setParcelError] = useState(null);
   const [zoningCheck, setZoningCheck] = useState(null);
@@ -616,20 +620,35 @@ export default function App() {
     setZoningCheck({ status: "outside_coverage" });
   }, [pickKind, parcelPick]);
 
-  // Re-inset the live parcel whenever the chosen district changes. Cheap enough
-  // to run on every district switch: the geometry is already in memory.
+  // Re-inset the live parcel whenever the setbacks change. Cheap enough to run
+  // on every district switch: the geometry is already in memory.
+  //
+  // The dependency is the inset *distance*, not the district object. `district`
+  // is rebuilt by applyZoningRules on every pass through ruleMetrics, which in
+  // turn reads the parcel this effect writes — so depending on the object made
+  // the effect its own trigger and it re-ran until React's update-depth cap
+  // stopped it. The number is stable once the setbacks are, which breaks the
+  // cycle without changing when a genuine setback change re-insets the parcel.
+  const parcelInsetFt = district ? conservativeInsetFt(district) : 0;
   useEffect(() => {
     if (pickKind !== "njgin" || !njginFeature) return;
-    setParcel(njginParcelFromFeature(njginFeature, district ? conservativeInsetFt(district) : 0));
-  }, [district, njginFeature, pickKind]);
+    setParcel(njginParcelFromFeature(njginFeature, parcelInsetFt));
+  }, [parcelInsetFt, njginFeature, pickKind]);
 
   // Resolve the real front of the parcel from NJ road centerlines. The
   // centerline service is an enhancement rather than a loading gate: on a
   // network failure or an isolated lot, previews retain the parcel-axis
   // orientation used before this feature.
+  //
+  // Keyed on the parcel's identity rather than its geometry object. Re-insetting
+  // rebuilds the row — and with it a new `parcel_geojson_wgs84` reference — but
+  // the outline itself is unchanged, so depending on the object sent an
+  // identical request to the centerline service on every rebuild. The boundary
+  // only moves when the parcel does.
+  const parcelIdentity = parcel?.pams_pin ?? parcel?.parcel_id ?? null;
   useEffect(() => {
-    const geometry = parcel?.parcel_geojson_wgs84;
-    if (!geometry) {
+    const geometry = parcelRef.current?.parcel_geojson_wgs84;
+    if (!parcelIdentity || !geometry) {
       setStreetEdge(null);
       return undefined;
     }
@@ -639,7 +658,7 @@ export default function App() {
       if (!controller.signal.aborted) setStreetEdge(match);
     });
     return () => controller.abort();
-  }, [parcel?.parcel_geojson_wgs84]);
+  }, [parcelIdentity]);
 
   /**
    * Look for a published building footprint on the parcel — but only for the
@@ -1908,10 +1927,13 @@ function ProjectSetup({
                     label="Existing building footprint (sq ft) *"
                     value={existingStructure.footprint_sqft}
                     onChange={(value) => {
-                      // Typing over a detected figure makes it the client's
-                      // number, not the source's — the note must stop crediting
-                      // NJDEP or OSM for a value they did not produce.
-                      if (footprintChoice === "detected") onAdjustOutline();
+                      // Typing makes the figure the client's, not the source's.
+                      // This has to claim the field even when no detection has
+                      // landed yet: the lookup can resolve seconds after they
+                      // type, and an unclaimed field is one the late result will
+                      // overwrite. The note must also stop crediting NJDEP or
+                      // OSM for a value they did not produce.
+                      if (footprintChoice !== "manual") onAdjustOutline();
                       onExistingStructure({ ...existingStructure, footprint_sqft: value });
                     }}
                     help="Required. Ground area occupied by the current structure."
