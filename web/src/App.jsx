@@ -2983,6 +2983,14 @@ function CapacityStep({
   const lotDepthFt = Number(orientedLot.depth_ft) > 0 ? Number(orientedLot.depth_ft) : null;
   const lotDimensionsAvailable = lotWidthFt != null && lotDepthFt != null;
   const lotDimensionsEstimated = orientedLot.source === "parcel_geometry";
+  // MOD-IV is what stands behind a real lot: an address, a property class, a
+  // recorded description. A polygon carrying none of them may be a condominium
+  // sub-lot or a fragment left unjoined over the parcel, so its shape is not
+  // known to be the lot's — and a verdict measured off it ("no conforming
+  // envelope") would be stated about a boundary that was never the property's.
+  const parcelIdentified = Boolean(parcel?.address || parcel?.prop_class);
+  const lotBoundaryUnverified =
+    Boolean(parcel) && !parcelIdentified && lotDimensionsEstimated;
   const rectangularEnvelope = result.envelope;
   let maxHouseWidthFt = lotDimensionsAvailable
     ? Number(rectangularEnvelope?.widthFt) > 0
@@ -3651,13 +3659,23 @@ function CapacityStep({
                 <div className={footprintUsed > 0 ? "capacity-figure spent" : "capacity-figure"}>
                   <span>{footprintUsed > 0 ? "Building footprint left" : footprintLabel}</span>
                   {noBuildableEnvelope ? (
-                    <strong className="answer-pending">None without a variance</strong>
+                    <strong className="answer-pending">
+                      {lotBoundaryUnverified ? "Cannot be determined" : "None without a variance"}
+                    </strong>
                   ) : (
                     <strong>{fmt(footprintRemaining)} <em>sq ft</em></strong>
                   )}
                   <small>
                     {noBuildableEnvelope ? (
-                      envelopeShortOnDepth ? (
+                      lotBoundaryUnverified ? (
+                        <>
+                          No tax record stands behind the matched polygon, so its{" "}
+                          {fmt(lotWidthFt)} × {fmt(lotDepthFt)} ft shape is not known to be this
+                          lot's. Setbacks in {district.code} leave nothing to build on at that
+                          size, but the boundary has to be confirmed before that means anything
+                          about this property.
+                        </>
+                      ) : envelopeShortOnDepth ? (
                         <>
                           The {fmt(setbackFrontFt)} ft front and {fmt(setbackRearFt)} ft rear
                           setbacks in {district.code} need {fmt(setbackFrontFt + setbackRearFt)} ft
@@ -3792,6 +3810,8 @@ function CapacityStep({
           <p className="preview-note">
             {!lotDimensionsAvailable
               ? "The parcel was matched, but its recorded frontage and depth are not available."
+              : lotBoundaryUnverified
+                ? "No tax record stands behind this polygon, so its dimensions are not known to be the lot's. Confirm the boundary before relying on anything measured from it."
               : lotDimensionsEstimated
                 ? "Lot dimensions are estimated from the NJGIN parcel polygon for preliminary planning and are not a survey."
               : plan2d
