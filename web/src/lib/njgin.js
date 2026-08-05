@@ -293,12 +293,28 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
   // lot's 24 x 100), and a 25 ft depth cannot hold the 7 ft front and 20 ft
   // rear setbacks — so the property was reported as unbuildable without a
   // variance on the strength of a shape that was never its boundary.
-  const identifies = (feature) => Boolean(feature?.properties?.PROP_LOC);
-  const unidentified = features.length > 0 && !features.some(identifies);
+  // Four kinds of record are never the lot a house is built on, and all four
+  // are shaped exactly like one until the attributes are read: a polygon with
+  // no MOD-IV record joined behind it, exempt property (class 15), a
+  // condominium's shared ground, and the per-unit sub-records a condominium is
+  // split into. Around 1812 New York Ave, Union City, thirty of the forty
+  // parcels within 150 ft are one of these, and the app was choosing among them
+  // by area — landing on an 185 sq ft common-elements strip recorded at 1720
+  // New York Ave and reporting it as the property.
+  const isBuildingLot = (feature) => {
+    const props = feature?.properties ?? {};
+    if (!props.PROP_LOC) return false;
+    if (String(props.PROP_CLASS ?? "").toUpperCase().startsWith("15")) return false;
+    if (/COMMON ELEMENT/i.test(String(props.BLDG_DESC ?? ""))) return false;
+    // `0910_89_16.01_C0101` is one unit inside a condominium, not its land.
+    if (/_C\d+$/i.test(String(props.PAMS_PIN ?? ""))) return false;
+    return true;
+  };
+  const unidentified = features.length > 0 && !features.some(isBuildingLot);
 
   // Census address coordinates are interpolated along the street centerline.
   // When that point falls in the right-of-way instead of inside a tax parcel —
-  // or inside a parcel that identifies nothing — retain point-in-polygon as the
+  // or inside something that is not a lot — retain point-in-polygon as the
   // first attempt, then make one tightly bounded proximity query and rank those
   // parcels by the matched street address.
   if (features.length === 0 || unidentified) {
@@ -311,7 +327,7 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
       },
       signal
     );
-    let ranked = (body.features ?? []).sort(
+    const ranked = (body.features ?? []).filter(isBuildingLot).sort(
       (a, b) =>
         addressMatchScore(b?.properties?.PROP_LOC, addressText) -
           addressMatchScore(a?.properties?.PROP_LOC, addressText) ||
@@ -324,14 +340,24 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
         (feature) => addressMatchScore(feature?.properties?.PROP_LOC, addressText) === bestScore
       );
     } else if (features.length === 0) {
-      features = ranked;
+      // Nothing contained the point and nothing nearby is addressed to it.
+      // MOD-IV records no lot at 1812 New York Ave — the building there is
+      // assessed as 1720 — and the nearest lots are 401 18th St and 1722-24
+      // New York Ave. Neither is the property, and answering with one of them
+      // is worse than saying the address could not be matched.
+      features = [];
     }
     // Otherwise the containing polygon stands. A weak match on a neighbouring
     // lot is not a better answer than the shape the point actually fell in —
     // that applies to map clicks in particular, which carry no address to
     // match on.
   } else {
-    features = features.sort((a, b) => turf.area(a) - turf.area(b));
+    // A condominium's common ground overlaps the lots it serves, and it is
+    // usually the smaller shape — so smallest-first has to yield to "is a lot
+    // at all" before it decides which of several containing polygons wins.
+    features = features.sort(
+      (a, b) => Number(isBuildingLot(b)) - Number(isBuildingLot(a)) || turf.area(a) - turf.area(b)
+    );
   }
 
   return features
