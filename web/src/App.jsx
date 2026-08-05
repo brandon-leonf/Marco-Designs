@@ -2419,7 +2419,6 @@ function ExpandedMapDialog({
               onSelect={onParcel}
               onClear={() => onParcel(null)}
               alwaysShowForm
-              showScopeHint={false}
             />
             <span className="data-tag live">Census + statewide NJGIN</span>
             {parcelPick && (

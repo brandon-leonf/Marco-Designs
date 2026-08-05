@@ -161,7 +161,13 @@ export function summarizeComparables(comparables = []) {
 function describesABuildingLot(parcel) {
   // Class 15 is not a test here either: a tax-exempt owner still owns a lot,
   // and a church or school with an addition in mind is an ordinary client.
-  return !/COMMON ELEMENT/i.test(String(parcel?.building_desc ?? ""));
+  if (!/COMMON ELEMENT/i.test(String(parcel?.building_desc ?? ""))) return true;
+  // Common elements is the ground under a condominium. It is a lot when the
+  // assessor recorded one — 901 Palisade Ave's is 25 x 100 — and a leftover
+  // strip when they did not, as at 1720 New York Ave. The test is the recorded
+  // description, not `lot_area_sqft`: that is measured off the polygon and so
+  // is positive for every shape, including the strips.
+  return Boolean(parcel?.land_desc);
 }
 
 function lotModelFootprint(parcel) {

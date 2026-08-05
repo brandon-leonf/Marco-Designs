@@ -2965,7 +2965,6 @@ button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 /* ---------- Widened address search ---------- */
-.search-scope-hint { margin: 0.35rem 0 0; }
 /* Every group is spaced the same, including the first — which previously sat
    flush against the hint paragraph above it because only the sibling selector
    carried a margin. */

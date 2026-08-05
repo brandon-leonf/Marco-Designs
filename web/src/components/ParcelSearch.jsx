@@ -30,7 +30,6 @@ export default function ParcelSearch({
   onSelect,
   onClear,
   alwaysShowForm = false,
-  showScopeHint = true,
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
@@ -187,12 +186,6 @@ export default function ParcelSearch({
       {locationError && (
         <p className="fine location-error" role="status">
           {locationError} Entering the city, state, or ZIP still works.
-        </p>
-      )}
-      {showScopeHint && (
-        <p className="fine search-scope-hint">
-          Enter the address directly—no municipality selection is required. New Jersey parcel
-          boundaries are matched statewide after the address is geocoded.
         </p>
       )}
 

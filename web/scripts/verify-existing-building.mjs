@@ -266,4 +266,22 @@ assert.ok(
   "an ordinary residential lot still gets an estimate"
 );
 
+
+// A condominium's common elements is the ground under the building. Where the
+// assessor recorded a lot for it, that is the parcel — 901 Palisade Ave, Union
+// City is described "COMMON ELEMENTS" and is a 25 x 100 corner lot.
+assert.ok(
+  estimateExistingBuilding({
+    detected: null,
+    comparables: [],
+    parcel: {
+      prop_class: "15F",
+      building_desc: "COMMON ELEMENTS",
+      land_desc: "25X100 COR",
+      lot_area_sqft: 2500,
+    },
+  }),
+  "common elements with a recorded lot is the condominium's land"
+);
+
 console.log("existing-building estimator: all assertions passed");

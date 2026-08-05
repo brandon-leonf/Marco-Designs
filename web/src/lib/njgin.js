@@ -308,9 +308,17 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
   const isBuildingLot = (feature) => {
     const props = feature?.properties ?? {};
     if (!props.PROP_LOC) return false;
-    if (/COMMON ELEMENT/i.test(String(props.BLDG_DESC ?? ""))) return false;
     // `0910_89_16.01_C0101` is one unit inside a condominium, not its land.
     if (/_C\d+$/i.test(String(props.PAMS_PIN ?? ""))) return false;
+    // A condominium's common elements is the land beneath the building, and
+    // where the record carries that land it is exactly the parcel someone
+    // builds on: 901 Palisade Ave, Union City is described COMMON ELEMENTS and
+    // is a 25 x 100 corner lot. Where it carries no lot at all — no recorded
+    // description, no acreage, as at 1720 New York Ave — it is the leftover
+    // strip that started this, and still is not a parcel.
+    if (/COMMON ELEMENT/i.test(String(props.BLDG_DESC ?? ""))) {
+      return Boolean(props.LAND_DESC) || Number(props.CALC_ACRE) > 0;
+    }
     return true;
   };
   const unidentified = features.length > 0 && !features.some(isBuildingLot);
