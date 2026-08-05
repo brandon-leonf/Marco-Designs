@@ -2198,7 +2198,7 @@ function LookupLayerStatus({
       value: previewing
         ? `${district?.code ?? "—"}${district?.name ? ` — ${district.name}` : ""} · Test drive from the config editor — not verified for this address`
         : zoningVerifiedHere
-          ? `${district.code}${district.name ? ` — ${district.name}` : ""} · Zoning verified from Marco Designs`
+          ? `${district.code}${district.name ? ` — ${district.name}` : ""}`
           : zoningCheck?.district_code
             ? zoningStatusLabel(zoningCheck)
             : municipalGisCheck?.status === "matched"
