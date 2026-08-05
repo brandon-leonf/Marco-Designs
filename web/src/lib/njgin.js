@@ -363,6 +363,45 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
     );
   }
 
+  // Everything above asks the same question — what is *here* — and so it can
+  // only ever be as accurate as the coordinates. Census interpolates a house
+  // number along a street centerline, and where that estimate is off, no search
+  // radius centred on it will contain the lot: 901 Palisade Ave, Union City
+  // lands far enough away that all forty parcels within 150 ft belong to
+  // block 186, while the property itself is block 49.
+  //
+  // So ask by name instead. MOD-IV records the address on the parcel, and the
+  // point is demoted to what it is reliably good for — saying which town — by
+  // bounding the attribute search to a mile around it. The house number still
+  // has to match before anything is accepted, so a wider net cannot return a
+  // vaguer answer, only a further one.
+  if (features.length === 0 && addressText) {
+    const needle = sqlLiteral(addressText);
+    if (needle.length >= 3) {
+      body = await query(
+        {
+          ...pointQuery,
+          where: statewideAddressWhere(needle),
+          distance: 5280,
+          units: "esriSRUnit_Foot",
+          resultRecordCount: 30,
+        },
+        signal
+      );
+      const named = (body.features ?? [])
+        .filter(isBuildingLot)
+        .sort(
+          (a, b) =>
+            addressMatchScore(b?.properties?.PROP_LOC, addressText) -
+              addressMatchScore(a?.properties?.PROP_LOC, addressText) ||
+            turf.area(a) - turf.area(b)
+        );
+      if (addressMatchScore(named[0]?.properties?.PROP_LOC, addressText) >= 10) {
+        features = named.slice(0, 1);
+      }
+    }
+  }
+
   return features
     .filter((feature) => feature?.geometry)
     .slice(0, Math.min(limit, 20))
