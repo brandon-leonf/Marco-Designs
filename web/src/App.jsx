@@ -93,7 +93,7 @@ const UNVERIFIED_DISTRICT = {
   max_height_ft: null,
   max_stories: null,
 };
-const STEPS = ["Project & Property", "What You Can Build", "Results", "Review & Export"];
+const STEPS = ["Select property", "Confirm zoning", "Adjust building", "Review & Export"];
 
 // The config editor's test drive. `#/?preview_district=<id>` applies one
 // district's PUBLISHED rules to whatever property is searched, so a district
