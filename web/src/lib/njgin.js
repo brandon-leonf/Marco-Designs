@@ -110,6 +110,30 @@ async function query(params, signal) {
  * against a lot the diagram does not show. Search results have no geometry
  * loaded yet, so the MOD-IV figure stands in there.
  */
+/**
+ * The parcel's outer boundary, with any interior rings discarded.
+ *
+ * GeoJSON reads every ring after the first as a hole, and NJGIN's outline for
+ * 901 Palisade Ave, Union City carries a nine-point second ring inside a
+ * four-corner rectangle — one that overlaps the boundary rather than nesting
+ * inside it, so it is not a hole at all. Left in, it was subtracted from the
+ * lot: 926 sq ft against a recorded 25 x 100. It also drew as a second outline
+ * on the map, so the client saw two shapes for one property.
+ *
+ * A tax lot with a genuine hole in it is vanishingly rare, and a lot whose
+ * digitised second ring is malformed evidently is not, so the outer ring is
+ * taken as the boundary and the rest dropped.
+ */
+export function outerBoundary(geometry) {
+  if (geometry?.type === "Polygon" && geometry.coordinates.length > 1) {
+    return { type: "Polygon", coordinates: [geometry.coordinates[0]] };
+  }
+  if (geometry?.type === "MultiPolygon" && geometry.coordinates.some((p) => p.length > 1)) {
+    return { type: "MultiPolygon", coordinates: geometry.coordinates.map((p) => [p[0]]) };
+  }
+  return geometry ?? null;
+}
+
 function recordedLotAreaSqft(properties) {
   const dims = parseLandDescriptionDimensions(properties?.LAND_DESC);
   if (dims) return dims.width_ft * dims.depth_ft;
@@ -142,7 +166,8 @@ const GEOMETRY_SHORTFALL = 0.65;
  * not the boundary.
  */
 function lotAreaFrom(properties, feature) {
-  const measured = feature ? turf.area(feature) * FT_PER_M * FT_PER_M : 0;
+  const boundary = feature?.geometry ? outerBoundary(feature.geometry) : null;
+  const measured = boundary ? turf.area(turf.feature(boundary)) * FT_PER_M * FT_PER_M : 0;
   const recorded = recordedLotAreaSqft(properties);
   if (measured > 0) {
     if (recorded && measured < recorded * GEOMETRY_SHORTFALL) {
@@ -608,25 +633,29 @@ export async function fetchNjginParcel(muni, pamsPin, insetFt = 0) {
 /** Re-derives the envelope for an already-fetched feature at a new inset. */
 export function njginParcelFromFeature(feature, insetFt = 0) {
   const properties = feature.properties ?? {};
-  const origin = turf.centroid(feature).geometry.coordinates;
+  // One boundary for every consumer — the area above, the drawing below, and
+  // the envelope inset between them — so a malformed interior ring cannot make
+  // them disagree about which shape the property is.
+  const bounded = { ...feature, geometry: outerBoundary(feature.geometry) };
+  const origin = turf.centroid(bounded).geometry.coordinates;
 
   // Turf buffers in lon/lat; the inset is applied there, then the result is
   // brought into the same local frame as the parcel outline.
   const envelope =
-    insetFt > 0 ? envelopeFromGeoJSON(feature, insetFt) : { feature: null, areaSqft: 0 };
+    insetFt > 0 ? envelopeFromGeoJSON(bounded, insetFt) : { feature: null, areaSqft: 0 };
   const envelopeGeometry = envelope.feature?.geometry ?? null;
   const envelopeArea = envelopeGeometry ? Math.round(envelope.areaSqft) : null;
 
   return {
-    ...toRow(properties, feature),
+    ...toRow(properties, bounded),
     year_built: properties.YR_CONSTR ? String(properties.YR_CONSTR) : null,
     land_desc: properties.LAND_DESC || null,
     lot_frontage_ft: null,
     lot_depth_ft: null,
     is_survey_confirmed: false,
-    parcel_geojson: toLocalFeet(feature.geometry, origin),
-    // The service hands back EPSG:4326; the map wants it untouched.
-    parcel_geojson_wgs84: feature.geometry,
+    parcel_geojson: toLocalFeet(bounded.geometry, origin),
+    // The service hands back EPSG:4326; the map wants it in that projection.
+    parcel_geojson_wgs84: bounded.geometry,
     envelope_geojson: envelopeArea > 0 ? toLocalFeet(envelopeGeometry, origin) : null,
     envelope_area_sqft: envelopeArea > 0 ? envelopeArea : null,
     raw: feature,
