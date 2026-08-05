@@ -159,8 +159,8 @@ export function summarizeComparables(comparables = []) {
  * own lot. There is no house to describe here, and saying so is the answer.
  */
 function describesABuildingLot(parcel) {
-  const propClass = String(parcel?.prop_class ?? "").trim().toUpperCase();
-  if (propClass.startsWith("15")) return false;
+  // Class 15 is not a test here either: a tax-exempt owner still owns a lot,
+  // and a church or school with an addition in mind is an ordinary client.
   return !/COMMON ELEMENT/i.test(String(parcel?.building_desc ?? ""));
 }
 

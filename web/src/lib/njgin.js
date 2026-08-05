@@ -293,18 +293,21 @@ export async function findNjginParcelAtPoint(lat, lon, limit = 5, signal, addres
   // lot's 24 x 100), and a 25 ft depth cannot hold the 7 ft front and 20 ft
   // rear setbacks — so the property was reported as unbuildable without a
   // variance on the strength of a shape that was never its boundary.
-  // Four kinds of record are never the lot a house is built on, and all four
+  // Three kinds of record are never the lot a house is built on, and all three
   // are shaped exactly like one until the attributes are read: a polygon with
-  // no MOD-IV record joined behind it, exempt property (class 15), a
-  // condominium's shared ground, and the per-unit sub-records a condominium is
-  // split into. Around 1812 New York Ave, Union City, thirty of the forty
-  // parcels within 150 ft are one of these, and the app was choosing among them
-  // by area — landing on an 185 sq ft common-elements strip recorded at 1720
-  // New York Ave and reporting it as the property.
+  // no MOD-IV record joined behind it, a condominium's shared ground, and the
+  // per-unit sub-records a condominium is split into. Around 1812 New York Ave,
+  // Union City, most of the forty parcels within 150 ft are one of these, and
+  // the app was choosing among them by area — landing on an 185 sq ft
+  // common-elements strip recorded at 1720 New York Ave.
+  //
+  // MOD-IV class 15 is deliberately not on this list. It marks a tax-exempt
+  // owner — a church, a school, a park, a municipal building — not the absence
+  // of a lot. 901 Palisade Ave, Union City is class 15F and a perfectly real
+  // 25 x 100 corner lot; exempt from taxation is not exempt from zoning.
   const isBuildingLot = (feature) => {
     const props = feature?.properties ?? {};
     if (!props.PROP_LOC) return false;
-    if (String(props.PROP_CLASS ?? "").toUpperCase().startsWith("15")) return false;
     if (/COMMON ELEMENT/i.test(String(props.BLDG_DESC ?? ""))) return false;
     // `0910_89_16.01_C0101` is one unit inside a condominium, not its land.
     if (/_C\d+$/i.test(String(props.PAMS_PIN ?? ""))) return false;
