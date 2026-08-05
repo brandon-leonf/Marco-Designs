@@ -23,7 +23,7 @@ import {
   njginParcelFromFeature,
   NJGIN_SOURCE_URL,
 } from "./lib/njgin.js";
-import { crossCheckPropertyClass, propertyUseLabel } from "./lib/zoningLookup.js";
+import { crossCheckPropertyClass } from "./lib/zoningLookup.js";
 import { pairBuildingsToParcels, surveyParcelBuildings } from "./lib/buildings.js";
 import {
   estimateExistingBuilding,
@@ -2214,22 +2214,6 @@ function LookupLayerStatus({
     },
   ];
 
-  // What the assessor records this property as. Stated on its own line because
-  // it is an independent fact about the parcel — it is the answer to "is this
-  // commercial?", which the zoning row cannot give when the layer disagrees.
-  const recordedUse = propertyUseLabel(parcel?.prop_class ?? parcelPick?.prop_class);
-  if (recordedUse) {
-    rows.splice(2, 0, {
-      label: "Recorded property use",
-      ready: !recordedUse.blocks_residential_plan,
-      state: recordedUse.blocks_residential_plan ? "out_of_scope" : undefined,
-      value: `${recordedUse.label} · MOD-IV class ${recordedUse.class_code}${
-        recordedUse.blocks_residential_plan
-          ? " — this tool plans residential projects"
-          : ""
-      }`,
-    });
-  }
   return (
     <div className="lookup-layer-status" role="status">
       <div className="lookup-mode-head">
