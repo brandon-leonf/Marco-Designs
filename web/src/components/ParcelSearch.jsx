@@ -154,12 +154,10 @@ export default function ParcelSearch({
               disabled={locating}
               aria-pressed={Boolean(location)}
             >
+              {/* The button keeps one name in every state. Its active styling
+                  and the status line below already say location is in use. */}
               <span aria-hidden="true">⌖</span>{" "}
-              {locating
-                ? "Allow location…"
-                : location
-                  ? "Location priority on"
-                  : "Use current location"}
+              {locating ? "Allow location…" : "Use current location"}
             </button>
           </span>
           <input
@@ -183,8 +181,7 @@ export default function ParcelSearch({
       </form>
       {location && (
         <p className="fine location-bias-status" role="status">
-          <span aria-hidden="true">⌖</span> Nearby address matches will appear first. Your location
-          stays in this browser.
+          <span aria-hidden="true">⌖</span> Nearby address matches will appear first.
         </p>
       )}
       {locationError && (

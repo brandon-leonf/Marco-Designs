@@ -395,7 +395,9 @@ select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed;
   gap: 0.65rem;
   align-items: end;
 }
-.address-search-field { min-width: 0; }
+/* Same label-to-field gap the rest of the form uses (see `label` above), so
+   this field is not the one that sits tighter than everything around it. */
+.address-search-field { min-width: 0; display: grid; gap: 0.38rem; }
 .address-search-label-row {
   display: flex;
   align-items: center;
@@ -423,7 +425,9 @@ select:disabled { color: var(--muted); background: #f4f3ef; cursor: not-allowed;
 }
 .location-bias-status,
 .location-error { margin: 0.45rem 0 0; }
-.location-bias-status { color: var(--green); }
+/* Qualified with `.fine`, which the element also carries and which would
+   otherwise win on source order and leave this line the same grey as the rest. */
+.fine.location-bias-status { color: var(--green); }
 .location-error { color: #7b5412; }
 .lookup-progress {
   display: flex;

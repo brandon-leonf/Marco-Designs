@@ -3617,7 +3617,9 @@ function CapacityStep({
       <section className="results-heading">
         <div>
           <p className="eyebrow">Step 2</p>
-          <h2>{zoningVerified ? "What you can build" : "Preliminary building plan"}</h2>
+          {/* Matches the stepper. The unverified variant keeps its own name:
+              there is no zoning to confirm on a property we hold none for. */}
+          <h2>{zoningVerified ? "Confirm zoning" : "Preliminary building plan"}</h2>
           <p>
             {zoningVerified
               ? `Here is the most this lot can hold under ${district.code}. Enter the size you have in mind to check it.`
@@ -3910,7 +3912,7 @@ function Results({ project, muni, district, lot, parcelSource, parcel, propertyA
       <section className="results-heading">
         <div>
           <p className="eyebrow">Step 3</p>
-          <h2>Preliminary property results</h2>
+          <h2>Adjust building</h2>
           <p>
             {project?.label} · {propertyAddress || `${muni.name}, ${muni.state_code}`} · Zoning{" "}
             {district.code}
