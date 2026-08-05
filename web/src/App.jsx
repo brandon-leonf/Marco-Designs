@@ -3000,8 +3000,14 @@ function CapacityStep({
   // known to be the lot's — and a verdict measured off it ("no conforming
   // envelope") would be stated about a boundary that was never the property's.
   const parcelIdentified = Boolean(parcel?.address || parcel?.prop_class);
+  // Either the record names no property, or the polygon drawn for it is too
+  // small to be its boundary. The second is the quieter failure: 901 Palisade
+  // Ave is recorded 25 x 100 and drawn at 926 sq ft, so every figure inset from
+  // that shape — the envelope, the coverage, the floor-area ratio — describes a
+  // lot a third of the real one.
   const lotBoundaryUnverified =
-    Boolean(parcel) && !parcelIdentified && lotDimensionsEstimated;
+    Boolean(parcel) &&
+    ((!parcelIdentified && lotDimensionsEstimated) || Boolean(parcel.geometry_unreliable));
   const rectangularEnvelope = result.envelope;
   let maxHouseWidthFt = lotDimensionsAvailable
     ? Number(rectangularEnvelope?.widthFt) > 0
@@ -3823,6 +3829,8 @@ function CapacityStep({
           <p className="preview-note">
             {!lotDimensionsAvailable
               ? "The parcel was matched, but its recorded frontage and depth are not available."
+              : parcel?.geometry_unreliable
+                ? `The drawn boundary covers ${fmt(parcel.polygon_area_sqft)} sq ft against a recorded lot of ${fmt(parcel.lot_area_sqft)} sq ft, so it is a fragment rather than this lot's outline. Areas are taken from the recorded dimensions instead; the drawing is indicative only.`
               : lotBoundaryUnverified
                 ? "No tax record stands behind this polygon, so its dimensions are not known to be the lot's. Confirm the boundary before relying on anything measured from it."
               : lotDimensionsEstimated

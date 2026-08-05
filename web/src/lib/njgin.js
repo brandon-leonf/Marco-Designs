@@ -14,7 +14,7 @@
 // survey data and do not represent legal boundaries.
 
 import * as turf from "@turf/turf";
-import { envelopeFromGeoJSON } from "./envelope.js";
+import { envelopeFromGeoJSON, parseLandDescriptionDimensions } from "./envelope.js";
 
 const LAYER =
   "https://services2.arcgis.com/XVOqAjTOJ5P6ngMu/ArcGIS/rest/services/Parcels_Composite_NJ_WM/FeatureServer/0";
@@ -110,11 +110,62 @@ async function query(params, signal) {
  * against a lot the diagram does not show. Search results have no geometry
  * loaded yet, so the MOD-IV figure stands in there.
  */
-function lotAreaSqft(properties, feature) {
-  const measured = feature ? turf.area(feature) * FT_PER_M * FT_PER_M : 0;
-  if (measured > 0) return Math.round(measured);
+function recordedLotAreaSqft(properties) {
+  const dims = parseLandDescriptionDimensions(properties?.LAND_DESC);
+  if (dims) return dims.width_ft * dims.depth_ft;
   const acres = Number(properties?.CALC_ACRE);
-  return isFinite(acres) && acres > 0 ? Math.round(acres * SQFT_PER_ACRE) : null;
+  return isFinite(acres) && acres > 0 ? acres * SQFT_PER_ACRE : null;
+}
+
+// How much smaller than the recorded lot a drawn polygon may be before it is
+// read as a fragment rather than a boundary. Digitising slop and a rounded
+// LAND_DESC easily account for a fifth; they do not account for a third.
+const GEOMETRY_SHORTFALL = 0.65;
+
+/**
+ * Lot area, and whether the polygon it came from can be trusted.
+ *
+ * Measured from the geometry whenever it is in hand. The two sources disagree
+ * more often than you would expect — CALC_ACRE frequently covers a tax record's
+ * additional lots (ADD_LOTS1/2), so it can be double the polygon actually
+ * drawn. Since the buildable envelope is an inset of that polygon, taking the
+ * area from anywhere else would cap coverage and FAR against a lot the diagram
+ * does not show. Search results have no geometry loaded yet, so the MOD-IV
+ * figure stands in there.
+ *
+ * A polygon far *smaller* than the recorded lot is the other story, and it is
+ * the polygon that is wrong: 901 Palisade Ave, Union City is recorded 25 x 100
+ * and drawn at 926 sq ft, barely a third of it. Coverage and floor-area ratio
+ * computed against that would be roughly three times too strict — a lot
+ * reported as full when it is not. The recorded area is used instead and the
+ * geometry is flagged, so the calculation stops depending on a shape that is
+ * not the boundary.
+ */
+function lotAreaFrom(properties, feature) {
+  const measured = feature ? turf.area(feature) * FT_PER_M * FT_PER_M : 0;
+  const recorded = recordedLotAreaSqft(properties);
+  if (measured > 0) {
+    if (recorded && measured < recorded * GEOMETRY_SHORTFALL) {
+      return {
+        lot_area_sqft: Math.round(recorded),
+        lot_area_source: "mod_iv",
+        geometry_unreliable: true,
+        polygon_area_sqft: Math.round(measured),
+      };
+    }
+    return {
+      lot_area_sqft: Math.round(measured),
+      lot_area_source: "parcel_geometry",
+      geometry_unreliable: false,
+      polygon_area_sqft: Math.round(measured),
+    };
+  }
+  return {
+    lot_area_sqft: recorded ? Math.round(recorded) : null,
+    lot_area_source: recorded ? "mod_iv" : null,
+    geometry_unreliable: false,
+    polygon_area_sqft: null,
+  };
 }
 
 /** MOD-IV stores names in caps ("CARLSTADT BORO"); the UI reads them as prose. */
@@ -138,7 +189,7 @@ function toRow(properties, feature) {
     prop_class: properties.PROP_CLASS || null,
     building_desc: properties.BLDG_DESC || null,
     dwelling_units: Number(properties.DWELL) > 0 ? Number(properties.DWELL) : null,
-    lot_area_sqft: lotAreaSqft(properties, feature),
+    ...lotAreaFrom(properties, feature),
     // Carried through so a statewide hit can say which town it is in, and so
     // the app can switch to that municipality when it happens to be loaded.
     muni_name: municipalityName(properties.MUN_NAME),
