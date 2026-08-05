@@ -231,4 +231,39 @@ assert.ok(Math.abs(lotCoveragePercent(1139, 3501) - 32.53) < 0.01);
 assert.equal(lotCoveragePercent(1139, 0), null);
 assert.equal(lotCoveragePercent(null, 3501), null);
 
+
+// --- Records that describe no building lot ---------------------------------
+// A condominium's shared ground is carried as its own MOD-IV parcel, described
+// "COMMON ELEMENTS" and often only a few hundred square feet. 1812 New York
+// Ave, Union City resolves to one. Modelling a house from its area produced a
+// 300 sq ft footprint on a 185 sq ft lot — 162% coverage. There is no house on
+// a common-elements strip, and no estimate is the honest answer.
+assert.equal(
+  estimateExistingBuilding({
+    detected: null,
+    comparables: [],
+    parcel: { prop_class: "15F", building_desc: "COMMON ELEMENTS", lot_area_sqft: 827 },
+  }),
+  null,
+  "exempt common-elements parcels carry no house to estimate"
+);
+assert.equal(
+  estimateExistingBuilding({
+    detected: null,
+    comparables: [],
+    parcel: { prop_class: "2", building_desc: "COMMON ELEMENTS", lot_area_sqft: 900 },
+  }),
+  null,
+  "the description alone is enough to rule it out"
+);
+// A real residential lot with no mapped building is still modelled.
+assert.ok(
+  estimateExistingBuilding({
+    detected: null,
+    comparables: [],
+    parcel: { prop_class: "2", building_desc: "2S-F", land_desc: "25X100", lot_area_sqft: 2500 },
+  }),
+  "an ordinary residential lot still gets an estimate"
+);
+
 console.log("existing-building estimator: all assertions passed");

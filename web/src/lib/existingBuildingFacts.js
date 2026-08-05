@@ -149,7 +149,23 @@ export function summarizeComparables(comparables = []) {
  * New Jersey house takes the lot's width less a side yard each side, and around
  * half its depth, and that is the whole of the reasoning.
  */
+/**
+ * Whether this record describes a lot a house stands on at all.
+ *
+ * MOD-IV class 15 is exempt property, and a condominium's shared ground is
+ * carried as its own parcel described "COMMON ELEMENTS" — 1812 New York Ave in
+ * Union City resolves to one, an 185 sq ft strip. Modelling a house from the
+ * area of a shape like that produced a 300 sq ft footprint covering 162% of its
+ * own lot. There is no house to describe here, and saying so is the answer.
+ */
+function describesABuildingLot(parcel) {
+  const propClass = String(parcel?.prop_class ?? "").trim().toUpperCase();
+  if (propClass.startsWith("15")) return false;
+  return !/COMMON ELEMENT/i.test(String(parcel?.building_desc ?? ""));
+}
+
 function lotModelFootprint(parcel) {
+  if (!describesABuildingLot(parcel)) return null;
   const lotAreaSqft = positiveNumber(parcel?.lot_area_sqft);
   const dims = recordedRectDims(parcel);
   if (dims) {

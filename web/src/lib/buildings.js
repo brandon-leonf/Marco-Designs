@@ -32,6 +32,14 @@ const OVERPASS_URLS = [
   "https://overpass.private.coffee/api/interpreter",
 ];
 
+// One budget for the whole Overpass step, however many mirrors it takes. A
+// per-attempt timeout bounds each try but not the wait, and the wait is what
+// the client experiences.
+const OVERPASS_BUDGET_MS = 8000;
+// How long a mirror is given to itself before the next one is enlisted
+// alongside it, so a slow instance does not have to fail before we look further.
+const OVERPASS_HEDGE_MS = 2500;
+
 const SQ_FT_PER_SQ_M = 10.763910416709722;
 const FT_PER_DEGREE_LAT = 364566;
 
@@ -175,27 +183,71 @@ async function queryNjdep([west, south, east, north], signal) {
  * status code, so the body has to be inspected before a mirror can be believed.
  */
 async function overpassJson(query, signal) {
-  let lastError = null;
-  for (const endpoint of OVERPASS_URLS) {
+  // Tried one at a time, this cost the sum of every mirror's timeout — 27
+  // seconds of "Measuring the existing building…" on a day when Overpass was
+  // busy, which is what the fallback list was supposed to prevent. Mirrors are
+  // now hedged instead: the next one is only enlisted if the ones already
+  // running have stayed quiet, so a healthy primary is still a single request,
+  // and a dead one costs seconds rather than a minute.
+  const settled = new AbortController();
+  const cancelAll = () => settled.abort();
+  signal?.addEventListener("abort", cancelAll);
+  const budget = setTimeout(cancelAll, OVERPASS_BUDGET_MS);
+
+  const ask = async (endpoint) => {
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         body: new URLSearchParams({ data: query }),
-        signal,
+        signal: settled.signal,
       });
       if (!response.ok) throw new Error(`Overpass returned ${response.status}.`);
       const text = await response.text();
+      // A loaded instance answers 200 with an XML error document, so the body
+      // has to be read before the mirror can be believed.
       if (!text.trimStart().startsWith("{")) {
         const reason = text.match(/Error<\/strong>:\s*([^<]+)/i)?.[1]?.trim();
         throw new Error(reason || "Overpass returned a non-JSON response.");
       }
       return JSON.parse(text);
     } catch (error) {
-      if (error?.name === "AbortError") throw error;
-      lastError = error;
+      // The budget expiring reads as an abort; report it as the timeout it is.
+      if (settled.signal.aborted && !signal?.aborted) {
+        throw new Error(`Overpass did not answer within ${OVERPASS_BUDGET_MS / 1000}s.`);
+      }
+      throw error;
     }
+  };
+
+  const quiet = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  try {
+    const running = [];
+    for (const [index, endpoint] of OVERPASS_URLS.entries()) {
+      running.push(ask(endpoint));
+      if (index === OVERPASS_URLS.length - 1) break;
+      // Either one of the mirrors already running answers, or they all fail, or
+      // the hedge delay elapses — any of which is a reason to enlist the next.
+      const answered = await Promise.race([
+        Promise.any(running).then(
+          (body) => ({ body }),
+          () => null
+        ),
+        quiet(OVERPASS_HEDGE_MS),
+      ]);
+      if (answered?.body) return answered.body;
+    }
+    return await Promise.any(running);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    const reasons = error?.errors?.map((item) => item?.message).filter(Boolean) ?? [];
+    throw new Error(reasons[0] ?? error?.message ?? "No Overpass mirror answered.");
+  } finally {
+    // Whether a mirror won or none did, nothing is still worth waiting for.
+    clearTimeout(budget);
+    settled.abort();
+    signal?.removeEventListener("abort", cancelAll);
   }
-  throw lastError ?? new Error("No Overpass mirror answered.");
 }
 
 /** OpenStreetMap buildings inside a bounding box. */

@@ -370,6 +370,11 @@ export async function fetchNjginParcelsInBbox([west, south, east, north], signal
       outFields: OUT_FIELDS,
       returnGeometry: true,
       outSR: 4326,
+      // These polygons are only ever asked one question — which lot is this
+      // building standing on — so they travel coarse. Full-precision outlines
+      // for a few hundred urban parcels are megabytes the answer does not need.
+      geometryPrecision: 6,
+      maxAllowableOffset: 0.000005,
       resultRecordCount: Math.min(limit, 1000),
     },
     signal

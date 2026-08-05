@@ -708,24 +708,12 @@ export default function App() {
     setDetectedBuilding(null);
     setBuildingEstimate(null);
 
-    (async () => {
-      const survey = await surveyParcelBuildings(geometry, controller.signal);
-      if (controller.signal.aborted) return;
-
-      // The neighbouring outlines are only comparable once each is paired with
-      // the lot it stands on, which is a second, optional lookup. It sharpens
-      // the estimate; it never gates it.
-      let comparables = [];
-      if (survey?.neighbors?.length && survey.bbox) {
-        try {
-          const lots = await fetchNjginParcelsInBbox(survey.bbox, controller.signal);
-          comparables = pairBuildingsToParcels(survey.neighbors, lots);
-        } catch (comparableError) {
-          if (comparableError?.name === "AbortError") return;
-        }
-      }
-      if (controller.signal.aborted) return;
-
+    // Publish an answer and fill the fields behind it, unless the client has
+    // already taken the numbers over by hand. Called twice: once on what the
+    // outline and MOD-IV alone can say, then again if the comparables sharpen
+    // it. The client should never be made to wait on the second call to see
+    // the first — the required field is the whole reason they are here.
+    const apply = (survey, comparables) => {
       const estimate = estimateExistingBuilding({
         detected: survey?.detected ?? null,
         comparables,
@@ -735,9 +723,6 @@ export default function App() {
       setBuildingEstimate(
         estimate ? { ...estimate, unreachable: survey?.unreachable ?? [] } : null
       );
-
-      // Fill every field the records can answer, unless the client has already
-      // taken the numbers over by hand.
       setFootprintChoice((choice) => {
         if (choice === "manual" || choice === "adjust") return choice;
         if (!estimate) return choice;
@@ -761,6 +746,33 @@ export default function App() {
         });
         return "detected";
       });
+    };
+
+    // What the parcel record alone can say, before a single request goes out.
+    // A required field left blank while the network is consulted is the worst
+    // of both worlds; this fills it immediately and the lookups below only
+    // improve on it.
+    apply(null, []);
+
+    (async () => {
+      const survey = await surveyParcelBuildings(geometry, controller.signal);
+      if (controller.signal.aborted) return;
+
+      // Now with the outline standing on the lot, where one is published.
+      apply(survey, []);
+      setDetectingBuilding(false);
+
+      // The neighbouring outlines are only comparable once each is paired with
+      // the lot it stands on, which is a second, slower lookup. It sharpens the
+      // estimate and its confidence; it never gates them.
+      if (!survey?.neighbors?.length || !survey.bbox) return;
+      try {
+        const lots = await fetchNjginParcelsInBbox(survey.bbox, controller.signal);
+        if (controller.signal.aborted) return;
+        apply(survey, pairBuildingsToParcels(survey.neighbors, lots));
+      } catch {
+        // The first answer stands.
+      }
     })()
       .catch((surveyError) => {
         if (controller.signal.aborted || surveyError?.name === "AbortError") return;
