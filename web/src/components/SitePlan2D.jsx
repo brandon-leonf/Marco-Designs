@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   envelopeRect,
   existingRect,
@@ -8,9 +8,11 @@ import {
   attachedOriginToExisting,
   detachedOriginFromExisting,
   floorRects as computeFloorRects,
-  rectFitsEnvelope,
-  rectFitsGeometry,
-  rectOnTopOf,
+  outlinePointsForRect,
+  polygonAreaSqft,
+  polygonFitsGeometry,
+  polygonFitsRect,
+  polygonWithinPolygon,
 } from "../lib/placement.js";
 
 /**
@@ -36,6 +38,18 @@ const VIEW_W = 460;
 const VIEW_H = 430;
 const MARGIN = 52;
 const HANDLE = 9;
+const DEFAULT_OUTLINE = [
+  { x: 0, y: 0 },
+  { x: 1, y: 0 },
+  { x: 1, y: 1 },
+  { x: 0, y: 1 },
+];
+const VERTEX_LIMITS = [
+  { minX: 0, maxX: 0.45, minY: 0, maxY: 0.45 },
+  { minX: 0.55, maxX: 1, minY: 0, maxY: 0.45 },
+  { minX: 0.55, maxX: 1, minY: 0.55, maxY: 1 },
+  { minX: 0, maxX: 0.45, minY: 0.55, maxY: 1 },
+];
 
 // One hue per floor, walking up the brass palette so floor order is legible
 // without reading the labels. Beyond this many floors the colours repeat,
@@ -73,6 +87,7 @@ export default function SitePlan2D({
   onSelectFloor,
   onResize,
   onMove,
+  onOutlineChange,
   onExistingMove,
   onAdditionSideChange,
   onResetPosition,
@@ -82,6 +97,7 @@ export default function SitePlan2D({
   const svgRef = useRef(null);
   const dragRef = useRef(null);
   const [dragging, setDragging] = useState(null);
+  const [vertexEditing, setVertexEditing] = useState(null);
 
   const lotWidth = Math.max(1, Number(lotWidthFt) || 25);
   const lotDepth = Math.max(1, Number(lotDepthFt) || 100);
@@ -115,6 +131,10 @@ export default function SitePlan2D({
   });
   const active = clamp(selectedFloor, 0, Math.max(0, floors.length - 1));
   const rect = rects[active] ?? null;
+  const floorPolygons = rects.map((floorRect, index) =>
+    outlinePointsForRect(floorRect, floors[index]?.outline)
+  );
+  const activePolygon = floorPolygons[active] ?? null;
   const hasAnyRect = rects.some(Boolean);
   const attachmentUnavailable =
     groundAddition &&
@@ -126,6 +146,19 @@ export default function SitePlan2D({
     Number(floors[0]?.widthFt) > 0 &&
     Number(floors[0]?.depthFt) > 0 &&
     !rects[0];
+
+  // A click anywhere except an edit dot ends corner editing, including clicks
+  // on the floor itself or elsewhere in the form/preview card.
+  useEffect(() => {
+    if (vertexEditing == null) return undefined;
+    const exitWhenOutside = (event) => {
+      if (!event.target?.closest?.(".plan-vertex-handle")) {
+        setVertexEditing(null);
+      }
+    };
+    document.addEventListener("pointerdown", exitWhenOutside, true);
+    return () => document.removeEventListener("pointerdown", exitWhenOutside, true);
+  }, [vertexEditing]);
 
   // Fit the lot to the drawing area; the scale is uniform so the plan stays
   // true and the scale bar below means something.
@@ -175,6 +208,33 @@ export default function SitePlan2D({
     event.currentTarget.setPointerCapture?.(event.pointerId);
   };
 
+  const enterVertexEditing = (floorIndex) => (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelectFloor?.(floorIndex);
+    setVertexEditing(floorIndex);
+  };
+
+  const startVertexDrag = (vertexIndex) => (event) => {
+    if (!rect || vertexEditing !== active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const start = pointerFeet(event);
+    if (!start) return;
+    const outline = Array.isArray(floors[active]?.outline)
+      ? floors[active].outline.map((point) => ({ ...point }))
+      : DEFAULT_OUTLINE.map((point) => ({ ...point }));
+    dragRef.current = {
+      handle: "vertex",
+      vertexIndex,
+      start,
+      rect,
+      outline,
+    };
+    setDragging(`vertex-${vertexIndex}`);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
   const onDrag = (event) => {
     const drag = dragRef.current;
     if (!drag) return;
@@ -185,6 +245,42 @@ export default function SitePlan2D({
     const dy = now.y - drag.start.y;
     const maxWidth = Math.max(1, Number(maxWidthFt) || lotWidth);
     const maxDepth = Math.max(1, Number(maxDepthFt) || lotDepth);
+
+    if (handle === "vertex") {
+      const width = from.x1 - from.x0;
+      const depth = from.y1 - from.y0;
+      if (!(width > 0) || !(depth > 0)) return;
+      const limits = { ...VERTEX_LIMITS[drag.vertexIndex] };
+      // Corner shaping must not break the defining rule for a ground-floor
+      // addition: the edge facing the existing house remains joined to it.
+      if (groundAddition && active === 0) {
+        if (additionLocation === "side_left" && [1, 2].includes(drag.vertexIndex)) {
+          limits.minX = 1;
+          limits.maxX = 1;
+        } else if (additionLocation === "side_right" && [0, 3].includes(drag.vertexIndex)) {
+          limits.minX = 0;
+          limits.maxX = 0;
+        } else if (additionLocation === "front" && [2, 3].includes(drag.vertexIndex)) {
+          limits.minY = 1;
+          limits.maxY = 1;
+        } else if (additionLocation === "back" && [0, 1].includes(drag.vertexIndex)) {
+          limits.minY = 0;
+          limits.maxY = 0;
+        }
+      }
+      const absoluteX = clamp(snap(now.x), from.x0 + limits.minX * width, from.x0 + limits.maxX * width);
+      const absoluteY = clamp(snap(now.y), from.y0 + limits.minY * depth, from.y0 + limits.maxY * depth);
+      const next = drag.outline.map((point, index) =>
+        index === drag.vertexIndex
+          ? {
+              x: (absoluteX - from.x0) / width,
+              y: (absoluteY - from.y0) / depth,
+            }
+          : point
+      );
+      onOutlineChange?.(active, next);
+      return;
+    }
 
     if (handle === "existing") {
       const next = clampOriginToLot(
@@ -290,7 +386,7 @@ export default function SitePlan2D({
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   };
 
-  const handles = rect
+  const handles = rect && vertexEditing !== active
     ? [
         { id: "w", x: rect.x0, y: (rect.y0 + rect.y1) / 2, cursor: "ew-resize" },
         { id: "e", x: rect.x1, y: (rect.y0 + rect.y1) / 2, cursor: "ew-resize" },
@@ -302,20 +398,25 @@ export default function SitePlan2D({
         { id: "ne", x: rect.x1, y: rect.y1, cursor: "nesw-resize" },
       ]
     : [];
+  const vertexHandles = vertexEditing === active && activePolygon ? activePolygon : [];
 
   // A round scale-bar length that fits comfortably under the plan.
   const barFt = [5, 10, 20, 25, 50, 100].reverse().find((ft) => ft * s <= planW * 0.55) ?? 5;
 
   const outsideEnvelope =
     zoningVerified &&
-    rects.some((r) =>
+    rects.some((r, index) =>
       r &&
       (envelopeGeometry
-        ? rectFitsGeometry(r, envelopeGeometry) === false
-        : rectFitsEnvelope(r, envelope) === false)
+        ? polygonFitsGeometry(floorPolygons[index], envelopeGeometry) === false
+        : polygonFitsRect(floorPolygons[index], envelope) === false)
     );
   const offSupport = rects.some(
-    (r, index) => index > 0 && r && rects[index - 1] && rectOnTopOf(r, rects[index - 1]) === false
+    (r, index) =>
+      index > 0 &&
+      r &&
+      rects[index - 1] &&
+      polygonWithinPolygon(floorPolygons[index], floorPolygons[index - 1]) === false
   );
   const moved =
     positions[active] != null &&
@@ -333,6 +434,15 @@ export default function SitePlan2D({
           });
       return Math.abs(home.x0 - rect.x0) > 0.05 || Math.abs(home.y0 - rect.y0) > 0.05;
     })();
+  const activeCenter = activePolygon
+    ? activePolygon.reduce(
+        (center, point) => ({ x: center.x + point.x / activePolygon.length, y: center.y + point.y / activePolygon.length }),
+        { x: 0, y: 0 }
+      )
+    : rect
+      ? { x: (rect.x0 + rect.x1) / 2, y: (rect.y0 + rect.y1) / 2 }
+      : null;
+  const activeArea = activePolygon ? polygonAreaSqft(activePolygon) : null;
 
   return (
     <div className="site-plan">
@@ -361,7 +471,7 @@ export default function SitePlan2D({
         className={dragging ? "site-plan-svg dragging" : "site-plan-svg"}
         role="img"
         aria-label={`Site plan: ${fmtFt(lotWidth)} by ${fmtFt(lotDepth)} foot lot${
-          rect ? `, floor ${active + 1} is ${fmtFt(rect.x1 - rect.x0)} by ${fmtFt(rect.y1 - rect.y0)} feet` : ""
+          rect ? `, floor ${active + 1} is ${fmtFt(rect.x1 - rect.x0)} by ${fmtFt(rect.y1 - rect.y0)} feet${activeArea != null ? ` and ${fmtFt(activeArea)} square feet` : ""}` : ""
         }`}
         onPointerMove={onDrag}
         onPointerUp={endDrag}
@@ -418,29 +528,28 @@ export default function SitePlan2D({
         {rects.map((r, index) => {
           if (!r) return null;
           const color = floorColor(index);
+          const floorPolygon = floorPolygons[index];
           const badPlacement =
             (zoningVerified &&
               (envelopeGeometry
-                ? rectFitsGeometry(r, envelopeGeometry) === false
-                : rectFitsEnvelope(r, envelope) === false)) ||
-            (index > 0 && rects[index - 1] && rectOnTopOf(r, rects[index - 1]) === false);
+                ? polygonFitsGeometry(floorPolygon, envelopeGeometry) === false
+                : polygonFitsRect(floorPolygon, envelope) === false)) ||
+            (index > 0 && rects[index - 1] && polygonWithinPolygon(floorPolygon, floorPolygons[index - 1]) === false);
           const isActive = index === active;
           return (
-            <rect
+            <polygon
               key={index}
-              x={sx(r.x0)}
-              y={sy(r.y1)}
-              width={(r.x1 - r.x0) * s}
-              height={(r.y1 - r.y0) * s}
+              points={floorPolygon.map((point) => `${sx(point.x)},${sy(point.y)}`).join(" ")}
               fill={badPlacement ? "#f3c9c4" : color.fill}
               stroke={badPlacement ? "#b3261e" : color.stroke}
-              className={`plan-floor${isActive ? " active" : ""} selectable`}
+              className={`plan-floor${isActive ? " active" : ""}${vertexEditing === index ? " vertex-editing" : ""} selectable`}
+              onDoubleClick={enterVertexEditing(index)}
               onPointerDown={
-                isActive
+                isActive && vertexEditing !== index
                     ? startDrag("move")
                     : (event) => {
                         event.stopPropagation();
-                        onSelectFloor?.(index);
+                        if (!isActive) onSelectFloor?.(index);
                       }
               }
             />
@@ -449,19 +558,19 @@ export default function SitePlan2D({
 
         {/* Only the selected floor is labelled — every floor labelled at once
             is unreadable on a small stacked plan. */}
-        {rect && (
+        {rect && activeCenter && (
           <>
             <text
-              x={sx((rect.x0 + rect.x1) / 2)}
-              y={sy((rect.y0 + rect.y1) / 2) - 4}
+              x={sx(activeCenter.x)}
+              y={sy(activeCenter.y) - 4}
               className="plan-shape-label"
               textAnchor="middle"
             >
               {floors.length > 1 ? `Floor ${active + 1}` : proposedLabel}
             </text>
             <text
-              x={sx((rect.x0 + rect.x1) / 2)}
-              y={sy((rect.y0 + rect.y1) / 2) + 11}
+              x={sx(activeCenter.x)}
+              y={sy(activeCenter.y) + 11}
               className="plan-shape-dims"
               textAnchor="middle"
             >
@@ -480,6 +589,20 @@ export default function SitePlan2D({
             className={dragging === handle.id ? "plan-handle active" : "plan-handle"}
             style={{ cursor: handle.cursor }}
             onPointerDown={startDrag(handle.id)}
+            onDoubleClick={enterVertexEditing(active)}
+          />
+        ))}
+
+        {vertexHandles.map((point, index) => (
+          <circle
+            key={`vertex-${index}`}
+            cx={sx(point.x)}
+            cy={sy(point.y)}
+            r="6"
+            className={dragging === `vertex-${index}` ? "plan-vertex-handle active" : "plan-vertex-handle"}
+            role="button"
+            aria-label={`Adjust corner ${index + 1}`}
+            onPointerDown={startVertexDrag(index)}
           />
         ))}
 
@@ -597,13 +720,16 @@ export default function SitePlan2D({
           </p>
         ) : (
           <p className="site-plan-hint">
-            {floors.length > 1
+            {vertexEditing === active
+              ? "Corner editing is active — drag a round dot to fit the angled lot line. Click anywhere else to finish."
+              : floors.length > 1
               ? `Floor ${active + 1} selected — drag it to move, or its handles to resize. Click another floor to switch.`
               : groundAddition
                 ? "Drag the yellow addition around the existing structure; it will remain attached."
                 : detachedAdu
                   ? "Drag the yellow ADU anywhere on the lot; it will remain separated from the existing structure."
                 : "Drag the building to move it, or its handles to resize."}{" "}
+            {vertexEditing !== active && "Double-click the yellow shape or one of its resize points to adjust individual corners. "}
             {zoningVerified
               ? `Limited to ${fmtFt(maxWidthFt)}′ × ${fmtFt(maxDepthFt)}′ by zoning.`
               : `Limited to the ${fmtFt(maxWidthFt)}′ × ${fmtFt(maxDepthFt)}′ parcel workspace; zoning setbacks are not applied.`}

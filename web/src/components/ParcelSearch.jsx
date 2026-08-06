@@ -33,20 +33,25 @@ export default function ParcelSearch({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState(null);
+  const [resultsSource, setResultsSource] = useState(null);
   const [searching, setSearching] = useState(false);
+  const [suggesting, setSuggesting] = useState(false);
   const [stage, setStage] = useState("geocode");
   const [error, setError] = useState(null);
   const [location, setLocation] = useState(null);
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState(null);
   const controllerRef = useRef(null);
+  const suggestionControllerRef = useRef(null);
   const locationControllerRef = useRef(null);
   const addressInputId = useId();
 
   const clearSelection = () => {
     controllerRef.current?.abort();
+    suggestionControllerRef.current?.abort();
     setQuery("");
     setResults(null);
+    setResultsSource(null);
     setError(null);
     onClear();
   };
@@ -83,9 +88,53 @@ export default function ParcelSearch({
     requestCurrentLocation();
     return () => {
       controllerRef.current?.abort();
+      suggestionControllerRef.current?.abort();
       locationControllerRef.current?.abort();
     };
   }, [requestCurrentLocation]);
+
+  // NJGIN can suggest recorded property addresses directly from partial text.
+  // If location is enabled, the larger returned candidate set is ranked in
+  // this browser; the coordinates are never added to the service request.
+  useEffect(() => {
+    const address = query.trim();
+    suggestionControllerRef.current?.abort();
+    if (address.length < 3) {
+      setSuggesting(false);
+      setResults(null);
+      setResultsSource(null);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    suggestionControllerRef.current = controller;
+    const timer = setTimeout(async () => {
+      setSuggesting(true);
+      try {
+        const rows = await searchNjginParcelsAnywhere(
+          address,
+          8,
+          location,
+          controller.signal
+        );
+        if (!controller.signal.aborted) {
+          setResults(rows);
+          setResultsSource("suggestion");
+        }
+      } catch (lookupError) {
+        if (!controller.signal.aborted && lookupError?.name !== "AbortError") {
+          setError(lookupError.message ?? String(lookupError));
+        }
+      } finally {
+        if (!controller.signal.aborted) setSuggesting(false);
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [location, query]);
 
   const useCurrentLocation = () => {
     if (location) {
@@ -103,12 +152,14 @@ export default function ParcelSearch({
     if (address.length < 5 || searching) return;
 
     controllerRef.current?.abort();
+    suggestionControllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
     setSearching(true);
     setStage("geocode");
     setError(null);
     setResults(null);
+    setResultsSource("search");
 
     try {
       const rows = await lookupAddress(
@@ -190,6 +241,11 @@ export default function ParcelSearch({
       )}
 
       {error && <p className="fine error-text">Property lookup failed: {error}</p>}
+      {suggesting && !searching && (
+        <p className="fine lookup-suggestions-progress" role="status">
+          Loading address matches…
+        </p>
+      )}
       {searching && (
         <p className="lookup-progress" role="status">
           <span className={stage === "geocode" ? "active" : "done"}>1. Geocoding address</span>
@@ -201,7 +257,7 @@ export default function ParcelSearch({
           </span>
         </p>
       )}
-      {results && !searching && results.length === 0 && (
+      {results && !searching && results.length === 0 && resultsSource !== "suggestion" && (
         <p className="fine">
           No address or New Jersey parcel matches “{query.trim()}”. Include the city, state, and ZIP
           and try again.
@@ -211,8 +267,10 @@ export default function ParcelSearch({
       {parcelRows.length > 0 && (
         <div className="result-group">
           <p className="result-group-head parcel">
-            <span aria-hidden="true">✓</span> Parcel boundary found · municipality identified
-            automatically
+            <span aria-hidden="true">✓</span>{" "}
+            {resultsSource === "suggestion"
+              ? "Address matches · choose the property"
+              : "Parcel boundary found"}
           </p>
           <ResultList rows={parcelRows} selected={selected} onSelect={onSelect} />
         </div>

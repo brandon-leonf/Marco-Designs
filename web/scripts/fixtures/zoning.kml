@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document id="root_doc">
+<Schema name="zoning" id="zoning">
+	<SimpleField name="ZONE" type="string"></SimpleField>
+	<SimpleField name="ZONENAME" type="string"></SimpleField>
+	<SimpleField name="ORDINANCE" type="string"></SimpleField>
+</Schema>
+<Folder><name>zoning</name>
+  <Placemark id="zoning.1">
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#zoning">
+		<SimpleData name="ZONE">AA</SimpleData>
+		<SimpleData name="ZONENAME">One Family Residential</SimpleData>
+		<SimpleData name="ORDINANCE">223-35</SimpleData>
+	</SchemaData></ExtendedData>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>-74.132,41.041 -74.126,41.041 -74.126,41.046 -74.132,41.046 -74.132,41.041</coordinates></LinearRing></outerBoundaryIs><innerBoundaryIs><LinearRing><coordinates>-74.13,41.042 -74.128,41.042 -74.128,41.044 -74.13,41.044 -74.13,41.042</coordinates></LinearRing></innerBoundaryIs></Polygon>
+  </Placemark>
+  <Placemark id="zoning.2">
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#zoning">
+		<SimpleData name="ZONE">ML-7</SimpleData>
+		<SimpleData name="ZONENAME">Light Manufacturing</SimpleData>
+		<SimpleData name="ORDINANCE">223-40</SimpleData>
+	</SchemaData></ExtendedData>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>-74.126,41.041 -74.12,41.041 -74.12,41.046 -74.126,41.046 -74.126,41.041</coordinates></LinearRing></outerBoundaryIs></Polygon>
+  </Placemark>
+  <Placemark id="zoning.3">
+	<Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>
+	<ExtendedData><SchemaData schemaUrl="#zoning">
+		<SimpleData name="ZONE">AAA</SimpleData>
+		<SimpleData name="ZONENAME">Large Lot Residential</SimpleData>
+		<SimpleData name="ORDINANCE">223-31</SimpleData>
+	</SchemaData></ExtendedData>
+      <MultiGeometry><Polygon><outerBoundaryIs><LinearRing><coordinates>-74.14,41.03 -74.136,41.03 -74.136,41.034 -74.14,41.034 -74.14,41.03</coordinates></LinearRing></outerBoundaryIs></Polygon><Polygon><outerBoundaryIs><LinearRing><coordinates>-74.134,41.03 -74.131,41.03 -74.131,41.033 -74.134,41.033 -74.134,41.03</coordinates></LinearRing></outerBoundaryIs></Polygon></MultiGeometry>
+  </Placemark>
+</Folder>
+</Document></kml>

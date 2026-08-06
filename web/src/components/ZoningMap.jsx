@@ -454,14 +454,13 @@ export default function ZoningMap({
         </ul>
       )}
 
-      {provenance?.limitations && (
+      {/* Gated on the link rather than on `limitations`: the caveat prose it
+          used to introduce is gone, and the link has to survive without it. */}
+      {provenance?.source_map_url && (
         <p className="fine zoning-map-caveat">
-          Derived zoning layer, not the municipal GIS record. {provenance.limitations}{" "}
-          {provenance.source_map_url && (
-            <a href={provenance.source_map_url} target="_blank" rel="noreferrer">
-              Official zoning map →
-            </a>
-          )}
+          <a href={provenance.source_map_url} target="_blank" rel="noreferrer">
+            Official zoning map →
+          </a>
         </p>
       )}
     </div>

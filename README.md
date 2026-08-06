@@ -136,6 +136,135 @@ digitize and QA the official map before importing. District polygons may be
 loaded before all rule configs exist; those parcels safely return
 `rules_missing` until the corresponding district rules are configured.
 
+### Importing a town's zoning layer in the config editor
+
+**Municipalities → a town → Zoning setup** reads a published GIS layer directly,
+which is the route to try before anything else. Drawing boundaries by hand is
+still there, and is still the right answer for a town like Union City that
+publishes only a PDF — but it is the fallback, not the starting point.
+
+Step 1 offers three sources:
+
+| Tab | Accepts |
+| --- | --- |
+| **Fetch from GIS service** | ArcGIS FeatureServer or MapServer layer URL, a whole service URL, an ArcGIS Online item link or item id, an OGC WFS endpoint, or a link to a `.geojson` file |
+| **Upload file** | GeoJSON, zipped shapefile (`.shp` + `.dbf` + `.prj`), KML, KMZ, GeoPackage |
+| **Draw boundaries** | Click the corners on the setup map, one polygon per district |
+
+What the importer does on its own, and what it leaves to you:
+
+* **Finds the layer.** A service URL is expanded to its polygon layers and an
+  ArcGIS Online item is resolved to the service behind it. One layer loads
+  immediately; several are offered as a list.
+* **Reads every page.** Services cap a query at their own `maxRecordCount`
+  (commonly 1000–2000), so the layer is walked with `resultOffset`, or by object
+  id when the service does not support paging. A layer that supports neither and
+  is larger than one page is refused rather than silently truncated.
+* **Converts the projection.** Shapefiles and GeoPackages are usually in
+  EPSG:3424 (NJ State Plane feet) or a neighbouring state's zone. The file's own
+  `.prj` / `gpkg_spatial_ref_sys` definition is read and inverted to
+  longitude/latitude — Transverse Mercator, Lambert Conformal Conic, Albers and
+  Web Mercator, checked against GDAL to under a millimetre by `npm run test:gis`.
+  A projection outside that set is refused by name.
+* **Confines a wide layer to the town.** County and statewide services are
+  filtered to the municipality's own extent, taken from the NJGIN parcel fabric
+  and padded by roughly 500 m. Switch the checkbox off to load a service whole.
+* **Proposes the district-code field**, scored on both the field's name and its
+  values — a field that is unique per feature is an identifier, not a zone code —
+  and proposes a name field alongside it.
+* **Matches codes onto configured districts**, ignoring case, spaces and
+  separators so a layer's `R1` finds the ordinance's `R-1`. A loose match is
+  labelled as one. If two configured districts would both match, neither is
+  chosen.
+* **Offers to create districts the layer needs and the config lacks.** They are
+  created with no rules at all, which is the honest state: the boundary is known
+  and the ordinance's numbers are not.
+
+Then you confirm the field, confirm the mapping, test a real address against the
+polygons, and publish. **Nothing about zoning is inferred by the import** — it
+moves boundaries and reads attribute names, and every claim about what a district
+*permits* still comes from a person entering the ordinance.
+
+A published layer may be a **subset** of its source, and often should be. Real
+municipal layers mix base districts with overlays and redevelopment plans in one
+field — Jersey City's service files ninety-odd plan areas in the same `ZONE`
+column as its zone codes. Leave those mapped to *— not published —*: a parcel no
+published polygon covers resolves as `unmapped` and the app refuses to calculate,
+which is the correct answer for land whose rules nobody has entered. Forcing
+every value to map would only invite pointing a redevelopment-plan polygon at a
+base district, which publishes wrong rules.
+
+The readers live in `web/src/lib/gis/` and are written from the format
+specifications rather than taken from a library, so they are verified against
+GDAL output:
+
+```bash
+cd web && npm run test:gis          # 36 checks, Node only
+./scripts/build-gis-fixtures.sh     # regenerate the fixtures; needs GDAL
+```
+
+#### Services that block the browser: the gis-proxy function
+
+Most published services send `Access-Control-Allow-Origin` and are fetched
+directly — no server in the path and nothing to deploy. Some send no CORS
+headers, and a browser cannot read those at all: not because the layer is
+restricted, but because the server never says it may be shared.
+
+`supabase/functions/gis-proxy` covers that case. The importer tries direct
+first, always, and only falls back to the proxy when a request fails with no
+response — so an open service never touches our infrastructure, and the importer
+keeps working when the function is not deployed (it says what to deploy). When a
+layer does come through the proxy, step 1 says so, because that is a durable fact
+about the town's server rather than a one-off.
+
+```bash
+supabase functions deploy gis-proxy --project-ref <ref>
+```
+
+Deployment is otherwise automatic: CI deploys it on pushes to `main` once
+`SUPABASE_ACCESS_TOKEN` and `SUPABASE_PROJECT_REF` exist as repository secrets,
+and skips the job with a message until they do. The frontend needs no
+configuration — it derives the endpoint from `VITE_SUPABASE_URL`.
+
+**It is not a general proxy, and the reasons it refuses things are the point.** A
+function that forwards any URL an authenticated caller names is a server-side
+request forgery hole: it runs inside Supabase's network and can reach addresses
+the caller cannot, starting with the cloud metadata endpoint. So:
+
+* **Config admins only.** The caller's own JWT is used to evaluate
+  `is_config_admin()` (migration 0009), which is the same gate as every admin
+  write. The platform's `verify_jwt` is not relied on alone — the anon key is
+  itself a valid project JWT, so any visitor would pass it. The service-role key
+  is deliberately never used in the function.
+* **The target must look like a GIS endpoint** — ArcGIS REST, an OGC WFS request,
+  or a GeoJSON file — on a port GIS servers are published on.
+* **It must resolve to a public address.** Literal IPs are checked directly and
+  host names are resolved with every answer checked, so `zoning.evil.test`
+  pointing at `169.254.169.254` is refused. Redirects are followed manually and
+  each hop is re-checked, because a public host answering `302` to an internal
+  one is otherwise a way straight through the other two layers.
+* **Nothing leaks in either direction.** Only `Accept` and `Content-Type` are
+  forwarded upstream — never the caller's `Authorization` or cookies — and only
+  the content type comes back, so an upstream `Set-Cookie` cannot be set for our
+  own origin. Responses are capped at 25 MB and requests time out at 25 s.
+
+Every one of those refusals is asserted, including the obfuscated spellings of
+`127.0.0.1` and `169.254.169.254`, and CI runs them on every push:
+
+```bash
+deno test --allow-net=deno.land supabase/functions/gis-proxy/
+```
+
+One residual risk is documented rather than hidden, in `vet.ts`: between
+resolving a name and fetching it, a short-TTL DNS record can change (DNS
+rebinding). Closing that needs the fetch pinned to the address that was checked,
+which Deno's `fetch` cannot express without breaking certificate validation. The
+exposure is one request to an internal address, by a caller who is already an
+authenticated config admin.
+
+If a layer still cannot be reached, download it from its own portal and use the
+Upload file tab.
+
 ## Two ways to edit config — and keeping them in sync
 
 There are two paths into the live rules, and the config file is the one that

@@ -1,0 +1,13 @@
+# Supabase CLI configuration.
+#
+# This project's schema is owned by db/migrations and applied by
+# scripts/migrate.py, not by `supabase db push` — the CLI is here only to deploy
+# edge functions. `supabase link` is not needed for that; pass --project-ref.
+project_id = "demarco"
+
+[functions.gis-proxy]
+# The default (true) is kept: the platform rejects a request without a valid
+# project JWT before the function runs. That is a first gate and not the real
+# one, because the anon key is itself a valid project JWT — so the function also
+# checks is_config_admin() against the caller's own token. See its index.ts.
+verify_jwt = true

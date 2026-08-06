@@ -201,7 +201,79 @@ const titleCase = (value) =>
         .toLowerCase()
         .replace(/\b[a-z]/g, (c) => c.toUpperCase());
 const municipalityName = (value) =>
-  titleCase(value)?.replace(/\s+(City|Twp|Town|Boro|Borough|Village)$/i, "") ?? null;
+  titleCase(value)?.replace(/\s+(City|Twp|Township|Town|Boro|Borough|Village)$/i, "") ?? null;
+
+let municipalityOptionsPromise = null;
+
+/**
+ * Every New Jersey municipality available in NJGIN, with its county retained
+ * as disambiguating metadata. The admin create form displays the county in its
+ * suggestion list but does not make the operator type or maintain it.
+ *
+ * Cache the single statewide request for the life of the page. There are 564
+ * municipality/county pairs, safely below this service's 2,000-row limit.
+ */
+export function listNjginMunicipalities() {
+  if (!municipalityOptionsPromise) {
+    municipalityOptionsPromise = query({
+      where: "MUN_NAME IS NOT NULL",
+      outFields: "MUN_NAME,COUNTY",
+      returnGeometry: "false",
+      returnDistinctValues: "true",
+      orderByFields: "MUN_NAME",
+      resultRecordCount: "1000",
+    })
+      .then((body) => {
+        const rows = (body.features ?? [])
+          .map((feature) => {
+            const sourceName = titleCase(feature?.properties?.MUN_NAME);
+            const type = sourceName?.match(/\s+(City|Twp|Township|Town|Boro|Borough|Village)$/i)?.[1]
+              ?.replace(/^Twp$/i, "Township")
+              .replace(/^Boro$/i, "Borough");
+            return {
+              sourceName,
+              name: municipalityName(sourceName),
+              county: titleCase(feature?.properties?.COUNTY),
+              type: type ?? null,
+            };
+          })
+          .filter((row) => row.sourceName && row.name);
+
+        // A few counties contain two legal municipalities with the same base
+        // name (for example a borough and a township). Keep the familiar short
+        // name everywhere else, and add the legal type only for those collisions.
+        const baseCounts = new Map();
+        for (const row of rows) {
+          const key = `${row.name.toLowerCase()}|${row.county?.toLowerCase() ?? ""}`;
+          baseCounts.set(key, (baseCounts.get(key) ?? 0) + 1);
+        }
+
+        const seen = new Set();
+        return rows
+          .filter((row) => {
+            const key = `${row.sourceName.toLowerCase()}|${row.county?.toLowerCase() ?? ""}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .map((row) => {
+            const baseKey = `${row.name.toLowerCase()}|${row.county?.toLowerCase() ?? ""}`;
+            return {
+              name:
+                baseCounts.get(baseKey) > 1 && row.type ? `${row.name} ${row.type}` : row.name,
+              county: row.county,
+            };
+          });
+      })
+      .catch((error) => {
+        // A temporary service failure should be retryable when the form is
+        // opened again instead of poisoning the page-lifetime cache.
+        municipalityOptionsPromise = null;
+        throw error;
+      });
+  }
+  return municipalityOptionsPromise;
+}
 
 function toRow(properties, feature) {
   return {
@@ -252,23 +324,26 @@ export async function searchNjginParcels(muni, text, limit = 15) {
  * parcel; what is missing is a zoning layer to intersect it with, which is why
  * these rows are marked `scope: "statewide"` and flagged as unverified in the UI.
  */
-export async function searchNjginParcelsAnywhere(text, limit = 10, proximity = null) {
+export async function searchNjginParcelsAnywhere(text, limit = 10, proximity = null, signal) {
   const needle = sqlLiteral(text);
   if (needle.length < 3) return [];
   const prioritizeNearby = hasPoint(proximity);
 
-  const body = await query({
-    where: statewideAddressWhere(needle),
-    outFields: OUT_FIELDS,
-    orderByFields: "PROP_LOC",
-    returnGeometry: prioritizeNearby,
-    ...(prioritizeNearby ? { outSR: 4326, geometryPrecision: 5 } : {}),
-    // Pull a broader candidate set only while ranking locally. No browser
-    // coordinates are included in this request.
-    resultRecordCount: prioritizeNearby
-      ? Math.max(Math.min(limit * 10, 100), 50)
-      : Math.min(limit, 50),
-  });
+  const body = await query(
+    {
+      where: statewideAddressWhere(needle),
+      outFields: OUT_FIELDS,
+      orderByFields: "PROP_LOC",
+      returnGeometry: prioritizeNearby,
+      ...(prioritizeNearby ? { outSR: 4326, geometryPrecision: 5 } : {}),
+      // Pull a broader candidate set only while ranking locally. No browser
+      // coordinates are included in this request.
+      resultRecordCount: prioritizeNearby
+        ? Math.max(Math.min(limit * 10, 100), 50)
+        : Math.min(limit, 50),
+    },
+    signal
+  );
 
   const rows = (body.features ?? [])
     .map((feature) => {
@@ -628,6 +703,43 @@ export async function fetchNjginParcel(muni, pamsPin, insetFt = 0) {
     throw new Error(`NJGIN has no parcel geometry for PIN ${pamsPin}.`);
   }
   return njginParcelFromFeature(feature, insetFt);
+}
+
+/**
+ * The longitude/latitude extent of one municipality's parcels.
+ *
+ * The zoning-layer importer uses this to confine a county-wide or statewide
+ * source to the town being configured. It comes from the parcel fabric rather
+ * than from a municipal-boundary layer because that is the authority already
+ * trusted here for where a town is, and because the two agree to within the
+ * width of a street — far inside the margin this bounding box is padded by.
+ *
+ * Returns null rather than throwing: an extent that cannot be determined means
+ * the import is not filtered, which is a complete result, not a wrong one.
+ */
+export async function njginMunicipalityExtent(muni, signal) {
+  try {
+    const body = await query(
+      {
+        f: "json",
+        where: muniWhere(muni),
+        returnExtentOnly: true,
+        outSR: 4326,
+      },
+      signal
+    );
+    const extent = body?.extent ?? body?.featureExtent;
+    const box = [extent?.xmin, extent?.ymin, extent?.xmax, extent?.ymax].map(Number);
+    if (!box.every(Number.isFinite) || box[0] >= box[2] || box[1] >= box[3]) return null;
+
+    // A zoning district may legitimately extend a short way past the outermost
+    // taxed parcel — over a river, a rail cut or an unassessed right of way — so
+    // the box is padded by roughly 500 m before it is used to exclude anything.
+    const pad = 0.005;
+    return [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad];
+  } catch {
+    return null;
+  }
 }
 
 /** Re-derives the envelope for an already-fetched feature at a new inset. */

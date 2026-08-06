@@ -35,18 +35,95 @@ export function envelopeRect(lotWidthFt, lotDepthFt, setbacks) {
 /** A proposed rectangular floor must be fully inside the actual parcel/envelope polygon. */
 export function rectFitsGeometry(rect, geometry) {
   if (!rect || !geometry) return null;
+  return polygonFitsGeometry(rectPoints(rect), geometry);
+}
+
+/** Four lot-coordinate corners for a rectangle, ordered around its edge. */
+export function rectPoints(rect) {
+  if (!rect) return null;
+  return [
+    { x: rect.x0, y: rect.y0 },
+    { x: rect.x1, y: rect.y0 },
+    { x: rect.x1, y: rect.y1 },
+    { x: rect.x0, y: rect.y1 },
+  ];
+}
+
+/**
+ * Convert a floor's normalized editable outline into lot coordinates. The
+ * outline stays attached to the same rectangle when the floor moves/resizes.
+ */
+export function outlinePointsForRect(rect, outline) {
+  if (!rect) return null;
+  const normalized =
+    Array.isArray(outline) && outline.length === 4
+      ? outline
+      : [
+          { x: 0, y: 0 },
+          { x: 1, y: 0 },
+          { x: 1, y: 1 },
+          { x: 0, y: 1 },
+        ];
+  const width = rect.x1 - rect.x0;
+  const depth = rect.y1 - rect.y0;
+  return normalized.map((point) => ({
+    x: rect.x0 + Math.max(0, Math.min(1, num(point?.x))) * width,
+    y: rect.y0 + Math.max(0, Math.min(1, num(point?.y))) * depth,
+  }));
+}
+
+/** Shoelace area for a floor outline expressed in lot feet. */
+export function polygonAreaSqft(points) {
+  if (!Array.isArray(points) || points.length < 3) return 0;
+  return Math.abs(
+    points.reduce((sum, point, index) => {
+      const next = points[(index + 1) % points.length];
+      return sum + num(point?.x) * num(next?.y) - num(next?.x) * num(point?.y);
+    }, 0) / 2
+  );
+}
+
+/** Area represented by a normalized editable outline inside width × depth. */
+export function outlineAreaSqft(widthFt, depthFt, outline) {
+  const width = Math.max(0, num(widthFt));
+  const depth = Math.max(0, num(depthFt));
+  if (!(width > 0) || !(depth > 0)) return null;
+  const unitRect = { x0: 0, y0: 0, x1: width, y1: depth };
+  return polygonAreaSqft(outlinePointsForRect(unitRect, outline));
+}
+
+/** A proposed polygon must be fully inside the actual parcel/envelope polygon. */
+export function polygonFitsGeometry(points, geometry) {
+  if (!Array.isArray(points) || points.length < 3 || !geometry) return null;
   try {
-    const shape = polygon([[
-      [rect.x0, rect.y0],
-      [rect.x1, rect.y0],
-      [rect.x1, rect.y1],
-      [rect.x0, rect.y1],
-      [rect.x0, rect.y0],
-    ]]);
+    const ring = points.map((point) => [num(point?.x), num(point?.y)]);
+    ring.push([...ring[0]]);
+    const shape = polygon([ring]);
     return booleanWithin(shape, feature(geometry));
   } catch {
     return false;
   }
+}
+
+/** Whether one editable floor polygon is completely supported by another. */
+export function polygonWithinPolygon(innerPoints, outerPoints) {
+  if (!Array.isArray(outerPoints) || outerPoints.length < 3) return null;
+  const ring = outerPoints.map((point) => [num(point?.x), num(point?.y)]);
+  ring.push([...ring[0]]);
+  return polygonFitsGeometry(innerPoints, { type: "Polygon", coordinates: [ring] });
+}
+
+/** Whether every editable corner clears a rectangular envelope. */
+export function polygonFitsRect(points, rect) {
+  if (!Array.isArray(points) || !rect) return null;
+  const t = 0.05;
+  return points.every(
+    (point) =>
+      point.x >= rect.x0 - t &&
+      point.x <= rect.x1 + t &&
+      point.y >= rect.y0 - t &&
+      point.y <= rect.y1 + t
+  );
 }
 
 /**

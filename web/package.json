@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:zoning": "node scripts/verify-zoning-engine.mjs",
-    "test:existing": "node scripts/verify-existing-building.mjs"
+    "test:existing": "node scripts/verify-existing-building.mjs",
+    "test:gis": "node scripts/verify-gis-import.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

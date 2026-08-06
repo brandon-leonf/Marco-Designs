@@ -32,6 +32,23 @@ import {
   publishZoningLayer,
 } from "./lib/adminApi.js";
 import Logo from "./components/Logo.jsx";
+import {
+  classifyUrl,
+  discoverMunicipalityZoningCodes,
+  distinctValues,
+  loadZoningLayer,
+  looseCodeKey,
+  matchDistrictCodes,
+  missingDistricts,
+  probeFileSource,
+  probeUrlSource,
+  rankCodeFields,
+} from "./lib/zoningSources.js";
+import { listNjginMunicipalities, njginMunicipalityExtent } from "./lib/njgin.js";
+import {
+  catalogDistrictFor,
+  municipalZoningCatalogFor,
+} from "./lib/municipalZoningCatalog.js";
 import { computeBuildable, missingDistrictRules } from "./lib/envelope.js";
 import {
   RULE_APPLIES_TO,
@@ -832,9 +849,47 @@ function LoginCard() {
 }
 
 /** Build the editable draft for one district row + the muni's cost model. */
-function draftFromDistrict(district) {
+const CATALOG_RULE_FIELDS = [
+  "front_yard_min_ft",
+  "rear_yard_min_ft",
+  "side_yard_one_min_ft",
+  "side_yard_total_min_ft",
+  "min_lot_area_sqft",
+  "min_lot_width_ft",
+  "min_lot_depth_ft",
+  "front_yard_prevailing_rule",
+  "max_building_coverage_pct",
+  "max_impervious_coverage_pct",
+  "max_stories",
+  "max_far",
+  "max_height_ft",
+];
+
+function districtHasConfiguredRules(district) {
+  return (
+    CATALOG_RULE_FIELDS.some((field) =>
+      field === "front_yard_prevailing_rule" ? district?.[field] === true : district?.[field] != null
+    ) ||
+    (district?.zoning_rules?.length ?? 0) > 0 ||
+    (district?.permitted_uses?.length ?? 0) > 0 ||
+    Boolean(district?.notes) ||
+    Object.keys(district?.extra_rules ?? {}).length > 0
+  );
+}
+
+function catalogPrefillKeys(district, catalogDistrict) {
+  if (!catalogDistrict) return [];
+  const blankDistrict = !districtHasConfiguredRules(district);
+  return Object.keys(catalogDistrict.rules ?? {}).filter(
+    (field) =>
+      blankDistrict ||
+      (field !== "front_yard_prevailing_rule" && district?.[field] == null)
+  );
+}
+
+function draftFromDistrict(district, catalogDistrict = null) {
   const adu = district.extra_rules?.adu ?? {};
-  return {
+  const draft = {
     name: district.name ?? "",
     front_yard_min_ft: numOrEmpty(district.front_yard_min_ft),
     rear_yard_min_ft: numOrEmpty(district.rear_yard_min_ft),
@@ -854,6 +909,11 @@ function draftFromDistrict(district) {
     adu_max_size_sqft: numOrEmpty(adu.max_size_sqft),
     adu_parking_required: Boolean(adu.parking_required),
   };
+  for (const field of catalogPrefillKeys(district, catalogDistrict)) {
+    draft[field] = catalogDistrict.rules[field];
+  }
+  if (!draft.name && catalogDistrict?.name) draft.name = catalogDistrict.name;
+  return draft;
 }
 
 function draftFromCostModel(costModel) {
@@ -882,6 +942,125 @@ const enumLabel = (value) =>
     .toLowerCase()
     .replaceAll("_", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+const slugFor = (name, state) =>
+  `${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${state
+    .trim()
+    .toLowerCase()}`;
+
+/**
+ * An accessible, keyboard-friendly municipality picker.
+ *
+ * The input remains a normal text field while typing, but creating an NJ town
+ * requires choosing one of the official NJGIN suggestions when that service is
+ * available. County appears only in the menu to disambiguate repeated names;
+ * selecting an option stores it silently for parcel queries.
+ */
+function MunicipalityAutocomplete({ value, options, loading, error, onValueChange, onSelect }) {
+  const [expanded, setExpanded] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const inputId = "new-municipality-name";
+  const listId = "new-municipality-options";
+  const needle = value.trim().toLowerCase();
+  const matches = useMemo(() => {
+    if (!needle) return options.slice(0, 12);
+    return options
+      .filter((option) => option.name.toLowerCase().includes(needle))
+      .sort((a, b) => {
+        const aStarts = a.name.toLowerCase().startsWith(needle);
+        const bStarts = b.name.toLowerCase().startsWith(needle);
+        if (aStarts !== bStarts) return aStarts ? -1 : 1;
+        return a.name.localeCompare(b.name) || (a.county ?? "").localeCompare(b.county ?? "");
+      })
+      .slice(0, 12);
+  }, [needle, options]);
+
+  useEffect(() => setActiveIndex(0), [value]);
+
+  const choose = (option) => {
+    onSelect(option);
+    setExpanded(false);
+  };
+
+  const onKeyDown = (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setExpanded(true);
+      setActiveIndex((current) => Math.min(current + 1, Math.max(matches.length - 1, 0)));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setExpanded(true);
+      setActiveIndex((current) => Math.max(current - 1, 0));
+    } else if (event.key === "Enter" && expanded && matches[activeIndex]) {
+      event.preventDefault();
+      choose(matches[activeIndex]);
+    } else if (event.key === "Escape") {
+      setExpanded(false);
+    }
+  };
+
+  const showMenu = expanded && Boolean(loading || error || matches.length > 0 || needle);
+
+  return (
+    <div className="municipality-autocomplete-field">
+      <label htmlFor={inputId}>Town name</label>
+      <div className="municipality-autocomplete-control">
+        <input
+          id={inputId}
+          type="text"
+          value={value}
+          placeholder="Start typing, e.g. Hoboken"
+          autoComplete="off"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={showMenu}
+          aria-controls={listId}
+          aria-activedescendant={
+            showMenu && matches[activeIndex] ? `${listId}-${activeIndex}` : undefined
+          }
+          onFocus={() => setExpanded(true)}
+          onBlur={() => setExpanded(false)}
+          onKeyDown={onKeyDown}
+          onChange={(event) => {
+            onValueChange(event.target.value);
+            setExpanded(true);
+          }}
+        />
+        {showMenu && (
+          <div className="municipality-autocomplete-list" id={listId} role="listbox">
+            {loading ? (
+              <p className="municipality-autocomplete-status">Loading New Jersey municipalities…</p>
+            ) : error ? (
+              <p className="municipality-autocomplete-status error-text">{error}</p>
+            ) : matches.length ? (
+              matches.map((option, index) => (
+                <button
+                  type="button"
+                  id={`${listId}-${index}`}
+                  key={`${option.name}-${option.county}`}
+                  className={index === activeIndex ? "active" : ""}
+                  role="option"
+                  aria-selected={index === activeIndex}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                  }}
+                  onClick={() => choose(option)}
+                  onMouseEnter={() => setActiveIndex(index)}
+                >
+                  <span>{option.name}</span>
+                  {option.county && <small>{option.county} County</small>}
+                </button>
+              ))
+            ) : (
+              <p className="municipality-autocomplete-status">
+                No matching New Jersey municipality.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function ConfigEditor({ adminEmail, ready }) {
   const [munis, setMunis] = useState(null);
@@ -895,9 +1074,14 @@ function ConfigEditor({ adminEmail, ready }) {
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState(null); // {kind: "ok"|"error", text}
   const [copied, setCopied] = useState(false);
-  // No `district` field: createMunicipality no longer inserts a starter
-  // district, so the code for one is asked for on the districts panel instead.
-  const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, sourceUrl, lastUpdated}
+  // No manually typed starter district: public GIS discovery can propose the
+  // town's real codes, and any it cannot find are added on the districts panel.
+  const [newMuni, setNewMuni] = useState(null); // null | {name, state, county, selected}
+  const [njMunicipalityOptions, setNjMunicipalityOptions] = useState(null);
+  const [njMunicipalityOptionsError, setNjMunicipalityOptionsError] = useState("");
+  const [zoningDiscovery, setZoningDiscovery] = useState({ status: "idle" });
+  const [catalogPrefill, setCatalogPrefill] = useState(null);
+  const [catalogSyncConfirm, setCatalogSyncConfirm] = useState(false);
   // Same identifying fields as the create form, reopened against a town that
   // already exists. Its slug rides along read-only so the form can say which
   // config id the edits are landing on.
@@ -942,6 +1126,7 @@ function ConfigEditor({ adminEmail, ready }) {
   const [zoningCounts, setZoningCounts] = useState(null);
   const [zoningSetupDirty, setZoningSetupDirty] = useState(false);
   const [pendingSetupView, setPendingSetupView] = useState(null);
+  const zoningDiscoveryAbortRef = useRef(null);
 
   const reload = () =>
     fetchMunicipalities()
@@ -962,6 +1147,61 @@ function ConfigEditor({ adminEmail, ready }) {
         return rows;
       })
       .catch(() => []);
+
+  useEffect(() => {
+    if (!newMuni || newMuni.state !== "NJ") return;
+    let stale = false;
+    setNjMunicipalityOptionsError("");
+    listNjginMunicipalities()
+      .then((options) => {
+        if (!stale) setNjMunicipalityOptions(options);
+      })
+      .catch(() => {
+        if (!stale) {
+          setNjMunicipalityOptions([]);
+          setNjMunicipalityOptionsError(
+            "Municipality suggestions are temporarily unavailable; you can still enter the town name."
+          );
+        }
+      });
+    return () => {
+      stale = true;
+    };
+  }, [newMuni?.state]);
+
+  useEffect(() => {
+    zoningDiscoveryAbortRef.current?.abort();
+    if (!newMuni?.selected || newMuni.state !== "NJ") {
+      setZoningDiscovery({ status: "idle" });
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    zoningDiscoveryAbortRef.current = controller;
+    setZoningDiscovery({ status: "loading", municipality: newMuni.name });
+    discoverMunicipalityZoningCodes(
+      {
+        name: newMuni.name,
+        state_code: newMuni.state,
+        county: newMuni.county,
+      },
+      { signal: controller.signal }
+    )
+      .then((result) => {
+        if (!controller.signal.aborted) setZoningDiscovery(result);
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted && error?.name !== "AbortError") {
+          setZoningDiscovery({
+            status: "error",
+            municipality: newMuni.name,
+            message: "Zoning-code detection is temporarily unavailable.",
+          });
+        }
+      });
+
+    return () => controller.abort();
+  }, [newMuni?.selected, newMuni?.name, newMuni?.state, newMuni?.county]);
 
   useEffect(() => {
     Promise.all([reloadStates(), reload()]).then(([rows, data]) => {
@@ -1141,6 +1381,29 @@ function ConfigEditor({ adminEmail, ready }) {
 
   const district = muni?.zoning_districts.find((d) => d.id === districtId) ?? null;
   const stateName = stateNameFor(stateCode);
+  const officialCatalog = municipalZoningCatalogFor(muni?.name, muni?.state_code);
+  const officialCodes = new Set(
+    (officialCatalog?.districts ?? []).map((item) => looseCodeKey(item.code))
+  );
+  const catalogMissingDistricts = (officialCatalog?.districts ?? []).filter(
+    (item) =>
+      !muni?.zoning_districts.some((existing) => looseCodeKey(existing.code) === looseCodeKey(item.code))
+  );
+  const catalogUnexpectedDistricts = (muni?.zoning_districts ?? []).filter(
+    (item) => !officialCodes.has(looseCodeKey(item.code))
+  );
+  const catalogNameMismatches = (officialCatalog?.districts ?? []).filter((item) => {
+    const existing = muni?.zoning_districts.find(
+      (districtItem) => looseCodeKey(districtItem.code) === looseCodeKey(item.code)
+    );
+    return existing && existing.name !== item.name;
+  });
+  const catalogNeedsSync = Boolean(
+    officialCatalog &&
+      (catalogMissingDistricts.length ||
+        catalogUnexpectedDistricts.length ||
+        catalogNameMismatches.length)
+  );
 
   // Every state on file, whether or not a municipality has been added to it —
   // an added state has to be visible before it has anything in it, or there is
@@ -1184,6 +1447,34 @@ function ConfigEditor({ adminEmail, ready }) {
     () => (munis ?? []).filter((item) => item.state_code === stateCode),
     [munis, stateCode]
   );
+  const availableNjMunicipalityOptions = useMemo(() => {
+    const existing = new Set(
+      stateMunis.map(
+        (item) =>
+          `${item.name.trim().toLowerCase()}|${item.county?.trim().toLowerCase() ?? ""}`
+      )
+    );
+    return (njMunicipalityOptions ?? []).filter(
+      (option) =>
+        !existing.has(
+          `${option.name.trim().toLowerCase()}|${option.county?.trim().toLowerCase() ?? ""}`
+        )
+    );
+  }, [njMunicipalityOptions, stateMunis]);
+  const newMuniSlug = useMemo(() => {
+    if (!newMuni?.name.trim() || !newMuni.state.trim()) return "";
+    const sameNameCount = (njMunicipalityOptions ?? []).filter(
+      (option) => option.name.toLowerCase() === newMuni.name.trim().toLowerCase()
+    ).length;
+    // Names such as Washington Township legitimately occur in several NJ
+    // counties. The public name stays familiar; the durable config id includes
+    // the county only when that is necessary to keep it unique.
+    const slugName =
+      newMuni.state === "NJ" && sameNameCount > 1 && newMuni.county
+        ? `${newMuni.name}-${newMuni.county}`
+        : newMuni.name;
+    return slugFor(slugName, newMuni.state);
+  }, [newMuni, njMunicipalityOptions]);
   const rawCostModel = muni?.build_cost_models;
   const costModel = (Array.isArray(rawCostModel) ? rawCostModel[0] : rawCostModel) ?? null;
   // What the PUBLISHED row is still missing — the draft in this browser is not
@@ -1198,6 +1489,7 @@ function ConfigEditor({ adminEmail, ready }) {
       setDraft(null);
       setRuleDraft([]);
       setDraftInfo(null);
+      setCatalogPrefill(null);
       return;
     }
     const stored = loadLocalDraft(district.id);
@@ -1218,8 +1510,12 @@ function ConfigEditor({ adminEmail, ready }) {
       );
       if (stored.costDraft) setCostDraft({ ...stored.costDraft, provenance: "estimated" });
       setDraftInfo({ savedAt: stored.savedAt });
+      setCatalogPrefill(null);
     } else {
-      setDraft(draftFromDistrict(district));
+      const catalog = municipalZoningCatalogFor(muni?.name, muni?.state_code);
+      const catalogDistrict = catalogDistrictFor(muni?.name, muni?.state_code, district.code);
+      const prefilledKeys = catalogPrefillKeys(district, catalogDistrict);
+      setDraft(draftFromDistrict(district, catalogDistrict));
       setRuleDraft(
         (district.zoning_rules ?? []).map((rule) =>
           normalizeZoningRule(rule, {
@@ -1229,13 +1525,18 @@ function ConfigEditor({ adminEmail, ready }) {
         )
       );
       setDraftInfo(null);
+      setCatalogPrefill(
+        catalogDistrict && (prefilledKeys.length || (!district.name && catalogDistrict.name))
+          ? { catalog, district: catalogDistrict, keys: prefilledKeys }
+          : null
+      );
     }
     setSaveState(null);
     setTestResult(null);
     setPdfImport(null);
     setPdfProgress("");
     setPdfImportedKeys([]);
-  }, [district, muni?.id]);
+  }, [district, muni?.id, muni?.name, muni?.state_code]);
   useEffect(() => {
     if (!muni) {
       setCostDraft(null);
@@ -1574,14 +1875,20 @@ function ConfigEditor({ adminEmail, ready }) {
     }
   };
 
-  const slugFor = (name, state) =>
-    `${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${state
-      .trim()
-      .toLowerCase()}`;
-
   const submitNewMuni = async () => {
     if (!newMuni?.name.trim() || newMuni.state.trim().length !== 2) {
-      setSaveState({ kind: "error", text: "A new municipality needs a name and a 2-letter state." });
+      setSaveState({ kind: "error", text: "A new municipality needs a town name." });
+      return;
+    }
+    if (
+      newMuni.state === "NJ" &&
+      availableNjMunicipalityOptions.length > 0 &&
+      !newMuni.selected
+    ) {
+      setSaveState({
+        kind: "error",
+        text: "Choose a New Jersey municipality from the suggestions below the town name.",
+      });
       return;
     }
     setSaving(true);
@@ -1591,23 +1898,37 @@ function ConfigEditor({ adminEmail, ready }) {
         name: newMuni.name.trim(),
         stateCode: newMuni.state.trim(),
         county: newMuni.county.trim(),
-        slug: slugFor(newMuni.name, newMuni.state),
-        sourceUrl: newMuni.sourceUrl.trim(),
-        lastUpdated: newMuni.lastUpdated,
+        slug: newMuniSlug,
+        sourceUrl: zoningDiscovery.status === "found" ? zoningDiscovery.sourceUrl : "",
       });
-      await reload();
+      const detectedCodes = zoningDiscovery.status === "found" ? zoningDiscovery.codes : [];
+      let addedCount = 0;
+      // Keep larger municipal code sets from turning into a burst of a hundred
+      // simultaneous database writes. Small batches remain quick and predictable.
+      for (let start = 0; start < detectedCodes.length; start += 8) {
+        const districtResults = await Promise.allSettled(
+          detectedCodes
+            .slice(start, start + 8)
+            .map((district) => createDistrict(id, district.code, district.name))
+        );
+        addedCount += districtResults.filter((result) => result.status === "fulfilled").length;
+      }
+      const data = await reload();
+      const createdMuni = data?.find((item) => item.id === id) ?? null;
       setMuniId(id);
-      setDistrictId(null);
+      setDistrictId(createdMuni?.zoning_districts?.[0]?.id ?? null);
       // A town can be created into a state other than the one being browsed;
       // follow it there so the crumbs and the list behind it agree.
       setStateCode(newMuni.state.trim().toUpperCase());
       setNewMuni(null);
-      // No starter district is created any more, so there are no rules to land
-      // on — the districts panel, where its first district is named, is next.
       setView("districts");
       setSaveState({
-        kind: "ok",
-        text: "Municipality created. Add its zoning districts next, then enter each district’s rules.",
+        kind: addedCount < detectedCodes.length ? "error" : "ok",
+        text:
+          detectedCodes.length > 0
+            ? `Municipality created with ${addedCount} of ${detectedCodes.length} detected zoning ` +
+              `code${detectedCodes.length === 1 ? "" : "s"}. Review each code and add its rules before publishing.`
+            : "Municipality created. No zoning codes were detected automatically; add them on the districts panel.",
       });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
@@ -1732,6 +2053,74 @@ function ConfigEditor({ adminEmail, ready }) {
       });
     } catch (err) {
       setSaveState({ kind: "error", text: err.message ?? String(err) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const syncOfficialCatalog = async () => {
+    if (!muni || !officialCatalog) return;
+    const removable = catalogUnexpectedDistricts.filter(
+      (districtItem) => !districtHasConfiguredRules(districtItem)
+    );
+    if (removable.length > 0 && !catalogSyncConfirm) {
+      setCatalogSyncConfirm(true);
+      return;
+    }
+
+    setSaving(true);
+    setSaveState(null);
+    try {
+      for (const districtItem of removable) {
+        await deleteDistrict(districtItem.id);
+        localStorage.removeItem(draftKey(districtItem.id));
+      }
+
+      const kept = muni.zoning_districts.filter(
+        (districtItem) => !removable.some((removed) => removed.id === districtItem.id)
+      );
+      let added = 0;
+      let renamed = 0;
+      for (const officialDistrict of officialCatalog.districts) {
+        const existing = kept.find(
+          (districtItem) =>
+            looseCodeKey(districtItem.code) === looseCodeKey(officialDistrict.code)
+        );
+        if (existing) {
+          if (existing.name !== officialDistrict.name || existing.code !== officialDistrict.code) {
+            await saveDistrict(existing.id, {
+              code: officialDistrict.code,
+              name: officialDistrict.name,
+            });
+            renamed += 1;
+          }
+        } else {
+          await createDistrict(muni.id, officialDistrict.code, officialDistrict.name);
+          added += 1;
+        }
+      }
+
+      const data = await reload();
+      const refreshed = data?.find((item) => item.id === muni.id) ?? null;
+      const firstOfficial = officialCatalog.districts
+        .map((officialDistrict) =>
+          refreshed?.zoning_districts.find(
+            (districtItem) =>
+              looseCodeKey(districtItem.code) === looseCodeKey(officialDistrict.code)
+          )
+        )
+        .find(Boolean);
+      setDistrictId(firstOfficial?.id ?? refreshed?.zoning_districts?.[0]?.id ?? null);
+      setCatalogSyncConfirm(false);
+      setSaveState({
+        kind: "ok",
+        text:
+          `Official base districts synchronized: ${added} added, ${renamed} corrected, ` +
+          `${removable.length} unconfigured false detection${removable.length === 1 ? "" : "s"} removed. ` +
+          "Ordinance values appear as unpublished drafts for review when each district is opened.",
+      });
+    } catch (error) {
+      setSaveState({ kind: "error", text: error.message ?? String(error) });
     } finally {
       setSaving(false);
     }
@@ -1971,69 +2360,111 @@ function ConfigEditor({ adminEmail, ready }) {
   const muniForms = (
       newMuni ? (
         <div className="inline-create" role="group" aria-label="New municipality">
-          <label>
-            Town name
-            <input
-              type="text"
+          {newMuni.state === "NJ" ? (
+            <MunicipalityAutocomplete
               value={newMuni.name}
-              placeholder="e.g. Hoboken"
-              onChange={(e) => setNewMuni({ ...newMuni, name: e.target.value })}
+              options={availableNjMunicipalityOptions}
+              loading={njMunicipalityOptions == null}
+              error={njMunicipalityOptionsError}
+              onValueChange={(name) => {
+                setZoningDiscovery({ status: "idle" });
+                setNewMuni({ ...newMuni, name, county: "", selected: false });
+              }}
+              onSelect={(option) => {
+                setZoningDiscovery({ status: "loading", municipality: option.name });
+                setNewMuni({
+                  ...newMuni,
+                  name: option.name,
+                  county: option.county ?? "",
+                  selected: true,
+                });
+              }}
             />
-          </label>
-          <div className="inline-create-row">
+          ) : (
             <label>
-              State
+              Town name
               <input
                 type="text"
-                maxLength={2}
-                value={newMuni.state}
-                onChange={(e) => setNewMuni({ ...newMuni, state: e.target.value.toUpperCase() })}
+                value={newMuni.name}
+                placeholder={`e.g. a municipality in ${stateName}`}
+                onChange={(event) =>
+                  setNewMuni({ ...newMuni, name: event.target.value, selected: false })
+                }
               />
             </label>
-            <label>
-              County
-              <input
-                type="text"
-                value={newMuni.county}
-                placeholder="optional"
-                onChange={(e) => setNewMuni({ ...newMuni, county: e.target.value })}
-              />
-            </label>
-          </div>
-          <label>
-            Ordinance source URL
-            <input
-              type="url"
-              value={newMuni.sourceUrl}
-              placeholder="https://… (link to the zoning ordinance)"
-              onChange={(e) => setNewMuni({ ...newMuni, sourceUrl: e.target.value })}
-            />
-          </label>
-          <label>
-            Zoning last verified
-            <input
-              type="date"
-              value={newMuni.lastUpdated}
-              onChange={(e) => setNewMuni({ ...newMuni, lastUpdated: e.target.value })}
-            />
-          </label>
-          <p className="admin-side-note">
-            Both are optional and can be filled in later, but they are the town’s provenance —
-            the date is when the ordinance was <em>checked</em>, not when it was typed in here.
-          </p>
+          )}
+          {newMuni.selected && (
+            <div
+              className={`municipality-zoning-discovery ${zoningDiscovery.status}`}
+              role="status"
+              aria-live="polite"
+            >
+              {zoningDiscovery.status === "loading" ? (
+                <p>Searching published zoning layers for {newMuni.name}…</p>
+              ) : zoningDiscovery.status === "found" ? (
+                <>
+                  <div className="municipality-zoning-heading">
+                    <div>
+                      <strong>
+                        {zoningDiscovery.codes.length} zoning code
+                        {zoningDiscovery.codes.length === 1 ? "" : "s"} detected
+                      </strong>
+                      <span>
+                        Field <code>{zoningDiscovery.codeField}</code> in {zoningDiscovery.sourceTitle}
+                      </span>
+                    </div>
+                    <a href={zoningDiscovery.sourceUrl} target="_blank" rel="noreferrer">
+                      View source ↗
+                    </a>
+                  </div>
+                  <ul className="municipality-zoning-codes" aria-label="Detected zoning codes">
+                    {zoningDiscovery.codes.map((district) => (
+                      <li key={district.code} title={district.name || undefined}>
+                        {district.code}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="municipality-zoning-note">
+                    These codes will be added for review. No rules or boundaries are published automatically.
+                  </p>
+                </>
+              ) : zoningDiscovery.status === "not_found" ? (
+                <p>
+                  No machine-readable zoning codes were found automatically for {newMuni.name}.
+                  You can add them after creating the municipality.
+                </p>
+              ) : zoningDiscovery.status === "error" ? (
+                <p>{zoningDiscovery.message}</p>
+              ) : null}
+            </div>
+          )}
           {/* No "first district code" field: districts are added on the
               districts panel, so the town is not created with one. */}
           {newMuni.name.trim() && newMuni.state.trim().length === 2 && (
             <p className="admin-side-note">
-              Config id: <code>{slugFor(newMuni.name, newMuni.state)}</code>
+              Config id: <code>{newMuniSlug}</code>
             </p>
           )}
           <div className="inline-create-actions">
             <button type="button" className="secondary compact" onClick={() => setNewMuni(null)}>
               Cancel
             </button>
-            <button type="button" className="primary compact" disabled={saving} onClick={submitNewMuni}>
-              Create
+            <button
+              type="button"
+              className="primary compact"
+              disabled={
+                saving ||
+                (newMuni.state === "NJ" &&
+                  newMuni.selected &&
+                  (zoningDiscovery.status === "idle" || zoningDiscovery.status === "loading")) ||
+                !newMuni.name.trim() ||
+                (newMuni.state === "NJ" &&
+                  availableNjMunicipalityOptions.length > 0 &&
+                  !newMuni.selected)
+              }
+              onClick={submitNewMuni}
+            >
+              {saving ? "Creating…" : "Create"}
             </button>
           </div>
         </div>
@@ -2182,8 +2613,7 @@ function ConfigEditor({ adminEmail, ready }) {
               name: "",
               state: stateCode ?? "NJ",
               county: "",
-              sourceUrl: "",
-              lastUpdated: "",
+              selected: false,
             });
           }}
         >
@@ -2233,6 +2663,66 @@ function ConfigEditor({ adminEmail, ready }) {
             </div>
           </div>
         {muniForms}
+        {catalogNeedsSync && (
+          <div className="official-catalog-sync">
+            <div>
+              <strong>Official base-district correction available</strong>
+              <p>
+                {officialCatalog.title} identifies: {officialCatalog.districts.map((item) => item.code).join(", ")}.
+              </p>
+              {catalogUnexpectedDistricts.some(districtHasConfiguredRules) && (
+                <p className="warn-text">
+                  Configured non-base districts will be kept. Only unconfigured false detections can be removed automatically.
+                </p>
+              )}
+              <a href={officialCatalog.sourceUrl} target="_blank" rel="noreferrer">
+                View municipal code ↗
+              </a>
+            </div>
+            {catalogSyncConfirm ? (
+              <div className="official-catalog-confirm">
+                <p>
+                  Replace {catalogUnexpectedDistricts.filter(
+                    (districtItem) => !districtHasConfiguredRules(districtItem)
+                  ).length} unconfigured detected entries with the official base districts?
+                </p>
+                <button
+                  type="button"
+                  className="secondary compact"
+                  disabled={saving}
+                  onClick={() => setCatalogSyncConfirm(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="primary compact"
+                  disabled={saving}
+                  onClick={syncOfficialCatalog}
+                >
+                  {saving ? "Correcting…" : "Confirm correction"}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="primary compact"
+                disabled={saving}
+                onClick={syncOfficialCatalog}
+              >
+                Use official districts
+              </button>
+            )}
+          </div>
+        )}
+        {saveState && (
+          <p
+            className={saveState.kind === "ok" ? "status-line save-ok" : "status-line error-text"}
+            role="status"
+          >
+            {saveState.text}
+          </p>
+        )}
         <input
           type="search"
           placeholder="Filter districts…"
@@ -2457,6 +2947,29 @@ function ConfigEditor({ adminEmail, ready }) {
             District code <strong>{district.code}</strong>
           </span>
         </div>
+
+        {catalogPrefill && (
+          <div className="official-rule-prefill" role="status">
+            <div>
+              <strong>
+                {catalogPrefill.keys.length} ordinance value
+                {catalogPrefill.keys.length === 1 ? "" : "s"} prefilled for review
+              </strong>
+              <p>
+                These values are an unpublished draft from {catalogPrefill.catalog.title}. They do
+                not become live until you review and publish this district.
+              </p>
+              {catalogPrefill.district.notes?.length > 0 && (
+                <ul>
+                  {catalogPrefill.district.notes.map((note) => <li key={note}>{note}</li>)}
+                </ul>
+              )}
+            </div>
+            <a href={catalogPrefill.catalog.sourceUrl} target="_blank" rel="noreferrer">
+              View official schedule ↗
+            </a>
+          </div>
+        )}
 
         {ruleTab === "import" && (
         <>
@@ -2772,7 +3285,19 @@ function ConfigEditor({ adminEmail, ready }) {
             onClick={() => {
               localStorage.removeItem(draftKey(district.id));
               setDraftInfo(null);
-              setDraft(draftFromDistrict(district));
+              const resetCatalog = municipalZoningCatalogFor(muni.name, muni.state_code);
+              const resetCatalogDistrict = catalogDistrictFor(
+                muni.name,
+                muni.state_code,
+                district.code
+              );
+              const resetKeys = catalogPrefillKeys(district, resetCatalogDistrict);
+              setDraft(draftFromDistrict(district, resetCatalogDistrict));
+              setCatalogPrefill(
+                resetCatalogDistrict && (resetKeys.length || (!district.name && resetCatalogDistrict.name))
+                  ? { catalog: resetCatalog, district: resetCatalogDistrict, keys: resetKeys }
+                  : null
+              );
               setRuleDraft(
                 (district.zoning_rules ?? []).map((rule) =>
                   normalizeZoningRule(rule, {
@@ -2821,7 +3346,10 @@ function ZoningLayerSetup({
   onLeaveWithoutSaving,
   onSavedAndLeave,
 }) {
-  const [sourceMode, setSourceMode] = useState("draw");
+  // A town with boundaries already published opens on the map, where they can be
+  // seen and amended. A town with none opens on the importer, because fetching a
+  // published layer is the route that should be tried before tracing one.
+  const [sourceMode, setSourceMode] = useState(zoningAreaCount > 0 ? "draw" : "service");
   const [layer, setLayer] = useState(null);
   const [layerBusy, setLayerBusy] = useState(true);
   const [layerName, setLayerName] = useState("");
@@ -2835,6 +3363,9 @@ function ZoningLayerSetup({
   const [publishBusy, setPublishBusy] = useState(false);
   const [publishState, setPublishState] = useState(null);
   const [hasUnfinishedBoundary, setHasUnfinishedBoundary] = useState(false);
+  const [importWarnings, setImportWarnings] = useState([]);
+  const [nameField, setNameField] = useState("");
+  const [createBusy, setCreateBusy] = useState(false);
 
   const districts = muni?.zoning_districts ?? [];
   const incompleteDistrictCount = districts.filter(
@@ -2910,75 +3441,142 @@ function ZoningLayerSetup({
     return [...names].sort();
   }, [features]);
 
+  // Which attribute holds the district code, proposed rather than assumed.
+  // Boundaries drawn in the map carry `district_code` by construction; an
+  // imported layer uses whatever its publisher called it, so the candidates are
+  // scored on their values as well as their names and the operator can override
+  // the choice from the same list.
+  const codeCandidates = useMemo(
+    () => (features.length ? rankCodeFields(features) : []),
+    [features]
+  );
+  const nameCandidates = useMemo(
+    () => (features.length ? rankCodeFields(features, { namesInstead: true }) : []),
+    [features]
+  );
+
   useEffect(() => {
     if (!propertyFields.length) {
       setCodeField("");
       return;
     }
-    const preferred = ["district_code", "code", "district", "zone", "zoning"]
-      .find((name) => propertyFields.some((field) => field.toLowerCase() === name));
     setCodeField((current) =>
       propertyFields.includes(current)
         ? current
-        : propertyFields.find((field) => field.toLowerCase() === preferred) ?? propertyFields[0]
+        : codeCandidates[0]?.name ?? propertyFields[0]
     );
-  }, [propertyFields]);
-
-  const sourceCodes = useMemo(() => {
-    if (!codeField) return [];
-    return [...new Set(
-      features
-        .map((feature) => String(feature?.properties?.[codeField] ?? "").trim())
-        .filter(Boolean)
-    )].sort();
-  }, [features, codeField]);
+  }, [propertyFields, codeCandidates]);
 
   useEffect(() => {
-    const districtCodes = new Map(
-      districts.map((district) => [String(district.code).trim().toUpperCase(), district.code])
+    setNameField((current) =>
+      propertyFields.includes(current) ? current : nameCandidates[0]?.name ?? ""
     );
+  }, [propertyFields, nameCandidates]);
+
+  const sourceCodeCounts = useMemo(
+    () => (codeField ? distinctValues(features, codeField) : []),
+    [features, codeField]
+  );
+  const sourceCodes = useMemo(
+    () => sourceCodeCounts.map((entry) => entry.value),
+    [sourceCodeCounts]
+  );
+
+  // Proposed mapping, recomputed whenever the codes or the town's districts
+  // change, but never over an override the operator has already made.
+  const proposed = useMemo(
+    () => matchDistrictCodes(sourceCodes, districts),
+    [sourceCodes, districts]
+  );
+  useEffect(() => {
     setMapping((current) => {
       const next = {};
       for (const sourceCode of sourceCodes) {
-        next[sourceCode] =
-          current[sourceCode] ?? districtCodes.get(sourceCode.toUpperCase()) ?? "";
+        next[sourceCode] = current[sourceCode] || proposed.mapping[sourceCode] || "";
       }
       return next;
     });
-  }, [districts, sourceCodes]);
+  }, [proposed, sourceCodes]);
+
+  // Source codes with no district to publish against — derived from the mapping
+  // in force rather than recomputed from the layer, so a code the operator has
+  // just pointed at an existing district stops being reported as missing.
+  const gaps = useMemo(() => {
+    if (!codeField) return [];
+    const named = new Map(
+      missingDistricts(features, codeField, nameField, districts).map((gap) => [gap.code, gap.name])
+    );
+    return sourceCodes
+      .filter((sourceCode) => !mapping[sourceCode])
+      .map((code) => ({ code, name: named.get(code) ?? null }));
+  }, [features, codeField, nameField, districts, sourceCodes, mapping]);
 
   if (!muni) {
     return <div className="card admin-setup-page">Municipality not found.</div>;
   }
 
-  const validGeometry = (geometry) =>
-    geometry?.type === "Polygon" || geometry?.type === "MultiPolygon";
-
-  const uploadLayer = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  /**
+   * Accept a layer read by lib/zoningSources.
+   *
+   * The imported polygons replace the draft rather than adding to it: an import
+   * is a statement about the whole municipality's zoning, and merging one into
+   * hand-drawn boundaries would produce a layer that is partly traced and partly
+   * official with no way to tell which is which afterwards.
+   */
+  const acceptImportedLayer = (loaded) => {
+    setLayer({
+      type: "FeatureCollection",
+      features: withBoundaryIds(loaded.features, "imported"),
+    });
+    setLayerName(
+      `${loaded.meta.layerName} — ${loaded.meta.featureCount} polygon` +
+        `${loaded.meta.featureCount === 1 ? "" : "s"} (${loaded.meta.crsName})` +
+        // Worth stating: it means the service refused the browser directly, which
+        // is a fact about that town's server that will be true again next time.
+        (loaded.meta.viaProxy ? " · fetched through the zoning proxy" : "")
+    );
+    setImportWarnings(loaded.warnings ?? []);
     setLayerError("");
     setPublishState(null);
+    // The source URL is the provenance record for what was just imported, so it
+    // is filled in from the service rather than left for someone to retype. A URL
+    // the operator has already entered by hand is theirs and stays.
+    if (loaded.meta.sourceUrl) {
+      setSourceUrl((current) => current.trim() || loaded.meta.sourceUrl);
+    }
+    onDirtyChange(true);
+  };
+
+  /**
+   * Create the districts an imported layer needs and the config does not have.
+   *
+   * They are created with no rules at all, which is the honest state: the
+   * boundary is known and the ordinance's numbers are not. `resolve_parcel_zoning`
+   * reports `rules_missing` for parcels there and the app refuses to calculate,
+   * so publishing the layer first and entering rules district by district is safe
+   * — and is much the better order, because the map shows which districts the
+   * town actually contains.
+   */
+  const createMissingDistricts = async () => {
+    if (gaps.length === 0) return;
+    setCreateBusy(true);
+    setLayerError("");
     try {
-      const parsed = JSON.parse(await file.text());
-      if (parsed?.type !== "FeatureCollection" || !Array.isArray(parsed.features)) {
-        throw new Error("Upload a GeoJSON FeatureCollection.");
+      for (const gap of gaps) {
+        await createDistrict(muni.id, gap.code, gap.name);
       }
-      if (!parsed.features.length || parsed.features.some((feature) => !validGeometry(feature.geometry))) {
-        throw new Error("Every zoning feature must contain a Polygon or MultiPolygon geometry.");
-      }
-      setLayer({
-        ...parsed,
-        features: withBoundaryIds(parsed.features, "uploaded"),
+      await onPublished();
+      setPublishState({
+        kind: "ok",
+        text:
+          `Added ${gaps.length} district${gaps.length === 1 ? "" : "s"} with no rules yet ` +
+          `(${gaps.map((gap) => gap.code).join(", ")}). Enter each one's setbacks and limits ` +
+          "on the Setbacks & limits tab.",
       });
-      setLayerName(file.name);
-      onDirtyChange(true);
     } catch (error) {
-      setLayer(null);
-      setLayerName("");
       setLayerError(error.message ?? String(error));
     } finally {
-      event.target.value = "";
+      setCreateBusy(false);
     }
   };
 
@@ -3012,24 +3610,38 @@ function ZoningLayerSetup({
     onDirtyChange(true);
   };
 
-  const allMatched =
-    features.length > 0 &&
-    features.every((feature) => {
-      const sourceCode = String(feature?.properties?.[codeField] ?? "").trim();
-      return Boolean(sourceCode && mapping[sourceCode]);
-    });
-  const mappedFeatures = allMatched
-    ? features.map((feature, index) => ({
-        district_code: mapping[String(feature?.properties?.[codeField] ?? "").trim()],
-        geometry: feature.geometry,
-        source_feature_id: String(feature.id ?? index + 1),
-        properties: feature.properties ?? {},
-      }))
-    : [];
-  const unmatchedCodes = sourceCodes.filter((sourceCode) => !mapping[sourceCode]);
+  /**
+   * The polygons that will be published: those whose source code is mapped to a
+   * configured district.
+   *
+   * A published layer is deliberately allowed to be a subset of its source. Real
+   * municipal layers carry more than their base districts — Jersey City's own
+   * service files 90-odd named redevelopment plans in the same field as its zone
+   * codes — and requiring every value to be mapped before anything could be
+   * published would leave an operator with two options: give up, or point a
+   * redevelopment-plan polygon at a base district to satisfy the gate. The second
+   * publishes wrong rules, which is the failure this whole application is built
+   * to avoid.
+   *
+   * A subset is safe because of what happens off the edge of it:
+   * `resolve_parcel_zoning` returns `unmapped` for a parcel no published polygon
+   * covers, and the app refuses to calculate. Land left out is land the tool
+   * declines to answer for, which is the correct answer for a district whose
+   * rules nobody has entered.
+   */
+  const mappedFeatures = features
+    .map((feature, index) => ({
+      district_code: mapping[String(feature?.properties?.[codeField] ?? "").trim()] ?? "",
+      geometry: feature.geometry,
+      source_feature_id: String(feature.id ?? index + 1),
+      properties: feature.properties ?? {},
+    }))
+    .filter((feature) => Boolean(feature.district_code));
+  const unmappedFeatureCount = features.length - mappedFeatures.length;
+  const readyToPublish = mappedFeatures.length > 0;
 
   const testBoundary = async () => {
-    if (!testAddress.trim() || !allMatched) return;
+    if (!testAddress.trim() || !readyToPublish) return;
     setTestBusy(true);
     setBoundaryTestResult(null);
     try {
@@ -3037,20 +3649,38 @@ function ZoningLayerSetup({
       if (!matches.length) throw new Error("No matching address was found.");
       const match = matches[0];
       const location = point([match.lon, match.lat]);
-      const featureIndex = features.findIndex((feature) =>
-        booleanPointInPolygon(location, feature)
-      );
-      if (featureIndex < 0) {
+      const containing = features.filter((feature) => booleanPointInPolygon(location, feature));
+      const codeOf = (feature) => String(feature?.properties?.[codeField] ?? "").trim();
+
+      if (containing.length === 0) {
         setBoundaryTestResult({
           kind: "error",
-          text: `${match.full_label ?? match.address} is outside the uploaded boundaries.`,
+          text: `${match.full_label ?? match.address} is outside the boundaries in this draft.`,
         });
         return;
       }
-      const sourceCode = String(features[featureIndex]?.properties?.[codeField] ?? "").trim();
+
+      // Overlapping polygons are normal in a published layer — an overlay or a
+      // redevelopment plan sits on top of the base district. The mapped one is
+      // the one that answers here, because it is the one being published.
+      const published = containing.find((feature) => mapping[codeOf(feature)]);
+      if (!published) {
+        setBoundaryTestResult({
+          kind: "error",
+          text:
+            `${match.full_label ?? match.address} falls in ${containing
+              .map(codeOf)
+              .join(", ")}, which ${containing.length === 1 ? "is" : "are"} not mapped to a ` +
+            "configured district, so this address would not resolve.",
+        });
+        return;
+      }
+      const alsoIn = containing.filter((feature) => feature !== published).map(codeOf);
       setBoundaryTestResult({
         kind: "ok",
-        text: `${match.full_label ?? match.address} matches district ${mapping[sourceCode]}.`,
+        text:
+          `${match.full_label ?? match.address} matches district ${mapping[codeOf(published)]}` +
+          (alsoIn.length ? `. It also falls inside unpublished ${alsoIn.join(", ")}.` : "."),
       });
     } catch (error) {
       setBoundaryTestResult({ kind: "error", text: error.message ?? String(error) });
@@ -3129,21 +3759,21 @@ function ZoningLayerSetup({
           <span className="setup-step-number">1</span>
           <div className="setup-step-content">
             <div className="setup-step-heading">
-              <div><h3>Draw or upload zoning boundaries</h3><p>Add Polygon or MultiPolygon boundaries in WGS84 coordinates.</p></div>
+              <div><h3>Import, upload or draw zoning boundaries</h3><p>A published GIS layer is the best source. Drawing by hand is the fallback when the town has none.</p></div>
               {features.length > 0 && <em>✓ {features.length} polygon{features.length === 1 ? "" : "s"}</em>}
             </div>
             <div className="setup-source-tabs" role="tablist" aria-label="Boundary source">
-              <button type="button" className={sourceMode === "draw" ? "active" : ""} onClick={() => setSourceMode("draw")}>Draw boundaries</button>
-              <button type="button" className={sourceMode === "upload" ? "active" : ""} onClick={() => setSourceMode("upload")}>Upload GeoJSON</button>
+              <button type="button" role="tab" aria-selected={sourceMode === "service"} className={sourceMode === "service" ? "active" : ""} onClick={() => setSourceMode("service")}>Fetch from GIS service</button>
+              <button type="button" role="tab" aria-selected={sourceMode === "upload"} className={sourceMode === "upload" ? "active" : ""} onClick={() => setSourceMode("upload")}>Upload file</button>
+              <button type="button" role="tab" aria-selected={sourceMode === "draw"} className={sourceMode === "draw" ? "active" : ""} onClick={() => setSourceMode("draw")}>Draw boundaries</button>
             </div>
-            {sourceMode === "upload" ? (
-              <div className="setup-upload-box">
-                <label className="secondary compact file-button">
-                  Choose GeoJSON
-                  <input type="file" accept=".geojson,.json,application/geo+json,application/json" onChange={uploadLayer} />
-                </label>
-                <span>{layerName || "No boundary file selected"}</span>
-              </div>
+            {sourceMode === "service" || sourceMode === "upload" ? (
+              <ZoningSourceImport
+                mode={sourceMode}
+                muni={muni}
+                onLoaded={acceptImportedLayer}
+                onError={setLayerError}
+              />
             ) : (
               layerBusy ? (
                 <p className="status-line">Loading published zoning boundaries…</p>
@@ -3161,12 +3791,42 @@ function ZoningLayerSetup({
                 />
               )
             )}
-            {layerError && <p className="status-line error-text">{layerError}</p>}
-            {unmatchedCodes.length > 0 && (
-              <p className="status-line error-text">
-                No configured district matches {unmatchedCodes.join(", ")}. Add or rename the district rules before publishing.
-              </p>
+            {layerName && sourceMode !== "draw" && (
+              <p className="status-line save-ok">{layerName}</p>
             )}
+            {importWarnings.map((warning) => (
+              <p className="status-line warn-text" key={warning}>⚠ {warning}</p>
+            ))}
+            {layerError && <p className="status-line error-text">{layerError}</p>}
+
+            {features.length > 0 && propertyFields.length > 0 && (
+              <ZoningCodeMapping
+                propertyFields={propertyFields}
+                codeCandidates={codeCandidates}
+                nameCandidates={nameCandidates}
+                codeField={codeField}
+                nameField={nameField}
+                onCodeField={(field) => {
+                  setCodeField(field);
+                  setMapping({});
+                  setBoundaryTestResult(null);
+                }}
+                onNameField={setNameField}
+                sourceCodeCounts={sourceCodeCounts}
+                districts={districts}
+                mapping={mapping}
+                looseMatches={proposed.looseMatches}
+                gaps={gaps}
+                createBusy={createBusy}
+                onMap={(sourceCode, districtCode) => {
+                  setMapping((current) => ({ ...current, [sourceCode]: districtCode }));
+                  setBoundaryTestResult(null);
+                  onDirtyChange(true);
+                }}
+                onCreateMissing={createMissingDistricts}
+              />
+            )}
+
             <label className="setup-source-url">
               Source map URL <small>Recommended for provenance</small>
               <input
@@ -3182,26 +3842,37 @@ function ZoningLayerSetup({
           </div>
         </li>
 
-        <li className={testResult?.kind === "ok" ? "setup-step complete" : allMatched ? "setup-step current" : "setup-step locked"}>
+        <li className={testResult?.kind === "ok" ? "setup-step complete" : readyToPublish ? "setup-step current" : "setup-step locked"}>
           <span className="setup-step-number">2</span>
           <div className="setup-step-content">
             <div className="setup-step-heading"><div><h3>Test an address</h3><p>Confirm that a real address lands in the expected district polygon.</p></div>{testResult?.kind === "ok" && <em>✓ Passed</em>}</div>
             <div className="setup-test-row">
-              <input type="search" value={testAddress} placeholder={`Address in ${muni.name}`} disabled={!allMatched || testBusy} onChange={(event) => setTestAddress(event.target.value)} />
-              <button type="button" className="secondary compact" disabled={!allMatched || !testAddress.trim() || testBusy} onClick={testBoundary}>{testBusy ? "Testing…" : "Test address"}</button>
+              <input type="search" value={testAddress} placeholder={`Address in ${muni.name}`} disabled={!readyToPublish || testBusy} onChange={(event) => setTestAddress(event.target.value)} />
+              <button type="button" className="secondary compact" disabled={!readyToPublish || !testAddress.trim() || testBusy} onClick={testBoundary}>{testBusy ? "Testing…" : "Test address"}</button>
             </div>
             {testResult && <p className={testResult.kind === "ok" ? "status-line save-ok" : "status-line error-text"}>{testResult.text}</p>}
           </div>
         </li>
 
-        <li className={allMatched ? "setup-step current" : "setup-step locked"}>
+        <li className={readyToPublish ? "setup-step current" : "setup-step locked"}>
           <span className="setup-step-number">3</span>
           <div className="setup-step-content">
             <div className="setup-step-heading"><div><h3>Publish municipality</h3><p>Replace this municipality’s zoning layer with the reviewed boundaries.</p></div></div>
+            {features.length > 0 && (
+              <p className="status-line">
+                {mappedFeatures.length} of {features.length} polygon
+                {features.length === 1 ? "" : "s"} will be published
+                {unmappedFeatureCount > 0
+                  ? `. ${unmappedFeatureCount} unmapped polygon${
+                      unmappedFeatureCount === 1 ? "" : "s"
+                    } will not be, and parcels there will report no zoning rather than the wrong district.`
+                  : "."}
+              </p>
+            )}
             <button
               type="button"
               className="primary"
-              disabled={!allMatched || publishBusy || hasUnfinishedBoundary}
+              disabled={!readyToPublish || publishBusy || hasUnfinishedBoundary}
               onClick={publish}
             >
               {publishBusy ? "Publishing…" : "Publish municipality"}
@@ -3249,6 +3920,356 @@ function ZoningLayerSetup({
               </button>
             </div>
           </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const FILE_ACCEPT = ".geojson,.json,.zip,.kml,.kmz,.gpkg";
+
+/**
+ * Read a zoning layer from a GIS service or a vector file.
+ *
+ * The flow is the same for both, and deliberately two steps rather than one:
+ * probing a source lists the layers it offers, and only then is one read. A
+ * county-wide GeoPackage and a nine-layer FeatureServer both need that choice
+ * made, and making it explicit means the common one-layer case is the same code
+ * path with the choice already answered.
+ */
+function ZoningSourceImport({ mode, muni, onLoaded, onError }) {
+  const [url, setUrl] = useState("");
+  const [probe, setProbe] = useState(null);
+  const [selectedKey, setSelectedKey] = useState("");
+  const [busy, setBusy] = useState("");
+  const [progress, setProgress] = useState(null);
+  const [confineToTown, setConfineToTown] = useState(true);
+  const abortRef = useRef(null);
+
+  // Nothing about a probe of one town's service survives a move to another town.
+  useEffect(() => {
+    setProbe(null);
+    setSelectedKey("");
+    setProgress(null);
+    setUrl("");
+  }, [muni?.id, mode]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  const classified = useMemo(() => classifyUrl(url), [url]);
+  const selected = probe?.layers.find((layer) => layer.key === selectedKey) ?? probe?.layers[0];
+
+  const run = async (label, work) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setBusy(label);
+    setProgress(null);
+    onError("");
+    try {
+      await work(controller.signal);
+    } catch (error) {
+      if (error?.name !== "AbortError") onError(error.message ?? String(error));
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        setBusy("");
+        // A failed load leaves its last progress reading on screen otherwise,
+        // reading as though features were still arriving.
+        setProgress(null);
+      }
+    }
+  };
+
+  const probeUrl = () =>
+    run("Reading service…", async (signal) => {
+      const result = await probeUrlSource(url, { signal });
+      setProbe(result);
+      setSelectedKey(result.layers[0]?.key ?? "");
+      // One layer needs no choice, so it loads immediately — the two-step flow
+      // exists for the ambiguous case and should not be felt in the common one.
+      if (result.layers.length === 1) await load(result.layers[0], signal);
+    });
+
+  const probeFile = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    run(`Reading ${file.name}…`, async (signal) => {
+      const result = await probeFileSource(file);
+      setProbe(result);
+      setSelectedKey(result.layers[0]?.key ?? "");
+      if (result.layers.length === 1) await load(result.layers[0], signal);
+    });
+  };
+
+  const load = async (layer, existingSignal) => {
+    const work = async (signal) => {
+      // Confining a county-wide or statewide service to the town's own extent is
+      // both a correctness and a size measure: without it, importing a county
+      // zoning layer publishes every neighbouring town's districts too.
+      const bbox =
+        confineToTown && isRemote(layer.target.kind)
+          ? await njginMunicipalityExtent(muni, signal)
+          : null;
+      const loaded = await loadZoningLayer(layer.target, {
+        bbox,
+        signal,
+        onProgress: setProgress,
+      });
+      setProgress(null);
+      onLoaded(loaded);
+    };
+    return existingSignal ? work(existingSignal) : run("Loading features…", work);
+  };
+
+  return (
+    <div className="setup-import">
+      {mode === "service" ? (
+        <>
+          <label className="setup-import-url">
+            Layer URL
+            <div className="setup-import-row">
+              <input
+                type="url"
+                value={url}
+                placeholder="https://services.arcgis.com/…/FeatureServer/0"
+                onChange={(event) => {
+                  setUrl(event.target.value);
+                  setProbe(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && url.trim() && !busy) {
+                    event.preventDefault();
+                    probeUrl();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="secondary compact"
+                disabled={!url.trim() || Boolean(busy)}
+                onClick={probeUrl}
+              >
+                {busy || "Fetch layer"}
+              </button>
+            </div>
+          </label>
+          <p className="admin-side-note">
+            {classified.label
+              ? `Recognised as: ${classified.label}.`
+              : "Accepts an ArcGIS FeatureServer or MapServer layer or service URL, an ArcGIS " +
+                "Online item link, an OGC WFS endpoint, or a link to a .geojson file."}
+          </p>
+        </>
+      ) : (
+        <>
+          <div className="setup-upload-box">
+            <label className={busy ? "secondary compact file-button disabled" : "secondary compact file-button"}>
+              Choose file
+              <input type="file" accept={FILE_ACCEPT} disabled={Boolean(busy)} onChange={probeFile} />
+            </label>
+            <span>{busy || probe?.title || "No boundary file selected"}</span>
+          </div>
+          <p className="admin-side-note">
+            GeoJSON, zipped shapefile (.shp with its .dbf and .prj), KML, KMZ or GeoPackage. A
+            shapefile or GeoPackage in State Plane coordinates is converted automatically.
+          </p>
+        </>
+      )}
+
+      {probe && probe.layers.length > 1 && (
+        <div className="setup-import-layers">
+          <label>
+            {probe.layers.length} layers in {probe.title} — choose the zoning boundaries
+            <select value={selected?.key ?? ""} onChange={(event) => setSelectedKey(event.target.value)}>
+              {probe.layers.map((layer) => (
+                <option key={layer.key} value={layer.key}>
+                  {layer.label}
+                  {layer.detail ? ` — ${layer.detail}` : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={!selected || Boolean(busy)}
+            onClick={() => load(selected)}
+          >
+            {busy || "Load layer"}
+          </button>
+        </div>
+      )}
+
+      {isRemote(selected?.target?.kind ?? (mode === "service" ? "arcgis" : "")) && (
+        <label className="setup-import-confine">
+          <input
+            type="checkbox"
+            checked={confineToTown}
+            onChange={(event) => setConfineToTown(event.target.checked)}
+          />
+          Only load boundaries near {muni.name} — leave on when the service covers a county or the
+          whole state
+        </label>
+      )}
+
+      {progress && (
+        <p className="status-line">
+          Loading {progress.loaded.toLocaleString()}
+          {progress.total ? ` of ${progress.total.toLocaleString()}` : ""} features…
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Sources read over the network, where a bounding-box filter is worth applying. */
+const isRemote = (kind) => kind === "arcgis" || kind === "wfs";
+
+// Above this many new districts, the create action asks twice.
+const BULK_DISTRICT_CONFIRM = 8;
+
+/**
+ * A readable list of codes. A county layer can carry a hundred, and printing
+ * them all turns the one sentence that explains the problem into a wall.
+ */
+function summarizeCodes(codes, limit = 8) {
+  if (codes.length <= limit) return codes.join(", ");
+  return `${codes.slice(0, limit).join(", ")} and ${codes.length - limit} more`;
+}
+
+/**
+ * Choose the attribute holding the district code, and map its values onto the
+ * town's configured districts.
+ *
+ * This is the one step of an import that cannot be automated away, and the reason
+ * is worth stating: the importer can see that a field called ZONE holds short
+ * repeated codes, but only a person can confirm that the layer's `R-1` is the
+ * `R-1` whose setbacks are on file. So the proposal is made, the evidence behind
+ * it is shown — the field's distinct values and how many polygons carry each —
+ * and the operator confirms or changes it.
+ */
+function ZoningCodeMapping({
+  propertyFields,
+  codeCandidates,
+  nameCandidates,
+  codeField,
+  nameField,
+  onCodeField,
+  onNameField,
+  sourceCodeCounts,
+  districts,
+  mapping,
+  looseMatches,
+  gaps,
+  createBusy,
+  onMap,
+  onCreateMissing,
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const looseByCode = new Map(looseMatches.map((entry) => [entry.sourceCode, entry.districtCode]));
+  const suggested = codeCandidates[0]?.name;
+
+  // A choice the operator makes invalidates a pending confirmation.
+  useEffect(() => setConfirming(false), [codeField, gaps.length]);
+
+  return (
+    <div className="setup-match">
+      <div className="setup-match-fields">
+        <label>
+          District code field
+          <select value={codeField} onChange={(event) => onCodeField(event.target.value)}>
+            {propertyFields.map((field) => (
+              <option key={field} value={field}>
+                {field}
+                {field === suggested ? " (suggested)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          District name field <small>optional</small>
+          <select value={nameField} onChange={(event) => onNameField(event.target.value)}>
+            <option value="">— none —</option>
+            {propertyFields.map((field) => (
+              <option key={field} value={field}>
+                {field}
+                {field === nameCandidates[0]?.name ? " (suggested)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <ul className="setup-match-list">
+        {sourceCodeCounts.map(({ value, count }) => (
+          <li key={value}>
+            <label>
+              <span className="setup-match-code">
+                {value}
+                <small>
+                  {count} polygon{count === 1 ? "" : "s"}
+                </small>
+              </span>
+              <select
+                value={mapping[value] ?? ""}
+                className={mapping[value] ? "" : "needs-attention"}
+                onChange={(event) => onMap(value, event.target.value)}
+              >
+                <option value="">— not published —</option>
+                {districts.map((district) => (
+                  <option key={district.code} value={district.code}>
+                    {district.code}
+                    {district.name ? ` — ${district.name}` : ""}
+                  </option>
+                ))}
+              </select>
+              {looseByCode.get(value) === mapping[value] && mapping[value] && (
+                <em className="setup-match-note">matched to {mapping[value]} ignoring punctuation</em>
+              )}
+            </label>
+          </li>
+        ))}
+      </ul>
+
+      {gaps.length > 0 && (
+        <div className="setup-match-gaps">
+          <p className="status-line warn-text">
+            {gaps.length} code{gaps.length === 1 ? "" : "s"} in this layer{" "}
+            {gaps.length === 1 ? "has" : "have"} no configured district:{" "}
+            {summarizeCodes(gaps.map((gap) => gap.code))}. Their polygons will not be published —
+            leave it that way for anything that is not a base zoning district.
+          </p>
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={createBusy}
+            onClick={() => {
+              // Creating districts writes to the database, and a layer that mixes
+              // base districts with overlays or redevelopment plans can offer
+              // dozens of codes at once. Past a handful, the click is confirmed.
+              if (gaps.length > BULK_DISTRICT_CONFIRM && !confirming) {
+                setConfirming(true);
+                return;
+              }
+              setConfirming(false);
+              onCreateMissing();
+            }}
+          >
+            {createBusy
+              ? "Adding districts…"
+              : confirming
+                ? `Add all ${gaps.length} districts — confirm`
+                : `Add ${gaps.length} district${gaps.length === 1 ? "" : "s"} with no rules yet`}
+          </button>
+          {confirming && (
+            <p className="status-line warn-text">
+              This creates {gaps.length} districts with no setbacks or limits, one per unmatched
+              code. Map anything that is an overlay or a redevelopment plan to an existing district
+              first, or leave it unpublished.
+            </p>
+          )}
         </div>
       )}
     </div>
